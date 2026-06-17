@@ -1,0 +1,9 @@
+# ArjioBot backend runtime dependencies.
+#
+# The backend ships its own FastAPI-compatible local shim (./fastapi,
+# ./pydantic) and a stdlib-only HTTP server (arjiobot/api/dev_server.py).
+# There are no third-party runtime dependencies: Bitget API calls are
+# hand-rolled with urllib/http/hmac/hashlib, not an SDK package.
+#
+# This file exists so platform builders (e.g. Railway/Nixpacks) detect a
+# Python project and run pip install; there is nothing to install.

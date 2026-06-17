@@ -1,6 +1,10 @@
 data/.credential_encryption_key
 data/bitget_accounts.vault.json
 
+# Environment secrets
+.env
+.env.local
+
 # Python generated files
 __pycache__/
 *.py[cod]
@@ -9,6 +13,11 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+venv/
+.venv/
+
+# OS files
+.DS_Store
 
 # Frontend generated files
 frontend/node_modules/
