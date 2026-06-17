@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>FVG Engine Validation Report</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; }
+table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; }
+th { background: #e8f6f3; }
+.pass { color: #117a65; font-weight: 700; }
+</style></head>
+<body>
+<h1>FVG Engine Validation Report</h1>
+<p class="pass">PASS / FAIL Summary: PASS</p>
+<h2>Summary</h2><ul><li><strong>Tests executed</strong>: 23</li>
+<li><strong>Tests passed</strong>: 23</li>
+<li><strong>Detection accuracy</strong>: PASS</li>
+<li><strong>Strategy rule validation</strong>: PASS</li>
+<li><strong>Tap rule validation</strong>: PASS</li>
+<li><strong>Benchmark candles</strong>: 3500</li>
+<li><strong>Benchmark duration ms</strong>: 373.37</li>
+<li><strong>Benchmark candles per second</strong>: 9374.09</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Candlesticks, FVG Zones, Taps, Strategy Links</h2>
+<table><thead><tr><th>C2 Timestamp</th><th>Symbol</th><th>Timeframe</th><th>Direction</th><th>FVG Zone</th><th>Tapped</th><th>Strategy FVG</th><th>Related Swing</th><th>Related Expansion</th></tr></thead>
+<tbody><tr><td>2026-01-01T00:02:00+00:00</td><td>BTCUSDT</td><td>1M</td><td>BEARISH</td><td>94 - 98</td><td>NO</td><td>YES</td><td>swg_63fcb333aac04e2967043404</td><td>exp_561b23ab87a2d27e40b531a3</td></tr>
+<tr><td>2026-01-01T00:05:00+00:00</td><td>BTCUSDT</td><td>1M</td><td>BULLISH</td><td>92 - 96</td><td>NO</td><td>YES</td><td>swg_703f46569893e8ec3ed936b5</td><td>exp_15a195722c7cb29be967bd30</td></tr></tbody></table>
+<h2>Known Limitations</h2><ul><li>v1 does not implement Setup Tracker orchestration.</li>
+<li>v1 storage is in-memory behind deterministic service APIs.</li>
+<li>v1 HTF behavior is exposed as reusable validation rules.</li></ul>
+</body></html>

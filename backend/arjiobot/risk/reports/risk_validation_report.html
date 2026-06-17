@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Risk Engine Validation Report</title>
+<style>body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; } table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; } th { background: #fdebd0; } .pass { color: #117a65; font-weight: 700; }</style></head>
+<body><h1>Risk Engine Validation Report</h1><p class="pass">PASS / FAIL Summary: PASS</p><h2>Summary</h2><ul><li><strong>Tests executed</strong>: 31</li>
+<li><strong>Tests passed</strong>: 31</li>
+<li><strong>Position sizing validation</strong>: PASS</li>
+<li><strong>Leverage validation</strong>: PASS</li>
+<li><strong>Loss-limit validation</strong>: PASS</li>
+<li><strong>Exposure validation</strong>: PASS</li>
+<li><strong>Trade plan validation</strong>: PASS</li>
+<li><strong>Backtester compatibility validation</strong>: PASS</li>
+<li><strong>Execution compatibility validation</strong>: PASS</li>
+<li><strong>Benchmark signals</strong>: 50</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Trade Plans</h2><table><thead><tr><th>Plan</th><th>Symbol</th><th>Status</th><th>Rejections</th><th>Risk</th><th>Size</th><th>Leverage</th><th>RR</th></tr></thead><tbody><tr><td>tpl_c3449fe0b04c2e2ebbd7ebeb</td><td>BTCUSDT</td><td>APPROVED</td><td></td><td>100</td><td>3.333333333333333333333333333</td><td>3.000000000000000000000000000</td><td>1.5</td></tr>
+<tr><td>tpl_638c74ecdf7f44556eb70884</td><td>BTCUSDT</td><td>REJECTED</td><td>MISSING_ENTRY_REFERENCE_PRICE</td><td>100</td><td>0</td><td>0</td><td>0</td></tr></tbody></table>
+<h2>Known Limitations</h2><ul><li>v1 supports bearish MARKET_SELL_READY only.</li>
+<li>v1 does not call Bitget or place orders.</li>
+<li>v1 validates Strategy/Setup stop and target references without recalculating them.</li></ul></body></html>

@@ -1,0 +1,162 @@
+"""Signal risk validation."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+from arjiobot.risk.exposure import exposure_after_trade, has_same_symbol_exposure
+from arjiobot.risk.isolated_margin import calculate_isolated_margin_plan
+from arjiobot.risk.loss_limits import daily_loss_capacity_remaining, weekly_loss_capacity_remaining
+from arjiobot.risk.position_sizing import calculate_position_size, calculate_reward_distance, calculate_risk_distance, calculate_rr_ratio
+from arjiobot.risk.rr_profiles import calculate_fixed_risk_trade_math
+from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, RiskRejectionReason
+from arjiobot.strategy.strategy_models import SignalAction, TradeSignal
+
+
+def validate_signal_risk(
+    *,
+    signal: TradeSignal,
+    risk_config: RiskConfig,
+    account_snapshot: AccountSnapshot,
+    open_risk_state: OpenRiskState,
+) -> tuple[tuple[RiskRejectionReason, ...], dict[str, Decimal]]:
+    """Validate risk constraints and return rejection reasons plus metrics."""
+    reasons: list[RiskRejectionReason] = []
+    metrics: dict[str, Decimal] = {}
+    if signal.action is not SignalAction.MARKET_SELL_READY:
+        reasons.append(RiskRejectionReason.UNSUPPORTED_SIGNAL_ACTION)
+    if signal.entry_reference_price is None:
+        reasons.append(RiskRejectionReason.MISSING_ENTRY_REFERENCE_PRICE)
+        return tuple(reasons), metrics
+    if risk_config.fixed_risk_amount is None or risk_config.fixed_risk_amount <= Decimal("0"):
+        reasons.append(RiskRejectionReason.INVALID_FIXED_RISK_AMOUNT)
+    if signal.stop_reference_price is None or signal.stop_reference_price <= signal.entry_reference_price:
+        reasons.append(RiskRejectionReason.INVALID_STOP_RELATIONSHIP)
+    if reasons:
+        return tuple(reasons), metrics
+
+    time_based_exit = risk_config.selected_rr_profile == "TIME_BASED_EXIT"
+    if time_based_exit:
+        risk_distance_for_size = abs(signal.stop_reference_price - signal.entry_reference_price)
+        if risk_distance_for_size <= Decimal("0"):
+            reasons.append(RiskRejectionReason.RISK_DISTANCE_ZERO_OR_NEGATIVE)
+            return tuple(reasons), metrics
+        rr_math = type(
+            "TimeExitRiskMath",
+            (),
+            {
+                "fixed_risk_amount": risk_config.fixed_risk_amount,
+                "selected_rr_value": Decimal("0"),
+                "target_reward_amount": Decimal("0"),
+                "actual_risk_amount": risk_config.fixed_risk_amount,
+                "expected_reward_amount": Decimal("0"),
+                "actual_rr": Decimal("0"),
+                "take_profit": None,
+            },
+        )()
+    else:
+        try:
+            rr_math = calculate_fixed_risk_trade_math(
+                direction=signal.direction,
+                entry=signal.entry_reference_price,
+                stop_loss=signal.stop_reference_price,
+                fixed_risk_amount=risk_config.fixed_risk_amount,
+                selected_rr_profile=risk_config.selected_rr_profile,
+                final_target_price=signal.final_target_price,
+            )
+        except ValueError as exc:
+            reason = RiskRejectionReason.INVALID_RR_PROFILE if "RR" in str(exc) else RiskRejectionReason.FIXED_RISK_VALIDATION_FAILED
+            reasons.append(reason)
+            metrics["risk_error"] = Decimal("0")
+            return tuple(reasons), metrics
+
+    risk_distance = calculate_risk_distance(entry_reference_price=signal.entry_reference_price, stop_reference_price=signal.stop_reference_price)
+    reward_distance = Decimal("0") if time_based_exit else calculate_reward_distance(entry_reference_price=signal.entry_reference_price, final_target_price=rr_math.take_profit)
+    rr_ratio = Decimal("0") if time_based_exit else calculate_rr_ratio(
+        entry_reference_price=signal.entry_reference_price,
+        stop_reference_price=signal.stop_reference_price,
+        final_target_price=rr_math.take_profit,
+    )
+    metrics["risk_distance"] = risk_distance
+    metrics["reward_distance"] = reward_distance
+    metrics["rr_ratio"] = rr_ratio
+    metrics["fixed_risk_amount"] = rr_math.fixed_risk_amount
+    metrics["selected_rr_value"] = rr_math.selected_rr_value
+    metrics["target_reward_amount"] = rr_math.target_reward_amount
+    metrics["actual_risk_amount"] = rr_math.actual_risk_amount
+    metrics["expected_reward_amount"] = rr_math.expected_reward_amount
+    metrics["actual_rr"] = rr_math.actual_rr
+    metrics["calculated_take_profit_price"] = rr_math.take_profit
+    if risk_distance <= Decimal("0"):
+        reasons.append(RiskRejectionReason.RISK_DISTANCE_ZERO_OR_NEGATIVE)
+    if not time_based_exit and rr_ratio < risk_config.minimum_rr_ratio:
+        reasons.append(RiskRejectionReason.RR_TOO_LOW)
+
+    position = calculate_position_size(
+        risk_amount=rr_math.fixed_risk_amount,
+        entry_reference_price=signal.entry_reference_price,
+        stop_reference_price=signal.stop_reference_price,
+    )
+    try:
+        isolated = calculate_isolated_margin_plan(
+            entry_price=signal.entry_reference_price,
+            stop_loss=signal.stop_reference_price,
+            margin_amount=rr_math.fixed_risk_amount,
+            max_leverage=risk_config.max_leverage,
+        )
+    except ValueError as exc:
+        if "BLOCKED_REQUIRED_LEVERAGE_EXCEEDS_MAX" in str(exc):
+            reasons.append(RiskRejectionReason.REQUIRED_LEVERAGE_EXCEEDS_MAX)
+            reasons.append(RiskRejectionReason.LEVERAGE_EXCEEDS_MAX)
+        else:
+            reasons.append(RiskRejectionReason.FIXED_RISK_VALIDATION_FAILED)
+        isolated = None
+    if isolated is not None:
+        metrics["position_size"] = isolated.quantity
+        metrics["notional_value"] = isolated.notional_position_size
+        metrics["required_leverage"] = isolated.required_leverage
+        metrics["approved_leverage"] = isolated.applied_leverage
+        metrics["required_margin"] = isolated.margin_amount
+        metrics["applied_margin_amount"] = isolated.margin_amount
+        metrics["price_risk_percent"] = isolated.price_risk_percent
+        metrics["max_allowed_leverage"] = isolated.max_allowed_leverage
+        metrics["quantity"] = isolated.quantity
+        metrics["expected_loss_at_sl"] = isolated.expected_loss_at_sl
+    else:
+        metrics["position_size"] = position.position_size
+        metrics["notional_value"] = position.notional_value
+        metrics["required_leverage"] = Decimal("0")
+        metrics["approved_leverage"] = Decimal("0")
+        metrics["required_margin"] = Decimal("0")
+    if open_risk_state.open_trade_count >= risk_config.max_open_trades:
+        reasons.append(RiskRejectionReason.MAX_OPEN_TRADES_REACHED)
+
+    daily_remaining = daily_loss_capacity_remaining(
+        max_daily_loss=risk_config.max_daily_loss,
+        current_daily_pnl=open_risk_state.current_daily_pnl,
+        reserved_risk_amount=open_risk_state.reserved_risk_amount,
+    )
+    weekly_remaining = weekly_loss_capacity_remaining(
+        max_weekly_loss=risk_config.max_weekly_loss,
+        current_weekly_pnl=open_risk_state.current_weekly_pnl,
+        reserved_risk_amount=open_risk_state.reserved_risk_amount,
+    )
+    metrics["daily_loss_capacity_remaining"] = daily_remaining
+    metrics["weekly_loss_capacity_remaining"] = weekly_remaining
+    if risk_config.risk_amount_per_trade > daily_remaining:
+        reasons.append(RiskRejectionReason.DAILY_LOSS_LIMIT_REACHED)
+    if risk_config.risk_amount_per_trade > weekly_remaining:
+        reasons.append(RiskRejectionReason.WEEKLY_LOSS_LIMIT_REACHED)
+    if position.position_size < risk_config.min_position_size:
+        reasons.append(RiskRejectionReason.POSITION_SIZE_TOO_SMALL)
+    if position.position_size > risk_config.max_position_size:
+        reasons.append(RiskRejectionReason.POSITION_SIZE_TOO_LARGE)
+    if not risk_config.allow_multiple_positions_same_symbol and has_same_symbol_exposure(symbol=signal.symbol, open_symbol_exposure=open_risk_state.open_symbol_exposure):
+        reasons.append(RiskRejectionReason.SAME_SYMBOL_EXPOSURE_BLOCKED)
+    exposure_after = exposure_after_trade(symbol=signal.symbol, open_symbol_exposure=open_risk_state.open_symbol_exposure, notional_value=position.notional_value)
+    metrics["exposure_after_trade"] = exposure_after
+    if exposure_after > risk_config.max_symbol_exposure:
+        reasons.append(RiskRejectionReason.SYMBOL_EXPOSURE_LIMIT_REACHED)
+    if account_snapshot.account_equity <= Decimal("0"):
+        reasons.append(RiskRejectionReason.ACCOUNT_EQUITY_TOO_LOW)
+    return tuple(reasons), metrics

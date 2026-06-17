@@ -1,0 +1,61 @@
+profile,stage,count,percent_of_candidates,example_pair,example_timestamps,exact_rejection_reason,file_function_responsible
+PROFILE_F_VOLUME,16M swing candidates,602,100.00,SOLUSDT,not individually persisted by current funnel,baseline candidates,16M swing candidates
+PROFILE_F_VOLUME,C3 expansion / ratio rejected,403,66.94,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",ratio outside profile range or no displacement expansion,C3 expansion / ratio rejected
+PROFILE_F_VOLUME,passed expansion,199,33.06,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",passed,passed expansion
+PROFILE_F_VOLUME,16M FVG missing,129,21.43,SOLUSDT,not individually persisted by current funnel,no immediate matching 16M FVG from C3,16M FVG missing
+PROFILE_F_VOLUME,passed 16M FVG,70,11.63,SOLUSDT,not individually persisted by current funnel,passed,passed 16M FVG
+PROFILE_F_VOLUME,12M FVG missing / same-leg failed,3,0.50,SOLUSDT,not individually persisted by current funnel,no same-leg 12M FVG,12M FVG missing / same-leg failed
+PROFILE_F_VOLUME,passed 12M FVG,67,11.13,SOLUSDT,not individually persisted by current funnel,passed,passed 12M FVG
+PROFILE_F_VOLUME,8M FVG missing / same-leg failed,0,0.00,SOLUSDT,not individually persisted by current funnel,no same-leg 8M FVG,8M FVG missing / same-leg failed
+PROFILE_F_VOLUME,passed 8M FVG,67,11.13,SOLUSDT,not individually persisted by current funnel,passed,passed 8M FVG
+PROFILE_F_VOLUME,retracement window expired / no 1M entry into 12M FVG,30,4.98,SOLUSDT,not individually persisted by current funnel,no valid 1M retrace within 3 completed 8M candles,retracement window expired / no 1M entry into 12M FVG
+PROFILE_F_VOLUME,passed retrace,37,6.15,SOLUSDT,not individually persisted by current funnel,passed,passed retrace
+PROFILE_F_VOLUME,1M close beyond 12M FVG boundary,0,0.00,SOLUSDT,not individually persisted by current funnel,direct entry boundary failure,1M close beyond 12M FVG boundary
+PROFILE_F_VOLUME,duplicate 12M FVG trade blocked,17727,2944.68,SOLUSDT,not individually persisted by current funnel,additional taps ignored after first entry,duplicate 12M FVG trade blocked
+PROFILE_F_VOLUME,signals generated / entry ready,37,6.15,SOLUSDT,not individually persisted by current funnel,passed,signals generated / entry ready
+PROFILE_F_VOLUME,risk rejected,0,0.00,SOLUSDT,not individually persisted by current funnel,risk math rejected trade,risk rejected
+PROFILE_F_BALANCED,16M swing candidates,602,100.00,SOLUSDT,not individually persisted by current funnel,baseline candidates,16M swing candidates
+PROFILE_F_BALANCED,C3 expansion / ratio rejected,533,88.54,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",ratio outside profile range or no displacement expansion,C3 expansion / ratio rejected
+PROFILE_F_BALANCED,passed expansion,69,11.46,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",passed,passed expansion
+PROFILE_F_BALANCED,16M FVG missing,34,5.65,SOLUSDT,not individually persisted by current funnel,no immediate matching 16M FVG from C3,16M FVG missing
+PROFILE_F_BALANCED,passed 16M FVG,35,5.81,SOLUSDT,not individually persisted by current funnel,passed,passed 16M FVG
+PROFILE_F_BALANCED,12M FVG missing / same-leg failed,1,0.17,SOLUSDT,not individually persisted by current funnel,no same-leg 12M FVG,12M FVG missing / same-leg failed
+PROFILE_F_BALANCED,passed 12M FVG,34,5.65,SOLUSDT,not individually persisted by current funnel,passed,passed 12M FVG
+PROFILE_F_BALANCED,8M FVG missing / same-leg failed,0,0.00,SOLUSDT,not individually persisted by current funnel,no same-leg 8M FVG,8M FVG missing / same-leg failed
+PROFILE_F_BALANCED,passed 8M FVG,34,5.65,SOLUSDT,not individually persisted by current funnel,passed,passed 8M FVG
+PROFILE_F_BALANCED,retracement window expired / no 1M entry into 12M FVG,17,2.82,SOLUSDT,not individually persisted by current funnel,no valid 1M retrace within 3 completed 8M candles,retracement window expired / no 1M entry into 12M FVG
+PROFILE_F_BALANCED,passed retrace,17,2.82,SOLUSDT,not individually persisted by current funnel,passed,passed retrace
+PROFILE_F_BALANCED,1M close beyond 12M FVG boundary,0,0.00,SOLUSDT,not individually persisted by current funnel,direct entry boundary failure,1M close beyond 12M FVG boundary
+PROFILE_F_BALANCED,duplicate 12M FVG trade blocked,6165,1024.09,SOLUSDT,not individually persisted by current funnel,additional taps ignored after first entry,duplicate 12M FVG trade blocked
+PROFILE_F_BALANCED,signals generated / entry ready,17,2.82,SOLUSDT,not individually persisted by current funnel,passed,signals generated / entry ready
+PROFILE_F_BALANCED,risk rejected,0,0.00,SOLUSDT,not individually persisted by current funnel,risk math rejected trade,risk rejected
+PROFILE_F_SELECTIVE,16M swing candidates,602,100.00,SOLUSDT,not individually persisted by current funnel,baseline candidates,16M swing candidates
+PROFILE_F_SELECTIVE,C3 expansion / ratio rejected,572,95.02,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",ratio outside profile range or no displacement expansion,C3 expansion / ratio rejected
+PROFILE_F_SELECTIVE,passed expansion,30,4.98,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",passed,passed expansion
+PROFILE_F_SELECTIVE,16M FVG missing,9,1.50,SOLUSDT,not individually persisted by current funnel,no immediate matching 16M FVG from C3,16M FVG missing
+PROFILE_F_SELECTIVE,passed 16M FVG,21,3.49,SOLUSDT,not individually persisted by current funnel,passed,passed 16M FVG
+PROFILE_F_SELECTIVE,12M FVG missing / same-leg failed,0,0.00,SOLUSDT,not individually persisted by current funnel,no same-leg 12M FVG,12M FVG missing / same-leg failed
+PROFILE_F_SELECTIVE,passed 12M FVG,21,3.49,SOLUSDT,not individually persisted by current funnel,passed,passed 12M FVG
+PROFILE_F_SELECTIVE,8M FVG missing / same-leg failed,0,0.00,SOLUSDT,not individually persisted by current funnel,no same-leg 8M FVG,8M FVG missing / same-leg failed
+PROFILE_F_SELECTIVE,passed 8M FVG,21,3.49,SOLUSDT,not individually persisted by current funnel,passed,passed 8M FVG
+PROFILE_F_SELECTIVE,retracement window expired / no 1M entry into 12M FVG,11,1.83,SOLUSDT,not individually persisted by current funnel,no valid 1M retrace within 3 completed 8M candles,retracement window expired / no 1M entry into 12M FVG
+PROFILE_F_SELECTIVE,passed retrace,10,1.66,SOLUSDT,not individually persisted by current funnel,passed,passed retrace
+PROFILE_F_SELECTIVE,1M close beyond 12M FVG boundary,0,0.00,SOLUSDT,not individually persisted by current funnel,direct entry boundary failure,1M close beyond 12M FVG boundary
+PROFILE_F_SELECTIVE,duplicate 12M FVG trade blocked,3198,531.23,SOLUSDT,not individually persisted by current funnel,additional taps ignored after first entry,duplicate 12M FVG trade blocked
+PROFILE_F_SELECTIVE,signals generated / entry ready,10,1.66,SOLUSDT,not individually persisted by current funnel,passed,signals generated / entry ready
+PROFILE_F_SELECTIVE,risk rejected,0,0.00,SOLUSDT,not individually persisted by current funnel,risk math rejected trade,risk rejected
+STRICT_PROFILE,16M swing candidates,602,100.00,SOLUSDT,not individually persisted by current funnel,baseline candidates,16M swing candidates
+STRICT_PROFILE,C3 expansion / ratio rejected,572,95.02,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",ratio outside profile range or no displacement expansion,C3 expansion / ratio rejected
+STRICT_PROFILE,passed expansion,30,4.98,SOLUSDT,"2026-04-01T00:16:00+00:00, 2026-04-01T00:48:00+00:00, 2026-04-01T11:12:00+00:00",passed,passed expansion
+STRICT_PROFILE,16M FVG missing,9,1.50,SOLUSDT,not individually persisted by current funnel,no immediate matching 16M FVG from C3,16M FVG missing
+STRICT_PROFILE,passed 16M FVG,21,3.49,SOLUSDT,not individually persisted by current funnel,passed,passed 16M FVG
+STRICT_PROFILE,12M FVG missing / same-leg failed,0,0.00,SOLUSDT,not individually persisted by current funnel,no same-leg 12M FVG,12M FVG missing / same-leg failed
+STRICT_PROFILE,passed 12M FVG,21,3.49,SOLUSDT,not individually persisted by current funnel,passed,passed 12M FVG
+STRICT_PROFILE,8M FVG missing / same-leg failed,0,0.00,SOLUSDT,not individually persisted by current funnel,no same-leg 8M FVG,8M FVG missing / same-leg failed
+STRICT_PROFILE,passed 8M FVG,21,3.49,SOLUSDT,not individually persisted by current funnel,passed,passed 8M FVG
+STRICT_PROFILE,retracement window expired / no 1M entry into 12M FVG,11,1.83,SOLUSDT,not individually persisted by current funnel,no valid 1M retrace within 3 completed 8M candles,retracement window expired / no 1M entry into 12M FVG
+STRICT_PROFILE,passed retrace,10,1.66,SOLUSDT,not individually persisted by current funnel,passed,passed retrace
+STRICT_PROFILE,1M close beyond 12M FVG boundary,0,0.00,SOLUSDT,not individually persisted by current funnel,direct entry boundary failure,1M close beyond 12M FVG boundary
+STRICT_PROFILE,duplicate 12M FVG trade blocked,0,0.00,SOLUSDT,not individually persisted by current funnel,additional taps ignored after first entry,duplicate 12M FVG trade blocked
+STRICT_PROFILE,signals generated / entry ready,0,0.00,SOLUSDT,not individually persisted by current funnel,passed,signals generated / entry ready
+STRICT_PROFILE,risk rejected,0,0.00,SOLUSDT,not individually persisted by current funnel,risk math rejected trade,risk rejected

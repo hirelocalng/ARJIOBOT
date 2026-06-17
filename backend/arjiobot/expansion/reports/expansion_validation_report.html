@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Expansion Engine Validation Report</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; }
+table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; }
+th { background: #eaf2f8; }
+.pass { color: #117a65; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Expansion Engine Validation Report</h1>
+<p class="pass">PASS / FAIL Summary: PASS</p>
+<h2>Summary</h2>
+<ul><li><strong>Tests executed</strong>: 7</li>
+<li><strong>Tests passed</strong>: 7</li>
+<li><strong>Detection accuracy</strong>: 100.00%</li>
+<li><strong>Benchmark swings</strong>: 1500</li>
+<li><strong>Benchmark duration ms</strong>: 29.53</li>
+<li><strong>Benchmark swings per second</strong>: 50791.33</li>
+<li><strong>Result</strong>: PASS</li></ul>
+<h2>Candles, Expansion Candles, Ratios, Swing References</h2>
+<table>
+<thead><tr><th>Candle Timestamp</th><th>Symbol</th><th>Timeframe</th><th>Direction</th><th>Swing Reference</th><th>Expansion Ratio</th><th>Strength</th><th>Status</th></tr></thead>
+<tbody><tr><td>2026-01-01T00:02:00+00:00</td><td>BTCUSDT</td><td>1M</td><td>BEARISH</td><td>swg_63fcb333aac04e2967043404</td><td>2.92</td><td>55.29</td><td>PASS</td></tr>
+<tr><td>2026-01-01T00:05:00+00:00</td><td>BTCUSDT</td><td>1M</td><td>BULLISH</td><td>swg_703f46569893e8ec3ed936b5</td><td>2.00</td><td>19.16</td><td>PASS</td></tr></tbody>
+</table>
+<h2>Known Limitations</h2>
+<ul><li>v1 validates only confirmed three-candle swings.</li>
+<li>v1 displacement requires close beyond C2.</li>
+<li>v1 persistence is in-memory.</li></ul>
+</body>
+</html>

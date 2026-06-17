@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Backend API Routes Validation Report</title>
+<style>body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; } table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; } th { background: #eaf2f8; } .pass { color: #117a65; font-weight: 700; }</style></head>
+<body><h1>Backend API Routes Validation Report</h1><p class="pass">PASS / FAIL Summary: PASS</p><h2>Summary</h2><ul><li><strong>Tests executed</strong>: 11</li>
+<li><strong>Tests passed</strong>: 11</li>
+<li><strong>Route groups tested</strong>: 10</li>
+<li><strong>Endpoint count</strong>: 92</li>
+<li><strong>Account route validation</strong>: PASS</li>
+<li><strong>Settings route validation</strong>: PASS</li>
+<li><strong>Radar route validation</strong>: PASS</li>
+<li><strong>Strategy route validation</strong>: PASS</li>
+<li><strong>Risk route validation</strong>: PASS</li>
+<li><strong>Execution route validation</strong>: PASS</li>
+<li><strong>Backtesting route validation</strong>: PASS</li>
+<li><strong>Report route validation</strong>: PASS</li>
+<li><strong>OpenAPI validation</strong>: PASS</li>
+<li><strong>Security/safety validation</strong>: PASS</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Routes Tested</h2><table><thead><tr><th>Route</th></tr></thead><tbody><tr><td>/api/account-status/balance</td></tr>
+<tr><td>/api/account-status/leverage</td></tr>
+<tr><td>/api/account-status/margin-mode</td></tr>
+<tr><td>/api/account-status/open-orders</td></tr>
+<tr><td>/api/account-status/positions</td></tr>
+<tr><td>/api/account-status/refresh</td></tr>
+<tr><td>/api/account-status/risk-status</td></tr>
+<tr><td>/api/account-status/summary</td></tr>
+<tr><td>/api/accounts</td></tr>
+<tr><td>/api/accounts</td></tr>
+<tr><td>/api/accounts/active</td></tr>
+<tr><td>/api/accounts/bitget/test-and-save</td></tr>
+<tr><td>/api/accounts/select-active</td></tr>
+<tr><td>/api/accounts/vault-key</td></tr>
+<tr><td>/api/accounts/vault-key</td></tr>
+<tr><td>/api/accounts/vault-key/generate</td></tr>
+<tr><td>/api/accounts/{account_id}</td></tr>
+<tr><td>/api/accounts/{account_id}</td></tr>
+<tr><td>/api/accounts/{account_id}</td></tr>
+<tr><td>/api/accounts/{account_id}/balance</td></tr>
+<tr><td>/api/accounts/{account_id}/default</td></tr>
+<tr><td>/api/accounts/{account_id}/disable-trading</td></tr>
+<tr><td>/api/accounts/{account_id}/enable-trading</td></tr>
+<tr><td>/api/accounts/{account_id}/positions</td></tr>
+<tr><td>/api/accounts/{account_id}/reconnect</td></tr>
+<tr><td>/api/accounts/{account_id}/refresh</td></tr>
+<tr><td>/api/accounts/{account_id}/test-connection</td></tr>
+<tr><td>/api/auth/login</td></tr>
+<tr><td>/api/auth/status</td></tr>
+<tr><td>/api/backtesting/profiles</td></tr>
+<tr><td>/api/backtesting/run</td></tr>
+<tr><td>/api/backtesting/runs</td></tr>
+<tr><td>/api/backtesting/runs/{run_id}</td></tr>
+<tr><td>/api/backtesting/runs/{run_id}/equity</td></tr>
+<tr><td>/api/backtesting/runs/{run_id}/report</td></tr>
+<tr><td>/api/backtesting/runs/{run_id}/trades</td></tr>
+<tr><td>/api/backtesting/upload-csv</td></tr>
+<tr><td>/api/bitget/connection/live</td></tr>
+<tr><td>/api/bitget/credentials</td></tr>
+<tr><td>/api/bitget/credentials/status</td></tr>
+<tr><td>/api/bitget/market/candles/{symbol}</td></tr>
+<tr><td>/api/bitget/market/contracts/{symbol}</td></tr>
+<tr><td>/api/bitget/market/ticker/{symbol}</td></tr>
+<tr><td>/api/bitget/mode</td></tr>
+<tr><td>/api/bitget/mode</td></tr>
+<tr><td>/api/bitget/orders</td></tr>
+<tr><td>/api/bitget/orders/dry-run-preview</td></tr>
+<tr><td>/api/bitget/orders/live</td></tr>
+<tr><td>/api/control-plane</td></tr>
+<tr><td>/api/execution/cancel/{execution_id}</td></tr>
+<tr><td>/api/execution/paper/{trade_plan_id}</td></tr>
+<tr><td>/api/execution/records</td></tr>
+<tr><td>/api/execution/records/{execution_id}</td></tr>
+<tr><td>/api/health</td></tr>
+<tr><td>/api/live-automation/run-once</td></tr>
+<tr><td>/api/live-automation/status</td></tr>
+<tr><td>/api/live-trading/status</td></tr>
+<tr><td>/api/live-trading/toggle</td></tr>
+<tr><td>/api/mobile/control-status</td></tr>
+<tr><td>/api/mobile/emergency-stop</td></tr>
+<tr><td>/api/monitoring/start</td></tr>
+<tr><td>/api/monitoring/status</td></tr>
+<tr><td>/api/monitoring/stop</td></tr>
+<tr><td>/api/pairs</td></tr>
+<tr><td>/api/pairs</td></tr>
+<tr><td>/api/pairs/import</td></tr>
+<tr><td>/api/pairs/status</td></tr>
+<tr><td>/api/pairs/{symbol}</td></tr>
+<tr><td>/api/pairs/{symbol}</td></tr>
+<tr><td>/api/radar</td></tr>
+<tr><td>/api/radar/live</td></tr>
+<tr><td>/api/reports</td></tr>
+<tr><td>/api/reports/{report_name}</td></tr>
+<tr><td>/api/risk/assess/{signal_id}</td></tr>
+<tr><td>/api/risk/trade-plan/{signal_id}</td></tr>
+<tr><td>/api/risk/trade-plans</td></tr>
+<tr><td>/api/risk/trade-plans/{trade_plan_id}</td></tr>
+<tr><td>/api/settings</td></tr>
+<tr><td>/api/settings</td></tr>
+<tr><td>/api/setups</td></tr>
+<tr><td>/api/setups/entry-ready</td></tr>
+<tr><td>/api/setups/progress/{percent}</td></tr>
+<tr><td>/api/setups/{setup_id}</td></tr>
+<tr><td>/api/setups/{setup_id}/history</td></tr>
+<tr><td>/api/signals</td></tr>
+<tr><td>/api/signals/generate/{setup_id}</td></tr>
+<tr><td>/api/signals/rejected</td></tr>
+<tr><td>/api/signals/{signal_id}</td></tr>
+<tr><td>/api/status</td></tr>
+<tr><td>/api/strategy-compliance</td></tr>
+<tr><td>/api/system-status</td></tr>
+<tr><td>/api/system/control-state</td></tr></tbody></table></body></html>

@@ -1,0 +1,27 @@
+export type BotSettings = {
+  default_timeframe_profile: string;
+  default_backtesting_profile?: string;
+  active_strategy_profile?: string;
+  selected_rr_profile?: string;
+  time_exit_minutes?: string;
+  refresh_interval_seconds?: string;
+  paper_mode_display?: boolean;
+  api_base_url?: string;
+  monitored_timeframes: string[];
+  max_open_trades: number;
+  max_daily_loss: string;
+  max_weekly_loss: string;
+  starting_balance?: string;
+  max_leverage: string;
+  risk_amount_per_trade: string;
+  adapter_mode: string;
+  live_trading_enabled: boolean;
+  trading_mode?: 'OFF' | 'DRY_RUN_PREVIEW' | 'LIVE';
+  environment_lock_verified?: string;
+  active_account_id?: string;
+  minimum_rr_ratio?: string;
+  min_position_size?: string;
+  max_position_size?: string;
+  allow_multiple_positions_same_symbol?: boolean;
+  max_symbol_exposure?: string;
+};

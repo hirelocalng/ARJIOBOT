@@ -1,0 +1,2 @@
+"""Swing detection package."""
+

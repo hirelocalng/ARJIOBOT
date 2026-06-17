@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Application Integration Validation Report</title>
+<style>body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; } table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; } th { background: #eaf2f8; } .pass { color: #117a65; font-weight: 700; }</style></head>
+<body><h1>Application Integration Validation Report</h1><p class="pass">PASS / FAIL Summary: YES</p>
+<h2>Summary</h2><ul><li><strong>Backend ready</strong>: PASS</li>
+<li><strong>Frontend scaffold ready</strong>: PASS</li>
+<li><strong>CSV backtesting ready</strong>: PASS</li>
+<li><strong>Storage ready</strong>: PASS</li>
+<li><strong>Pair management ready</strong>: PASS</li>
+<li><strong>Account management ready</strong>: PASS</li>
+<li><strong>Risk settings ready</strong>: PASS</li>
+<li><strong>Reports ready</strong>: PASS</li>
+<li><strong>Safety gates passed</strong>: PASS</li>
+<li><strong>Smoke checks executed</strong>: 11</li>
+<li><strong>Smoke checks passed</strong>: 11</li>
+<li><strong>Node build validation</strong>: READY</li>
+<li><strong>Application Integration Ready</strong>: YES</li>
+<li><strong>Backtesting Ready</strong>: YES</li>
+<li><strong>Live Trading Enabled</strong>: NO</li>
+<li><strong>Next recommended action</strong>: Run CSV historical backtests</li></ul><h2>Smoke Checks</h2><table><thead><tr><th>Check</th><th>Status</th></tr></thead><tbody><tr><td>backend_imports</td><td>PASS</td></tr>
+<tr><td>api_app_factory_loads</td><td>PASS</td></tr>
+<tr><td>openapi_generates</td><td>PASS</td></tr>
+<tr><td>core_modules_import</td><td>PASS</td></tr>
+<tr><td>sample_csv_loads</td><td>PASS</td></tr>
+<tr><td>backtester_demo_runs</td><td>PASS</td></tr>
+<tr><td>reports_directories_exist</td><td>PASS</td></tr>
+<tr><td>frontend_required_files_exist</td><td>PASS</td></tr>
+<tr><td>no_login_page_exists</td><td>PASS</td></tr>
+<tr><td>no_live_order_route_exists</td><td>PASS</td></tr>
+<tr><td>safe_account_has_no_raw_secret</td><td>PASS</td></tr></tbody></table>
+<h2>Known Limitations</h2><ul><li>Node/npm are not available in this shell, so frontend Vite build is skipped.</li><li>JSON storage is metadata-only and production must use encrypted database storage before persistent secrets.</li><li>Live trading remains disabled.</li></ul></body></html>

@@ -1,0 +1,44 @@
+import { request } from './client';
+import type { BacktestProfile, BacktestRun, CsvUpload } from '../types/backtesting';
+
+export const uploadCsv = (file: File, selectedSymbol?: string) => {
+  const form = new FormData();
+  form.append('file', file);
+  if (selectedSymbol?.trim()) form.append('selected_symbol', selectedSymbol.trim().toUpperCase());
+  return request<CsvUpload>('/api/backtesting/upload-csv', { method: 'POST', body: form });
+};
+export const listBacktestProfiles = () => request<BacktestProfile[]>('/api/backtesting/profiles');
+export const runBacktest = (payload: {
+  upload_id: string;
+  symbol: string;
+  profile_id: string;
+  selected_strategy_profile?: string;
+  timeframe_profile: string;
+  starting_balance: string;
+  fixed_risk_amount: string;
+  risk_per_trade?: string;
+  max_leverage: string;
+  selected_max_leverage?: string;
+  selected_trade_mode?: string;
+  selected_exchange?: string;
+  fees: string;
+  slippage: string;
+  selected_tp_model?: string;
+  time_exit_minutes?: string;
+  selected_time_exit_minutes?: string;
+  selected_rr_profile?: string;
+  research_mode?: boolean;
+  research_expansion_min?: string;
+  research_expansion_max?: string;
+  research_retrace_window_8m_candles?: string;
+  research_tp_model?: string;
+  research_require_expansion_c3?: string;
+  research_use_linked_fvg_detection?: string;
+  research_main_fvg_match_mode?: string;
+  research_main_fvg_match_window_candles?: string;
+}) => request<BacktestRun>('/api/backtesting/run', { method: 'POST', body: JSON.stringify(payload), timeoutMs: 120000 });
+export const listBacktestRuns = () => request<BacktestRun[]>('/api/backtesting/runs');
+export const getBacktestRun = (runId: string) => request<BacktestRun>(`/api/backtesting/runs/${runId}`);
+export const getBacktestTrades = (runId: string) => request<unknown[]>(`/api/backtesting/runs/${runId}/trades`);
+export const getEquityCurve = (runId: string) => request<unknown[]>(`/api/backtesting/runs/${runId}/equity`);
+export const getBacktestReport = (runId: string) => request<unknown>(`/api/backtesting/runs/${runId}/report`);

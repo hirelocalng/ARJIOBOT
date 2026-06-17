@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Strategy Engine Validation Report</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; }
+table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; }
+th { background: #eef2f7; } .pass { color: #117a65; font-weight: 700; }
+</style></head><body>
+<h1>Strategy Engine Validation Report</h1><p class="pass">PASS / FAIL Summary: PASS</p>
+<h2>Summary</h2><ul><li><strong>Tests executed</strong>: 22</li>
+<li><strong>Tests passed</strong>: 22</li>
+<li><strong>Signal validation result</strong>: PASS</li>
+<li><strong>Deduplication validation</strong>: PASS</li>
+<li><strong>Replay validation</strong>: PASS</li>
+<li><strong>Benchmark setups</strong>: 300</li>
+<li><strong>Benchmark duration ms</strong>: 26.98</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Signal Lifecycle Table</h2>
+<table><thead><tr><th>Setup</th><th>Symbol</th><th>Action</th><th>Status</th><th>Rejection</th><th>Stop</th><th>Target</th></tr></thead><tbody><tr><td>set_98e3a4bac9a1ca749feca73c</td><td>BTCUSDT</td><td>MARKET_SELL_READY</td><td>GENERATED</td><td></td><td>120</td><td>70</td></tr>
+<tr><td>set_98e3a4bac9a1ca749feca73c</td><td>BTCUSDT</td><td>MARKET_SELL_READY</td><td>REJECTED</td><td>DUPLICATE_SIGNAL</td><td>120</td><td>70</td></tr>
+<tr><td>set_6a04b5f325a6a29216c90fc5</td><td>ETHUSDT</td><td>MARKET_SELL_READY</td><td>REJECTED</td><td>MISSING_REQUIRED_FIELD</td><td>120</td><td>70</td></tr></tbody></table>
+<h2>Known Limitations</h2><ul><li>v1 generates bearish MARKET_SELL_READY signals only.</li>
+<li>v1 does not calculate risk, size, leverage, or execution details.</li>
+<li>v1 persistence is in-memory behind deterministic service APIs.</li></ul>
+</body></html>

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Bitget Exchange Adapter Validation Report</title>
+<style>body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; } table { border-collapse: collapse; width: 100%; margin-bottom: 24px; } th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; } th { background: #eaf2f8; } .pass { color: #117a65; font-weight: 700; }</style></head>
+<body><h1>Bitget Exchange Adapter Validation Report</h1><p class="pass">PASS / FAIL Summary: PASS</p><h2>Summary</h2><ul><li><strong>Tests executed</strong>: 21</li>
+<li><strong>Tests passed</strong>: 21</li>
+<li><strong>Mock mode validation</strong>: PASS</li>
+<li><strong>Read-only safety validation</strong>: PASS</li>
+<li><strong>Multi-account validation</strong>: PASS</li>
+<li><strong>Credential safety validation</strong>: PASS</li>
+<li><strong>Live trading safeguard validation</strong>: PASS</li>
+<li><strong>Accounts tested</strong>: 2</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Accounts Tested</h2><table><thead><tr><th>Account ID</th><th>Name</th><th>Masked API Key</th><th>Default</th><th>Trading Enabled</th><th>Verification</th></tr></thead><tbody><tr><td>acct_14fad7038f1d026540b31695</td><td>Primary</td><td>pri****456</td><td>False</td><td>True</td><td>UNVERIFIED</td></tr>
+<tr><td>acct_d057c7114f35e693c577f603</td><td>Secondary</td><td>sec****456</td><td>True</td><td>False</td><td>UNVERIFIED</td></tr></tbody></table>
+<h2>Order Results</h2><table><thead><tr><th>Account</th><th>Symbol</th><th>Status</th><th>Exchange Order</th><th>Error</th></tr></thead><tbody><tr><td>acct_14fad7038f1d026540b31695</td><td>BTCUSDT</td><td>FILLED</td><td>mock_48ba9ed6e8f5754ba43f</td><td></td></tr>
+<tr><td>acct_14fad7038f1d026540b31695</td><td>BTCUSDT</td><td>REJECTED</td><td></td><td>TRADING_NOT_ALLOWED_IN_READ_ONLY_MODE</td></tr>
+<tr><td>acct_14fad7038f1d026540b31695</td><td>BTCUSDT</td><td>REJECTED</td><td></td><td>LIVE_TRADING_DISABLED</td></tr></tbody></table>
+<h2>Known Limitations</h2><ul><li>v1 does not make real Bitget network requests.</li>
+<li>v1 does not place live orders.</li>
+<li>v1 uses in-memory credential storage only.</li>
+<li>Dashboard/API routes are intentionally not implemented.</li></ul></body></html>

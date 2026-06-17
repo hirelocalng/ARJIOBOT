@@ -1,0 +1,46 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "SOLUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "ATOMUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "EIGENUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "SUIUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "DOGEUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "AVAXUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "1INCHUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "TAOUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "BCHUSDT",
+    "enabled": true
+  },
+  {
+    "symbol": "XRPUSDT",
+    "enabled": true
+  }
+]

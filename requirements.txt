@@ -1,0 +1,6 @@
+# ArjioBot backend runtime
+#
+# The current backend ships with a small FastAPI-compatible local shim and
+# depends primarily on the Python standard library. Install pytest only for
+# validation on a VPS.
+pytest>=8.0

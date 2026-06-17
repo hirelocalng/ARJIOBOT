@@ -1,0 +1,27 @@
+{
+  "default_timeframe_profile": "DEFAULT_16_12_8",
+  "default_backtesting_profile": "PROFILE_2",
+  "active_strategy_profile": "PROFILE_2",
+  "selected_rr_profile": "LEG_TARGET_RESEARCH",
+  "time_exit_minutes": "30",
+  "refresh_interval_seconds": "15",
+  "paper_mode_display": true,
+  "api_base_url": "https://api.bitget.com",
+  "monitored_timeframes": [
+    "16M",
+    "12M",
+    "8M",
+    "1M"
+  ],
+  "max_open_trades": 10,
+  "starting_balance": "250",
+  "max_daily_loss": "250",
+  "max_weekly_loss": "150000",
+  "max_leverage": "10",
+  "risk_amount_per_trade": "100",
+  "adapter_mode": "MOCK",
+  "live_trading_enabled": false,
+  "trading_mode": "OFF",
+  "environment_lock_verified": "YES",
+  "active_account_id": ""
+}

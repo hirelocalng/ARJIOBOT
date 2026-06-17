@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Backtest Validation Report</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; }
+table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; }
+th { background: #fef5e7; } .pass { color: #117a65; font-weight: 700; }
+</style></head><body>
+<h1>Backtest Validation Report</h1><p class="pass">PASS / FAIL Validation Summary: PASS</p>
+<h2>Summary Metrics</h2><ul><li><strong>Tests executed</strong>: 22</li>
+<li><strong>Tests passed</strong>: 22</li>
+<li><strong>Replay validation</strong>: PASS</li>
+<li><strong>CSV loader validation</strong>: PASS</li>
+<li><strong>Trade simulation validation</strong>: PASS</li>
+<li><strong>Fee/slippage validation</strong>: PASS</li>
+<li><strong>Metrics validation</strong>: PASS</li>
+<li><strong>Setup conversion validation</strong>: PASS</li>
+<li><strong>Benchmark candles</strong>: 4</li>
+<li><strong>Benchmark duration ms</strong>: 0.03</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Trade Table</h2><table><thead><tr><th>Trade</th><th>Symbol</th><th>Entry Time</th><th>Entry</th><th>Exit Reason</th><th>Net PnL</th><th>R</th></tr></thead><tbody><tr><td>trd_24e0b278e749ae09c3cb81cf</td><td>BTCUSDT</td><td>2026-01-01 00:01:00+00:00</td><td>90</td><td>TAKE_PROFIT</td><td>149.7300000000000000000000000</td><td>1.4973000000000000000000000</td></tr></tbody></table>
+<h2>Equity Curve / Drawdown</h2><p>Ending balance: 10149.73000000000000000000000. Max drawdown: 0 (0.00%).</p>
+<h2>Setup Conversion Funnel</h2><pre>{'setups_created': 1, 'setups_reaching_30_percent': 1, 'setups_reaching_50_percent': 1, 'setups_reaching_70_percent': 1, 'setups_reaching_90_percent': 1, 'setups_reaching_entry_ready': 1, 'signals_generated': 1, 'trades_entered': 1, 'trades_won': 1, 'trades_lost': 0, 'invalidation_reason_counts': {}, 'most_common_failure_stage': None}</pre>
+<h2>Known Limitations</h2><ul><li>v1 simulates bearish Strategy Engine signals only.</li>
+<li>v1 does not call Bitget or place live orders.</li>
+<li>v1 uses historical OHLCV CSV files as the primary v1 data source.</li></ul>
+</body></html>

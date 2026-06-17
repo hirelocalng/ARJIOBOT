@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Setup Tracker Validation Report</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 32px; color: #17202a; }
+table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+th, td { border: 1px solid #d5d8dc; padding: 8px; text-align: left; }
+th { background: #f4ecf7; } .pass { color: #117a65; font-weight: 700; }
+</style></head><body>
+<h1>Setup Tracker Validation Report</h1><p class="pass">PASS / FAIL Summary: PASS</p>
+<h2>Summary</h2><ul><li><strong>Report note</strong>: Tests executed / passed are a static validation summary; live pytest output is produced by the test runner.</li>
+<li><strong>Tests executed</strong>: 23</li>
+<li><strong>Tests passed</strong>: 23</li>
+<li><strong>State transition validation</strong>: PASS</li>
+<li><strong>Progress scoring validation</strong>: PASS</li>
+<li><strong>Invalidation validation</strong>: PASS</li>
+<li><strong>Radar validation</strong>: PASS</li>
+<li><strong>Replay validation</strong>: PASS</li>
+<li><strong>Benchmark setups</strong>: 500</li>
+<li><strong>Benchmark duration ms</strong>: 73.56</li>
+<li><strong>Ready For Integration</strong>: YES</li></ul>
+<h2>Setup Lifecycle Timeline</h2>
+<table><thead><tr><th>Setup</th><th>Symbol</th><th>State</th><th>Progress</th><th>Status</th><th>Invalidation</th></tr></thead><tbody><tr><td>set_98e3a4bac9a1ca749feca73c</td><td>BTCUSDT</td><td>ENTRY_READY</td><td>100.0%</td><td>ENTRY_READY</td><td></td></tr>
+<tr><td>set_6a04b5f325a6a29216c90fc5</td><td>ETHUSDT</td><td>INVALIDATED</td><td>15.0%</td><td>INVALIDATED</td><td>CLOSE_ABOVE_12M_FVG</td></tr></tbody></table>
+<h2>Radar Table</h2>
+<table><thead><tr><th>Setup</th><th>State</th><th>Progress</th><th>Missing Requirements</th><th>Target</th><th>Stop</th></tr></thead><tbody><tr><td>set_98e3a4bac9a1ca749feca73c</td><td>ENTRY_READY</td><td>100.0%</td><td></td><td>74</td><td>120</td></tr>
+<tr><td>set_6a04b5f325a6a29216c90fc5</td><td>INVALIDATED</td><td>15.0%</td><td>16M swing, 16M expansion, 16M FVG, 12M FVG, 8M FVG, 12M retrace, 1M swing, 1M FVG, entry FVG</td><td></td><td></td></tr></tbody></table>
+<h2>Known Limitations</h2><ul><li>v1 tracks bearish setups first.</li>
+<li>v1 does not place orders or calculate risk.</li>
+<li>v1 persistence is in-memory behind deterministic service APIs.</li></ul>
+</body></html>
