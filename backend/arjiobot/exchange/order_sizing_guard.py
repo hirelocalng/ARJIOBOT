@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Mapping
 
-from arjiobot.risk.isolated_margin import calculate_isolated_margin_plan
+from arjiobot.risk.isolated_margin import calculate_required_margin
 
 
 class OrderSizingGuardError(ValueError):
@@ -31,11 +31,12 @@ def validate_isolated_order_payload(payload: Mapping[str, object]) -> dict[str, 
     entry_price = _positive_decimal(payload.get("entry_price") or payload.get("entry_reference_price"), "entry_price")
     stop_loss = _positive_decimal(payload.get("stop_loss") or payload.get("stop_loss_price"), "stop_loss")
     try:
-        sizing = calculate_isolated_margin_plan(
+        sizing = calculate_required_margin(
+            fixed_sl_loss=selected_fixed_risk_amount,
             entry_price=entry_price,
             stop_loss=stop_loss,
-            margin_amount=selected_fixed_risk_amount,
             max_leverage=max_allowed_leverage,
+            available_margin=selected_starting_balance,
         )
     except ValueError as exc:
         raise OrderSizingGuardError(str(exc)) from exc

@@ -105,8 +105,11 @@ class OrderInstruction:
             raise ValueError("leverage must be at least 1")
         if self.trade_type != "ISOLATED_MARGIN" or self.margin_mode != "isolated":
             raise ValueError("orders must use isolated margin")
-        if self.margin_amount <= Decimal("0") or self.risk_amount != self.margin_amount:
-            raise ValueError("isolated margin amount must match risk amount")
+        if self.margin_amount <= Decimal("0") or self.required_leverage <= Decimal("0"):
+            raise ValueError("isolated margin amount must be derived from notional and required leverage")
+        implied_margin = self.notional_position_size / self.required_leverage
+        if abs(implied_margin - self.margin_amount) > max(Decimal("0.00000001"), self.margin_amount * Decimal("0.000001")):
+            raise ValueError("isolated margin amount must match notional position size divided by required leverage")
 
 
 @dataclass(frozen=True, slots=True)

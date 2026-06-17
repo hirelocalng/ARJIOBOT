@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from arjiobot.risk.exposure import exposure_after_trade, has_same_symbol_exposure
-from arjiobot.risk.isolated_margin import calculate_isolated_margin_plan
+from arjiobot.risk.isolated_margin import calculate_required_margin
 from arjiobot.risk.loss_limits import daily_loss_capacity_remaining, weekly_loss_capacity_remaining
 from arjiobot.risk.position_sizing import calculate_position_size, calculate_reward_distance, calculate_risk_distance, calculate_rr_ratio
 from arjiobot.risk.rr_profiles import calculate_fixed_risk_trade_math
@@ -98,16 +98,16 @@ def validate_signal_risk(
         stop_reference_price=signal.stop_reference_price,
     )
     try:
-        isolated = calculate_isolated_margin_plan(
+        isolated = calculate_required_margin(
+            fixed_sl_loss=rr_math.fixed_risk_amount,
             entry_price=signal.entry_reference_price,
             stop_loss=signal.stop_reference_price,
-            margin_amount=rr_math.fixed_risk_amount,
             max_leverage=risk_config.max_leverage,
+            available_margin=account_snapshot.available_margin,
         )
     except ValueError as exc:
-        if "BLOCKED_REQUIRED_LEVERAGE_EXCEEDS_MAX" in str(exc):
-            reasons.append(RiskRejectionReason.REQUIRED_LEVERAGE_EXCEEDS_MAX)
-            reasons.append(RiskRejectionReason.LEVERAGE_EXCEEDS_MAX)
+        if "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN" in str(exc):
+            reasons.append(RiskRejectionReason.INSUFFICIENT_AVAILABLE_MARGIN)
         else:
             reasons.append(RiskRejectionReason.FIXED_RISK_VALIDATION_FAILED)
         isolated = None

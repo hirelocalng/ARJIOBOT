@@ -194,7 +194,7 @@ def test_selected_fixed_risk_amounts_drive_sizing_without_old_defaults(monkeypat
     assert [item["applied_margin_amount"] for item in previews] == ["10", "25", "100"]
     assert [item["expected_loss_at_sl_excluding_fees"] for item in previews] == ["10.000", "25.000", "100.000"]
     assert [item["size"] for item in previews] == ["10.000", "25.000", "100.000"]
-    assert all(item["required_leverage"] == "1E+2" for item in previews)
+    assert all(item["required_leverage"] == "100" for item in previews)
 
 
 def test_buy_and_sell_dry_run_payloads_map_to_bitget_sides(monkeypatch) -> None:
@@ -230,14 +230,19 @@ def test_required_leverage_uses_exchange_cap_not_user_selected_cap(monkeypatch) 
     monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
     monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
 
-    allowed = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(entry="100", stop="102", max_leverage="100")).json()["data"]
-    blocked = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(entry="100", stop="101", max_leverage="100")).json()["data"]
+    # available_margin covers the position at the exchange-capped leverage (50x) for the wider
+    # stop (allowed) but not for the tighter stop (blocked), proving the exchange cap (not the
+    # user-selected 100x) is what actually drives the required-margin calculation.
+    allowed_payload = {**_order_with(entry="100", stop="102", max_leverage="100"), "selected_starting_balance": "150"}
+    blocked_payload = {**_order_with(entry="100", stop="101", max_leverage="100"), "selected_starting_balance": "150"}
+    allowed = api.post("/api/bitget/orders/dry-run-preview", json=allowed_payload).json()["data"]
+    blocked = api.post("/api/bitget/orders/dry-run-preview", json=blocked_payload).json()["data"]
 
     assert allowed["would_place_order"] == "YES"
     assert allowed["exchange_max_leverage"] == "50"
     assert allowed["effective_max_leverage"] == "50"
     assert blocked["would_place_order"] == "NO"
-    assert blocked["blocked_reason"] == "BLOCKED_REQUIRED_LEVERAGE_EXCEEDS_MAX"
+    assert blocked["blocked_reason"] == "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN"
 
 
 def test_fee_slippage_buffer_can_block_preview(monkeypatch) -> None:

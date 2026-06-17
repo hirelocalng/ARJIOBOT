@@ -45,13 +45,11 @@ def validate_trade_plan_for_execution(trade_plan: TradePlan) -> tuple[ExecutionR
         reasons.append(ExecutionRejectionReason.INVALID_POSITION_SIZE)
     if trade_plan.leverage < Decimal("1"):
         reasons.append(ExecutionRejectionReason.INVALID_LEVERAGE)
-    if trade_plan.required_leverage <= Decimal("0") or trade_plan.leverage != trade_plan.required_leverage:
-        reasons.append(ExecutionRejectionReason.INVALID_LEVERAGE)
-    if trade_plan.required_leverage > trade_plan.max_allowed_leverage:
+    if trade_plan.max_allowed_leverage <= Decimal("0") or trade_plan.leverage != trade_plan.max_allowed_leverage:
         reasons.append(ExecutionRejectionReason.INVALID_LEVERAGE)
     if trade_plan.trade_type != "ISOLATED_MARGIN" or trade_plan.margin_mode != "isolated":
         reasons.append(ExecutionRejectionReason.MISSING_REQUIRED_FIELD)
-    if trade_plan.applied_margin_amount <= Decimal("0") or trade_plan.risk_amount != trade_plan.applied_margin_amount:
+    if trade_plan.applied_margin_amount <= Decimal("0") or trade_plan.applied_margin_amount != trade_plan.required_margin:
         reasons.append(ExecutionRejectionReason.MISSING_REQUIRED_FIELD)
     if trade_plan.expected_loss_at_sl <= Decimal("0") or abs(trade_plan.expected_loss_at_sl - trade_plan.risk_amount) > max(Decimal("0.00000001"), trade_plan.risk_amount * Decimal("0.000001")):
         reasons.append(ExecutionRejectionReason.INVALID_POSITION_SIZE)

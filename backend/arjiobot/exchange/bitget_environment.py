@@ -27,7 +27,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from enum import Enum
 from typing import Any
 
-from arjiobot.risk.isolated_margin import calculate_isolated_margin_plan
+from arjiobot.risk.isolated_margin import calculate_required_margin
 
 BITGET_REST_BASE_URL = "https://api.bitget.com"
 BITGET_WS_PUBLIC_URL = "wss://ws.bitget.com/v2/ws/public"
@@ -548,12 +548,20 @@ class BitgetEnvironmentService:
             raise EnvironmentLockError("live candles are missing")
         exchange_max = _positive_decimal(contract.get("maxLever") or "1", "maxLever")
         effective_max_leverage = min(max_leverage, exchange_max)
+        available_margin_raw = payload.get("available_margin") or payload.get("selected_starting_balance")
+        if available_margin_raw in (None, ""):
+            available_margin_raw = (self.last_account_payload or {}).get("available_margin")
+        if available_margin_raw in (None, "", "N/A"):
+            # No live balance known yet for this call site; do not block on margin we cannot verify.
+            available_margin_raw = "1000000000"
+        available_margin = _positive_decimal(available_margin_raw, "available_margin")
         try:
-            sizing = calculate_isolated_margin_plan(
+            sizing = calculate_required_margin(
+                fixed_sl_loss=fixed_risk,
                 entry_price=entry_price,
                 stop_loss=stop_loss,
-                margin_amount=fixed_risk,
                 max_leverage=effective_max_leverage,
+                available_margin=available_margin,
             )
         except ValueError as exc:
             raise EnvironmentLockError(str(exc)) from exc
