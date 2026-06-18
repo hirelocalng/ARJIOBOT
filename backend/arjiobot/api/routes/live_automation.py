@@ -17,5 +17,5 @@ def status():
 
 
 @router.post("/run-once")
-def run_once():
+def run_once(payload: dict[str, object] | None = None):
     return ok(run_live_automation_once(get_state(), source="API_RUN_ONCE"))

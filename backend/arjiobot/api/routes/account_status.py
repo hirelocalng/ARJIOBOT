@@ -22,7 +22,7 @@ def account_status_summary():
 
 
 @router.post("/refresh")
-def refresh_account_status():
+def refresh_account_status(payload: dict[str, object] | None = None):
     state = get_state()
     account = _active_account()
     if account is None:

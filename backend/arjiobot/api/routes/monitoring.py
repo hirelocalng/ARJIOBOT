@@ -57,7 +57,7 @@ def start_monitoring(payload: dict[str, object] | None = None):
 
 
 @router.post("/stop")
-def stop_monitoring():
+def stop_monitoring(payload: dict[str, object] | None = None):
     state = get_state()
     state.monitoring.update({"active": False, "stopped_at": now_iso(), "last_error": "None"})
     state.market_polls.clear()

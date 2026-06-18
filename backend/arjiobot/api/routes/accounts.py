@@ -62,7 +62,7 @@ def setup_vault_key(payload: dict[str, object]):
 
 
 @router.post("/vault-key/generate")
-def generate_vault_key():
+def generate_vault_key(payload: dict[str, object] | None = None):
     try:
         return ok(save_local_encryption_key())
     except CredentialVaultError as exc:
@@ -220,7 +220,7 @@ def delete_account(account_id: str):
 
 
 @router.post("/{account_id}/default")
-def set_default(account_id: str):
+def set_default(account_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     if account_id in state.live_accounts:
         for existing in state.live_accounts.values():
@@ -234,7 +234,7 @@ def set_default(account_id: str):
 
 
 @router.post("/{account_id}/test-connection")
-def test_connection(account_id: str):
+def test_connection(account_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     if account_id in state.live_accounts:
         try:
@@ -275,7 +275,7 @@ def test_connection(account_id: str):
 
 
 @router.post("/{account_id}/enable-trading")
-def enable_trading(account_id: str):
+def enable_trading(account_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     if account_id in state.live_accounts:
         state.live_accounts[account_id]["trading_enabled"] = True
@@ -287,7 +287,7 @@ def enable_trading(account_id: str):
 
 
 @router.post("/{account_id}/disable-trading")
-def disable_trading(account_id: str):
+def disable_trading(account_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     if account_id in state.live_accounts:
         state.live_accounts[account_id]["trading_enabled"] = False
@@ -311,7 +311,7 @@ def positions(account_id: str):
 
 
 @router.post("/{account_id}/refresh")
-def refresh_live_account(account_id: str):
+def refresh_live_account(account_id: str, payload: dict[str, object] | None = None):
     return test_connection(account_id)
 
 

@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/execution", tags=["execution"])
 
 
 @router.post("/paper/{trade_plan_id}")
-def paper_execute(trade_plan_id: str):
+def paper_execute(trade_plan_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     plan = state.trade_plans.get(trade_plan_id)
     if plan is None:
@@ -36,5 +36,5 @@ def get_record(execution_id: str):
 
 
 @router.post("/cancel/{execution_id}")
-def cancel(execution_id: str):
+def cancel(execution_id: str, payload: dict[str, object] | None = None):
     return ok(execution_to_record(get_state().execution_service.cancel_execution(execution_id, "api-cancel")))

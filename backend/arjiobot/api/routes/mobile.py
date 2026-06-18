@@ -44,7 +44,7 @@ def control_status():
 
 
 @router.post("/emergency-stop")
-def emergency_stop():
+def emergency_stop(payload: dict[str, object] | None = None):
     state = get_state()
     result = state.bitget_environment.switch_mode("OFF")
     state.settings["trading_mode"] = "OFF"

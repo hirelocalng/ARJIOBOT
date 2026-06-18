@@ -31,7 +31,7 @@ def get_signal(signal_id: str):
 
 
 @router.post("/generate/{setup_id}")
-def generate_signal(setup_id: str):
+def generate_signal(setup_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     setup = state.setups.get(setup_id)
     if setup is None:

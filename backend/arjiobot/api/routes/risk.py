@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/risk", tags=["risk"])
 
 
 @router.post("/assess/{signal_id}")
-def assess(signal_id: str):
+def assess(signal_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     signal = state.signals.get(signal_id)
     if signal is None:
@@ -25,7 +25,7 @@ def assess(signal_id: str):
 
 
 @router.post("/trade-plan/{signal_id}")
-def trade_plan(signal_id: str):
+def trade_plan(signal_id: str, payload: dict[str, object] | None = None):
     state = get_state()
     signal = state.signals.get(signal_id)
     if signal is None:
