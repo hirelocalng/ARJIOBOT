@@ -95,7 +95,11 @@ def control_plane_snapshot():
                 "rest_base_url_auto_managed": "YES",
                 "websocket_public_url": mode_status.get("environment_lock", {}).get("websocket_public_url", ""),
                 "websocket_private_url": mode_status.get("environment_lock", {}).get("websocket_private_url", ""),
-                "credential_type_used": mode_status.get("environment_lock", {}).get("credential_type_used", "NONE"),
+                # Independent of trading_mode/OFF - environment_lock.credential_type_used reflects
+                # whether an order could be placed in the *current* trading mode (always "NONE"
+                # while mode is OFF, even with valid saved credentials). This reflects whether
+                # credentials actually exist, which is what the dashboard label "Credential Type" means.
+                "credential_type_used": "LIVE" if state.bitget_environment.credential_diagnostics()["available"] else "NONE",
                 "live_armed": mode_status.get("live_armed", "NO"),
                 "mock_mode_warning": "MOCK MODE ACTIVE - NOT REAL EXCHANGE DATA" if str(settings.get("adapter_mode", "MOCK")).upper() == "MOCK" else "None",
             },

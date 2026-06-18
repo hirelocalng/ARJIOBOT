@@ -13,7 +13,10 @@ from typing import Any
 
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig
 
-ROOT = Path(__file__).resolve().parents[3]
+# See the matching comment in api/dependencies.py - parents[2] is "backend"
+# locally / "/app" in the Docker image; a deeper parents[N] resolved one
+# level above that, where data/ may not be writable in the container.
+ROOT = Path(__file__).resolve().parents[2]
 VAULT_PATH = ROOT / "data" / "bitget_accounts.vault.json"
 LOCAL_KEY_PATH = ROOT / "data" / ".credential_encryption_key"
 KEY_ENV = "ARJIOBOT_CREDENTIAL_ENCRYPTION_KEY"

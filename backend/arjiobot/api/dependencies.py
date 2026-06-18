@@ -21,7 +21,12 @@ from arjiobot.risk.risk_engine import RiskEngine
 from arjiobot.risk.rr_profiles import SUPPORTED_TP_MODELS
 from arjiobot.strategy.strategy_engine import StrategyEngine
 
-ROOT = Path(__file__).resolve().parents[3]
+# parents[2] = the directory containing arjiobot/ ("backend" locally, "/app"
+# in the Docker image, which is built from the backend/ directory only - see
+# the Dockerfile). Using a deeper parents[N] here previously resolved to one
+# level *above* that (the monorepo root locally; filesystem root in the
+# container), where data/ may not even be writable.
+ROOT = Path(__file__).resolve().parents[2]
 SETTINGS_PATH = ROOT / "data" / "runtime_settings.json"
 PAIRS_PATH = ROOT / "data" / "runtime_pairs.json"
 FROZEN_VISIBLE_PROFILE_ID = "PROFILE_RECOVERED_HIGH_WINRATE"
@@ -47,6 +52,24 @@ def _adapter_mode_from_env() -> str:
     return raw
 
 
+def _positive_number_from_env(env_var: str, default: str = "") -> str:
+    """Startup default for a positive-number setting (risk_amount_per_trade,
+    max_leverage, ...), read from env_var. Same validation PATCH /api/settings
+    already applies (must be a number > 0); falls back to default if unset or
+    invalid. A dashboard PATCH /api/settings still overrides this for the
+    life of the running process."""
+    raw = os.getenv(env_var, "").strip()
+    if not raw:
+        return default
+    try:
+        if float(raw) <= 0:
+            raise ValueError
+    except ValueError:
+        logger.warning("%s=%r is not a positive number; ignoring", env_var, raw)
+        return default
+    return raw
+
+
 DEFAULT_SETTINGS = {
     "default_timeframe_profile": "DEFAULT_16_12_8",
     "default_backtesting_profile": FROZEN_VISIBLE_PROFILE_ID,
@@ -63,8 +86,8 @@ DEFAULT_SETTINGS = {
     "starting_balance": "",
     "max_daily_loss": "500",
     "max_weekly_loss": "1500",
-    "max_leverage": "",
-    "risk_amount_per_trade": "",
+    "max_leverage": _positive_number_from_env("MAX_LEVERAGE"),
+    "risk_amount_per_trade": _positive_number_from_env("DEFAULT_RISK_AMOUNT"),
     "adapter_mode": _adapter_mode_from_env(),
     "live_trading_enabled": False,
     "trading_mode": TradeMode.OFF.value,
