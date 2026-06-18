@@ -30,25 +30,31 @@ except Exception:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, status: int, payload: object) -> None:
+    # Required for proxies/load balancers that expect persistent connections;
+    # the default (HTTP/1.0) closes the connection after every response.
+    protocol_version = "HTTP/1.1"
+
+    def _send(self, status: int, payload: object, *, include_body: bool = True) -> None:
         body = json.dumps(payload, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,PATCH,DELETE,OPTIONS")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if include_body:
+            self.wfile.write(body)
 
-    def _send_html(self, status: int, html: str) -> None:
+    def _send_html(self, status: int, html: str, *, include_body: bool = True) -> None:
         body = html.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if include_body:
+            self.wfile.write(body)
 
     def do_OPTIONS(self) -> None:
         self._send(200, {"ok": True})
@@ -62,6 +68,17 @@ class Handler(BaseHTTPRequestHandler):
             self._send(status, payload)
         except Exception:
             self._send_unhandled_error("GET")
+
+    def do_HEAD(self) -> None:
+        # Some health checks / load balancers probe with HEAD instead of GET.
+        try:
+            if self.path in ("/", "/docs"):
+                self._send_html(200, _docs_html(), include_body=False)
+                return
+            status, payload = app.handle("GET", self.path)
+            self._send(status, payload, include_body=False)
+        except Exception:
+            self._send_unhandled_error("HEAD")
 
     def do_DELETE(self) -> None:
         try:
