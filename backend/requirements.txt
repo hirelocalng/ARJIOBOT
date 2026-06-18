@@ -2,8 +2,14 @@
 #
 # The backend ships its own FastAPI-compatible local shim (./fastapi,
 # ./pydantic) and a stdlib-only HTTP server (arjiobot/api/dev_server.py).
-# There are no third-party runtime dependencies: Bitget API calls are
-# hand-rolled with urllib/http/hmac/hashlib, not an SDK package.
+# Bitget API calls are hand-rolled with urllib/http/hmac/hashlib, not an
+# SDK package.
 #
-# This file exists so platform builders (e.g. Railway/Nixpacks) detect a
-# Python project and run pip install; there is nothing to install.
+# sqlalchemy/psycopg2-binary are used only for the optional PostgreSQL
+# persistence in arjiobot/database/ (settings + exchange accounts), active
+# only when DATABASE_URL is set - see arjiobot/database/session.py. Without
+# DATABASE_URL, the app falls back to its original data/*.json file-based
+# persistence unchanged, so these imports must always succeed even where no
+# database is reachable (e.g. local dev).
+sqlalchemy>=2.0
+psycopg2-binary>=2.9

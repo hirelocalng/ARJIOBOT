@@ -11,7 +11,13 @@ import secrets
 from pathlib import Path
 from typing import Any
 
+from arjiobot.database.store import read_all_accounts, read_setting, write_accounts, write_settings
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig
+
+# Reserved bot_settings key for the vault's active_account_id - not a real
+# setting, just reusing the generic key/value table rather than adding a
+# third table for one string.
+ACTIVE_ACCOUNT_SETTING_KEY = "_vault_active_account_id"
 
 # See the matching comment in api/dependencies.py - parents[2] is "backend"
 # locally / "/app" in the Docker image; a deeper parents[N] resolved one
@@ -27,26 +33,29 @@ class CredentialVaultError(RuntimeError):
 
 
 def load_vault() -> tuple[dict[str, dict[str, object]], dict[str, dict[str, str]], str | None]:
+    db_result = read_all_accounts()
+    if db_result is not None:
+        accounts_raw, encrypted_raw = db_result
+        accounts = {account_id: _reset_for_restart(dict(data)) for account_id, data in accounts_raw.items()}
+        encrypted = {account_id: {str(key): str(value) for key, value in cipher.items()} for account_id, cipher in encrypted_raw.items()}
+        active_account_id = read_setting(ACTIVE_ACCOUNT_SETTING_KEY)
+        return accounts, encrypted, str(active_account_id) if active_account_id else None
+
     if not VAULT_PATH.exists():
         return {}, {}, None
     try:
         payload = json.loads(VAULT_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}, {}, None
-    accounts: dict[str, dict[str, object]] = {}
-    encrypted: dict[str, dict[str, str]] = {}
+    accounts = {}
+    encrypted = {}
     for row in payload.get("accounts", []):
         if not isinstance(row, dict):
             continue
         account_id = str(row.get("account_id") or "")
         if not account_id:
             continue
-        safe = {key: value for key, value in row.items() if key != "encrypted_credentials"}
-        safe["connection_status"] = "NEEDS_VERIFICATION"
-        safe["verification_status"] = "NEEDS_VERIFICATION"
-        safe["trading_enabled"] = False
-        safe.setdefault("last_error", "Needs verification after backend restart.")
-        accounts[account_id] = safe
+        accounts[account_id] = _reset_for_restart({key: value for key, value in row.items() if key != "encrypted_credentials"})
         cipher = row.get("encrypted_credentials")
         if isinstance(cipher, dict):
             encrypted[account_id] = {str(key): str(value) for key, value in cipher.items()}
@@ -54,13 +63,29 @@ def load_vault() -> tuple[dict[str, dict[str, object]], dict[str, dict[str, str]
     return accounts, encrypted, active_account_id
 
 
+def _reset_for_restart(safe: dict[str, object]) -> dict[str, object]:
+    """Forces re-verification after every process restart - applies
+    identically regardless of which persistence backend the row came from."""
+    safe["connection_status"] = "NEEDS_VERIFICATION"
+    safe["verification_status"] = "NEEDS_VERIFICATION"
+    safe["trading_enabled"] = False
+    safe.setdefault("last_error", "Needs verification after backend restart.")
+    return safe
+
+
 def save_vault(accounts: dict[str, dict[str, object]], encrypted: dict[str, dict[str, str]], active_account_id: str | None) -> None:
+    sanitized = {account_id: _public_account_record(account) for account_id, account in accounts.items()}
+    sanitized_encrypted = {account_id: cipher for account_id, cipher in encrypted.items() if account_id in sanitized}
+    db_ok = write_accounts(sanitized, sanitized_encrypted)
+    db_ok = write_settings({ACTIVE_ACCOUNT_SETTING_KEY: active_account_id}) and db_ok
+    if db_ok:
+        return
     VAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
     rows = []
-    for account_id, account in accounts.items():
-        row = _public_account_record(account)
-        if account_id in encrypted:
-            row["encrypted_credentials"] = encrypted[account_id]
+    for account_id, account in sanitized.items():
+        row = dict(account)
+        if account_id in sanitized_encrypted:
+            row["encrypted_credentials"] = sanitized_encrypted[account_id]
         rows.append(row)
     VAULT_PATH.write_text(json.dumps({"active_account_id": active_account_id, "accounts": rows}, indent=2), encoding="utf-8")
 

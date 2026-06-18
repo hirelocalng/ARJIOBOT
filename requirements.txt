@@ -4,3 +4,11 @@
 # depends primarily on the Python standard library. Install pytest only for
 # validation on a VPS.
 pytest>=8.0
+
+# sqlalchemy is imported unconditionally by arjiobot/api/dependencies.py and
+# arjiobot/exchange/account_vault.py (for the optional PostgreSQL persistence
+# in arjiobot/database/, active only when DATABASE_URL is set - see
+# backend/arjiobot/database/session.py). Required even where no database is
+# configured, since the import itself must succeed.
+sqlalchemy>=2.0
+psycopg2-binary>=2.9

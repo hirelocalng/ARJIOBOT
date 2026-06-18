@@ -11,6 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+from arjiobot.database.store import read_all_settings, write_settings
 from arjiobot.exchange.bitget_adapter import BitgetExchangeAdapter
 from arjiobot.exchange.bitget_environment import BitgetEnvironmentService, TradeMode
 from arjiobot.exchange.exchange_models import ExchangeMode
@@ -97,12 +98,25 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings() -> dict[str, object]:
+    db_settings = read_all_settings()
+    if db_settings is not None:
+        if not db_settings:
+            # Database reachable but empty: first run. Seed from
+            # DEFAULT_SETTINGS, which already incorporates ADAPTER_MODE /
+            # DEFAULT_RISK_AMOUNT / MAX_LEVERAGE env vars where set.
+            write_settings(DEFAULT_SETTINGS)
+            return dict(DEFAULT_SETTINGS)
+        return _validated_settings(db_settings)
     if not SETTINGS_PATH.exists():
         return dict(DEFAULT_SETTINGS)
     try:
         saved = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return dict(DEFAULT_SETTINGS)
+    return _validated_settings(saved)
+
+
+def _validated_settings(saved: dict[str, object]) -> dict[str, object]:
     loaded = {**DEFAULT_SETTINGS, **{key: value for key, value in saved.items() if key in DEFAULT_SETTINGS}}
     # Validate strategy profile selections — reject unknown values.
     if loaded["default_backtesting_profile"] not in ALLOWED_STRATEGY_PROFILES:
@@ -121,6 +135,8 @@ def load_settings() -> dict[str, object]:
 
 
 def save_settings(settings: dict[str, object]) -> None:
+    if write_settings(settings):
+        return
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
