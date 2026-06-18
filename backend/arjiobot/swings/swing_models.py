@@ -213,7 +213,7 @@ class SwingHigh(Swing):
     def __init__(self, **kwargs: Any) -> None:
         """Create a swing high with a fixed ``HIGH`` swing type."""
         kwargs.pop("swing_type", None)
-        super().__init__(swing_type=SwingType.HIGH, **kwargs)
+        super(SwingHigh, self).__init__(swing_type=SwingType.HIGH, **kwargs)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -223,7 +223,7 @@ class SwingLow(Swing):
     def __init__(self, **kwargs: Any) -> None:
         """Create a swing low with a fixed ``LOW`` swing type."""
         kwargs.pop("swing_type", None)
-        super().__init__(swing_type=SwingType.LOW, **kwargs)
+        super(SwingLow, self).__init__(swing_type=SwingType.LOW, **kwargs)
 
 
 @dataclass(frozen=True, slots=True)
