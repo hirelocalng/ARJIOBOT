@@ -16,6 +16,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -28,6 +29,8 @@ from enum import Enum
 from typing import Any
 
 from arjiobot.risk.isolated_margin import calculate_required_margin
+
+logger = logging.getLogger(__name__)
 
 BITGET_REST_BASE_URL = "https://api.bitget.com"
 BITGET_WS_PUBLIC_URL = "wss://ws.bitget.com/v2/ws/public"
@@ -212,6 +215,7 @@ class BitgetEnvironmentService:
         }
 
     def test_connection(self, symbol: str = "BTCUSDT") -> dict[str, object]:
+        logger.info("Testing Bitget connection (symbol=%s)...", symbol)
         credentials = self._credentials()
         lock = self.verify_environment_lock(TradeMode.DRY_RUN_PREVIEW, order_environment="DRY_RUN_PREVIEW")
         try:
@@ -219,7 +223,13 @@ class BitgetEnvironmentService:
         except EnvironmentLockError as exc:
             self.last_connection_result = None
             self.last_connection_error = str(exc)
+            logger.error("Bitget connection test failed: %s", exc)
             raise
+        logger.info(
+            "Bitget connection test passed (available_balance=%s, available_margin=%s)",
+            account_payload.get("available_balance"),
+            account_payload.get("available_margin"),
+        )
         result = {
             "connection_status": "PASSED",
             "exchange": "BITGET",
@@ -707,9 +717,28 @@ class BitgetEnvironmentService:
 
     def _credentials(self, fail: bool = True) -> BitgetCredentialConfig | None:
         credentials = self.runtime_credentials or credentials_from_env()
-        if credentials is None and fail:
-            raise EnvironmentLockError("LIVE credentials are missing")
+        if credentials is None:
+            missing = [name for name in ("BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSPHRASE") if not os.getenv(name)]
+            logger.warning(
+                "No Bitget credentials available (no dashboard-saved runtime_credentials, and env fallback missing: %s)",
+                ", ".join(missing) if missing else "all three env vars are set but credentials_from_env() still returned None",
+            )
+            if fail:
+                raise EnvironmentLockError("LIVE credentials are missing")
+            return None
+        logger.info("Resolved Bitget credentials from %s", credentials.source)
         return credentials
+
+    def credential_diagnostics(self) -> dict[str, object]:
+        """Resolve credentials the same way live trading does (dashboard-saved
+        runtime credentials, falling back to BITGET_API_* env vars), without
+        raising - for diagnostics endpoints that need to explain *why* no
+        credentials are available rather than just failing."""
+        credentials = self._credentials(fail=False)
+        if credentials is None:
+            missing = [name for name in ("BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSPHRASE") if not os.getenv(name)]
+            return {"available": False, "source": "NONE", "missing_env_vars": missing}
+        return {"available": True, "source": credentials.source, "missing_env_vars": []}
 
     def _validate_safety(self, payload: dict[str, object]) -> None:
         if self.emergency_kill_switch:
@@ -743,20 +772,27 @@ def credentials_from_env() -> BitgetCredentialConfig | None:
 
 
 def _request_json(request: urllib.request.Request, *, private: bool) -> dict[str, Any]:
+    area = "private auth" if private else "public market data"
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        logger.error("Bitget %s request raised HTTP %s: %s", area, exc.code, body)
         raise EnvironmentLockError(f"Bitget HTTP {exc.code}: {body}") from exc
     except urllib.error.URLError as exc:
+        logger.error("Bitget %s request failed (network/URL error): %s", area, exc.reason)
         raise EnvironmentLockError(_network_error_message(exc.reason)) from exc
     except TimeoutError as exc:
+        logger.error("Bitget %s request timed out: %s", area, exc)
         raise EnvironmentLockError(_network_error_message(exc)) from exc
     except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Bitget %s request failed: %s", area, exc)
         raise EnvironmentLockError(_network_error_message(exc)) from exc
     if str(payload.get("code")) != "00000":
-        area = "private auth" if private else "public market data"
+        # Bitget often responds 200 OK with an error code in the body (e.g. bad
+        # signature/passphrase/IP-whitelist) rather than a true HTTP error status.
+        logger.error("Bitget %s request returned code=%s msg=%s", area, payload.get("code"), payload.get("msg"))
         raise EnvironmentLockError(f"Bitget {area} request failed: {payload.get('msg') or payload}")
     return payload
 

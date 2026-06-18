@@ -129,6 +129,39 @@ def test_and_save_bitget_account(payload: dict[str, object]):
     return ok(account)
 
 
+@router.post("/bitget/test")
+def test_bitget_connection(payload: dict[str, object] | None = None):
+    """Test whichever Bitget credentials are currently resolvable - a
+    dashboard-saved account, or BITGET_API_KEY/SECRET/PASSPHRASE environment
+    variables as a fallback - without requiring an account to be created or
+    selected via the dashboard first. Always returns 200; check `connected`."""
+    payload = payload or {}
+    symbol = str(payload.get("symbol") or "BTCUSDT").upper()
+    state = get_state()
+    diagnostics = state.bitget_environment.credential_diagnostics()
+    if not diagnostics["available"]:
+        missing = diagnostics["missing_env_vars"]
+        message = (
+            f"No Bitget credentials found. Missing environment variable(s): {', '.join(missing)}."
+            if missing
+            else "No Bitget credentials found, and the environment variables that are set could not be used."
+        )
+        return ok({"connected": False, "credential_source": "NONE", "error": message})
+    try:
+        result = state.bitget_environment.test_connection(symbol=symbol)
+    except (EnvironmentLockError, CredentialVaultError) as exc:
+        return ok({"connected": False, "credential_source": diagnostics["source"], "error": str(exc)})
+    return ok(
+        {
+            "connected": True,
+            "credential_source": diagnostics["source"],
+            "available_balance": result.get("available_balance"),
+            "available_margin": result.get("available_margin"),
+            "account_payload": result.get("account_payload"),
+        }
+    )
+
+
 @router.post("/select-active")
 def select_active_account(payload: dict[str, object]):
     state = get_state()

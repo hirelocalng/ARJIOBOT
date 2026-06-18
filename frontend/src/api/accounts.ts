@@ -15,6 +15,11 @@ export const deleteAccount = (accountId: string) => request<{ deleted: boolean }
 export const setDefaultAccount = (accountId: string) => request<ExchangeAccount>(`/api/accounts/${accountId}/default`, { method: 'POST' });
 export const selectActiveAccount = (accountId: string) => request<ExchangeAccount>('/api/accounts/select-active', { method: 'POST', body: JSON.stringify({ account_id: accountId }) });
 export const testConnection = (accountId: string) => request<ExchangeAccount>(`/api/accounts/${accountId}/test-connection`, { method: 'POST', timeoutMs: 35000 });
+export const testBitgetConnection = (symbol = 'BTCUSDT') =>
+  request<{ connected: boolean; credential_source: string; error?: string; available_balance?: string; available_margin?: string }>(
+    '/api/accounts/bitget/test',
+    { method: 'POST', body: JSON.stringify({ symbol }), timeoutMs: 35000 }
+  );
 export const refreshAccount = (accountId: string) => request<ExchangeAccount>(`/api/accounts/${accountId}/refresh`, { method: 'POST', timeoutMs: 35000 });
 export const reconnectAccount = (accountId: string, payload: AccountPayload & { nickname?: string; symbol?: string }) =>
   request<ExchangeAccount>(`/api/accounts/${accountId}/reconnect`, { method: 'POST', body: JSON.stringify(payload) });

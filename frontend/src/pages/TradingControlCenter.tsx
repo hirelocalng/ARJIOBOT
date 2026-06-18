@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { NumberInput } from '../components/forms/NumberInput';
 import { SelectInput } from '../components/forms/SelectInput';
 import { dryRunPreview, runLiveAutomationOnce } from '../api/bitget';
+import { testBitgetConnection } from '../api/accounts';
 import type { ControlPlaneSnapshot } from '../types/controlPlane';
 
 const LAST_PREVIEW_STORAGE_KEY = 'arjiobot:last-dry-run-preview';
@@ -40,6 +41,8 @@ function LoadedTradingControlCenter({ controlPlane, onRefresh }: { controlPlane:
   const [previewStatus, setPreviewStatus] = useState('');
   const [previewResult, setPreviewResult] = useState<Record<string, unknown> | null>(() => readStoredPreview());
   const [automationStatus, setAutomationStatus] = useState('');
+  const [connectionRefreshStatus, setConnectionRefreshStatus] = useState('');
+  const [refreshingConnection, setRefreshingConnection] = useState(false);
   const selectedProfile = String(strategy.selected_profile || controlPlane.settings.active_strategy_profile || '');
   const selectedTpModel = String(strategy.applied_tp_model || controlPlane.settings.selected_rr_profile || 'RR_1_5');
   const timeExitEnabled = selectedTpModel === 'TIME_BASED_EXIT';
@@ -133,6 +136,24 @@ function LoadedTradingControlCenter({ controlPlane, onRefresh }: { controlPlane:
     }
   };
 
+  const refreshControlState = async () => {
+    setRefreshingConnection(true);
+    setConnectionRefreshStatus('Testing Bitget connection...');
+    try {
+      const result = await testBitgetConnection();
+      setConnectionRefreshStatus(
+        result.connected
+          ? `Connected (source: ${String(result.credential_source)}). Available balance: ${String(result.available_balance ?? 'N/A')}`
+          : `Not connected (source: ${String(result.credential_source)}): ${String(result.error ?? 'unknown error')}`
+      );
+    } catch (error) {
+      setConnectionRefreshStatus(`Connection test failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await onRefresh();
+      setRefreshingConnection(false);
+    }
+  };
+
   const runAutomationCheck = async () => {
     setAutomationStatus('Running live automation handoff check...');
     try {
@@ -151,8 +172,20 @@ function LoadedTradingControlCenter({ controlPlane, onRefresh }: { controlPlane:
           <h1 className="text-xl font-semibold text-ink">Trading Control Center</h1>
           <p className="text-sm text-muted">One backend source of truth for profile, exchange, mode, account, pairs, risk, readiness, and backtest-to-live transition.</p>
         </div>
-        <button className="rounded-md bg-action px-3 py-2 text-sm font-semibold text-slate-950" onClick={() => void onRefresh()}>Refresh Control State</button>
+        <button
+          className="rounded-md bg-action px-3 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
+          disabled={refreshingConnection}
+          onClick={() => void refreshControlState()}
+        >
+          {refreshingConnection ? 'Testing connection...' : 'Refresh Control State'}
+        </button>
       </div>
+
+      {connectionRefreshStatus && (
+        <div className={`rounded-md border p-3 text-xs ${connectionRefreshStatus.startsWith('Connected') ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100' : 'border-red-400/30 bg-red-500/10 text-red-100'}`}>
+          {connectionRefreshStatus}
+        </div>
+      )}
 
       <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         <StatusTile label="Profile Ready" value={readiness.profile_ready} />
