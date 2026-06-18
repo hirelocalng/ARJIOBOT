@@ -16,6 +16,13 @@ router = APIRouter(prefix="/api", tags=["health"])
 
 @router.get("/health")
 def health():
+    """Liveness probe for Railway. No dependencies, cannot fail short of the
+    process being dead - use /api/health/full for actual diagnostics."""
+    return {"status": "ok"}
+
+
+@router.get("/health/full")
+def health_full():
     state = get_state()
     return ok(
         {
