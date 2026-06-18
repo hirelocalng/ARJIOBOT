@@ -24,7 +24,7 @@ from arjiobot.setup_tracker.setup_models import Setup, SetupDirection, SetupStat
 from arjiobot.swings.swing_models import SwingType
 from arjiobot.swings.swings import SwingDetectionEngine
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "scripts" / "backtest_csv.py"
 _RUNNER: ModuleType | None = None
 

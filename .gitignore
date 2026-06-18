@@ -28,10 +28,13 @@ frontend/node_modules/.vite/
 
 # Generated reports and cleanup staging
 reports/backtests/
+backend/reports/
 _cleanup_quarantine/
 
 # Local temp/log artifacts
 .pytest_tmp/
+backend/.pytest_tmp/
+backend/data/
 *.log
 *.tmp
 *.bak

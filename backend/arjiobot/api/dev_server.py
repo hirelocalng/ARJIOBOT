@@ -6,13 +6,27 @@ import json
 import logging
 import os
 import re
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from arjiobot.main import create_app
-
-
-app = create_app()
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
+
+logger.info("ArjioBot API starting up...")
+try:
+    from arjiobot.main import create_app
+
+    app = create_app()
+    from arjiobot.backtesting.research_profiles import get_strategy_profiles
+
+    logger.info("ArjioBot API app created successfully (%d strategy profiles loaded)", len(get_strategy_profiles()))
+except Exception:
+    logger.exception("ArjioBot API failed to start during create_app()")
+    raise
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -132,8 +146,12 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     host = os.getenv("API_HOST", "127.0.0.1")
     port = int(os.getenv("API_PORT", "8000"))
-    print(f"ArjioBot API listening on http://{host}:{port}")
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    logger.info("ArjioBot API listening on http://%s:%s", host, port)
+    try:
+        ThreadingHTTPServer((host, port), Handler).serve_forever()
+    except Exception:
+        logger.exception("ArjioBot API server crashed")
+        raise
 
 
 def _docs_html() -> str:

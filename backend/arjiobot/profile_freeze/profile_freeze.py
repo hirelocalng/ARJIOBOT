@@ -21,18 +21,18 @@ ALLOW_PROFILE_MUTATION_ENV = "ALLOW_PROFILE_MUTATION"
 LOCK_FILE_NAME = "profiles.lock.json"
 LOCK_SCHEMA_VERSION = 1
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[2]
 LOCK_PATH = ROOT / LOCK_FILE_NAME
 
 PROTECTED_PROFILE_LOGIC_PATHS: tuple[str, ...] = (
-    "backend/arjiobot/backtesting/research_profiles.py",
-    "backend/arjiobot/backtesting/timeframe_profiles.py",
-    "backend/arjiobot/swings/swings.py",
-    "backend/arjiobot/fvg/fvg.py",
-    "backend/arjiobot/fvg/fvg_tap_rules.py",
-    "backend/arjiobot/setup_tracker/setup_invalidation.py",
-    "backend/arjiobot/strategy/strategy_engine.py",
-    "backend/arjiobot/risk/rr_profiles.py",
+    "arjiobot/backtesting/research_profiles.py",
+    "arjiobot/backtesting/timeframe_profiles.py",
+    "arjiobot/swings/swings.py",
+    "arjiobot/fvg/fvg.py",
+    "arjiobot/fvg/fvg_tap_rules.py",
+    "arjiobot/setup_tracker/setup_invalidation.py",
+    "arjiobot/strategy/strategy_engine.py",
+    "arjiobot/risk/rr_profiles.py",
     "scripts/backtest_csv.py",
 )
 

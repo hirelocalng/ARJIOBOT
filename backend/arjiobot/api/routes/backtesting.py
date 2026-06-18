@@ -26,12 +26,16 @@ from arjiobot.risk.rr_profiles import PRODUCTION_RR_PROFILE, SUPPORTED_TP_MODELS
 
 API_SUPPORTED_TP_MODELS = (*SUPPORTED_TP_MODELS, "TIME_BASED_EXIT")
 
-ROOT = Path(__file__).resolve().parents[4]
-SCRIPTS = ROOT / "scripts"
+BACKEND_ROOT = Path(__file__).resolve().parents[3]
+SCRIPTS = BACKEND_ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from backtest_csv import run as run_csv_backtest  # noqa: E402
+
+# Generated backtest artifacts (reports/backtests, .pytest_tmp) intentionally stay at the
+# monorepo root, unrelated to where backtest_csv.py itself is loaded from.
+ROOT = Path(__file__).resolve().parents[4]
 
 router = APIRouter(prefix="/api/backtesting", tags=["backtesting"])
 logger = logging.getLogger(__name__)

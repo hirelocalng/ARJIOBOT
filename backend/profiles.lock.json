@@ -1,0 +1,555 @@
+{
+  "allow_mutation_env": "ALLOW_PROFILE_MUTATION",
+  "locked_profile_ids": [
+    "STRICT_PROFILE",
+    "PROFILE_F_VOLUME",
+    "PROFILE_F_BALANCED",
+    "PROFILE_F_SELECTIVE",
+    "PROFILE_G_CODEX_OPTIMIZED",
+    "PROFILE_RECOVERED_HIGH_WINRATE",
+    "PROFILE_2"
+  ],
+  "profiles": [
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": true,
+        "tunable_parameters": []
+      },
+      "entry_model": "STRICT_1M_CONFIRMATION",
+      "expansion_rules": {
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 2.0,
+        "require_expansion_c3": true
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": false,
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 2.0,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Strict Profile - original Arjio strategy",
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "note": "Original strict Arjio strategy. Full 1M confirmation chain: swing high -> expansion -> FVG -> retest. Expansion ratio 2.0-4.0. Three completed 8M candle retrace window.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": true,
+        "profile_id": "STRICT_PROFILE",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": true,
+        "require_expansion_c3": true,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "DEFAULT_16_12_8",
+        "tp_model": "RR_1_5",
+        "tunable_parameters": [],
+        "use_linked_fvg_detection": true
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "use_linked_fvg_detection": true
+      },
+      "profile_hash": "ca19071c0162ad15a5f7f550a02b75e99187c151be0ad43e3ac3ec7b7bb21405",
+      "profile_id": "STRICT_PROFILE",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": false,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 8,
+        "internal_fvg_timeframe_label": "8M",
+        "label": "16M / 12M / 8M / 1M",
+        "main_fvg_timeframe": 16,
+        "main_fvg_timeframe_label": "16M",
+        "profile_id": "DEFAULT_16_12_8",
+        "retrace_fvg_timeframe": 12,
+        "retrace_fvg_timeframe_label": "12M",
+        "retrace_window_timeframe": 8,
+        "retrace_window_timeframe_label": "8M",
+        "swing_timeframe": 16,
+        "swing_timeframe_label": "16M"
+      },
+      "tp_model": "RR_1_5"
+    },
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "tunable_parameters": []
+      },
+      "entry_model": "DIRECT_12M_RETRACE",
+      "expansion_rules": {
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 1.0,
+        "require_expansion_c3": true
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": true,
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 1.0,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Profile F Volume",
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "note": "Profile F Volume: highest-frequency production variant. Direct 12M FVG retrace entry, expansion ratio 1.0-4.0, three completed 8M candle retrace window, RR fixed at 1:1.5.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": true,
+        "profile_id": "PROFILE_F_VOLUME",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "require_expansion_c3": true,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "DEFAULT_16_12_8",
+        "tp_model": "RR_1_5",
+        "tunable_parameters": [],
+        "use_linked_fvg_detection": true
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "use_linked_fvg_detection": true
+      },
+      "profile_hash": "4beafaee491ae05b47d9a2fd10b767da121b2872eee99f83d62c07726917c57c",
+      "profile_id": "PROFILE_F_VOLUME",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": true,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 8,
+        "internal_fvg_timeframe_label": "8M",
+        "label": "16M / 12M / 8M / 1M",
+        "main_fvg_timeframe": 16,
+        "main_fvg_timeframe_label": "16M",
+        "profile_id": "DEFAULT_16_12_8",
+        "retrace_fvg_timeframe": 12,
+        "retrace_fvg_timeframe_label": "12M",
+        "retrace_window_timeframe": 8,
+        "retrace_window_timeframe_label": "8M",
+        "swing_timeframe": 16,
+        "swing_timeframe_label": "16M"
+      },
+      "tp_model": "RR_1_5"
+    },
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "tunable_parameters": []
+      },
+      "entry_model": "DIRECT_12M_RETRACE",
+      "expansion_rules": {
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 1.5,
+        "require_expansion_c3": true
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": true,
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 1.5,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Profile F Balanced",
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "note": "Profile F Balanced: middle production variant. Direct 12M FVG retrace entry, expansion ratio 1.5-4.0, three completed 8M candle retrace window, RR fixed at 1:1.5.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": true,
+        "profile_id": "PROFILE_F_BALANCED",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "require_expansion_c3": true,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "DEFAULT_16_12_8",
+        "tp_model": "RR_1_5",
+        "tunable_parameters": [],
+        "use_linked_fvg_detection": true
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "use_linked_fvg_detection": true
+      },
+      "profile_hash": "3830bd6bcdd2d3a3990b2e3ef21979b45dc1e46929f1931374daba80d353f1be",
+      "profile_id": "PROFILE_F_BALANCED",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": true,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 8,
+        "internal_fvg_timeframe_label": "8M",
+        "label": "16M / 12M / 8M / 1M",
+        "main_fvg_timeframe": 16,
+        "main_fvg_timeframe_label": "16M",
+        "profile_id": "DEFAULT_16_12_8",
+        "retrace_fvg_timeframe": 12,
+        "retrace_fvg_timeframe_label": "12M",
+        "retrace_window_timeframe": 8,
+        "retrace_window_timeframe_label": "8M",
+        "swing_timeframe": 16,
+        "swing_timeframe_label": "16M"
+      },
+      "tp_model": "RR_1_5"
+    },
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "tunable_parameters": []
+      },
+      "entry_model": "DIRECT_12M_RETRACE",
+      "expansion_rules": {
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 2.0,
+        "require_expansion_c3": true
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": true,
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 2.0,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Profile F Selective",
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "note": "Profile F Selective: most selective production variant. Direct 12M FVG retrace entry, expansion ratio 2.0-4.0, three completed 8M candle retrace window, RR fixed at 1:1.5.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": true,
+        "profile_id": "PROFILE_F_SELECTIVE",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "require_expansion_c3": true,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "DEFAULT_16_12_8",
+        "tp_model": "RR_1_5",
+        "tunable_parameters": [],
+        "use_linked_fvg_detection": true
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "use_linked_fvg_detection": true
+      },
+      "profile_hash": "a2abc6b3142cda06a44cc688266fd425425ed15fb45f7d0024dea588e19330b9",
+      "profile_id": "PROFILE_F_SELECTIVE",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": true,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 8,
+        "internal_fvg_timeframe_label": "8M",
+        "label": "16M / 12M / 8M / 1M",
+        "main_fvg_timeframe": 16,
+        "main_fvg_timeframe_label": "16M",
+        "profile_id": "DEFAULT_16_12_8",
+        "retrace_fvg_timeframe": 12,
+        "retrace_fvg_timeframe_label": "12M",
+        "retrace_window_timeframe": 8,
+        "retrace_window_timeframe_label": "8M",
+        "swing_timeframe": 16,
+        "swing_timeframe_label": "16M"
+      },
+      "tp_model": "RR_1_5"
+    },
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "tunable_parameters": [
+          "timeframe_profile_id",
+          "expansion_ratio_min",
+          "expansion_ratio_max",
+          "retrace_window_8m_candles",
+          "tp_model",
+          "direct_12m_retrace_entry_enabled"
+        ]
+      },
+      "entry_model": "DIRECT_12M_RETRACE",
+      "expansion_rules": {
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 1.0,
+        "require_expansion_c3": true
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": true,
+        "expansion_ratio_max": 4.0,
+        "expansion_ratio_min": 1.0,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Profile G Codex Optimized",
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "note": "Research-only optimized profile selected from SOLUSDT April 2026 diagnostics. It keeps the Profile F direct 12M retrace entry model and broad 1.0-4.0 C3 expansion range, but uses a research-only 1R take-profit model because that variant produced the strongest trade count plus validation stability. Not approved for production, demo trading, or live trading.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": false,
+        "profile_id": "PROFILE_G_CODEX_OPTIMIZED",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "require_expansion_c3": true,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "DEFAULT_16_12_8",
+        "tp_model": "RR_1_0_RESEARCH",
+        "tunable_parameters": [
+          "timeframe_profile_id",
+          "expansion_ratio_min",
+          "expansion_ratio_max",
+          "retrace_window_8m_candles",
+          "tp_model",
+          "direct_12m_retrace_entry_enabled"
+        ],
+        "use_linked_fvg_detection": true
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "C2_IMMEDIATE",
+        "main_fvg_match_window_candles": 0,
+        "use_linked_fvg_detection": true
+      },
+      "profile_hash": "f44ba00e2f9e2ae5a3fbf7fafb91e0971856d33754c37eefab7b9ba298cbab67",
+      "profile_id": "PROFILE_G_CODEX_OPTIMIZED",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": true,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 8,
+        "internal_fvg_timeframe_label": "8M",
+        "label": "16M / 12M / 8M / 1M",
+        "main_fvg_timeframe": 16,
+        "main_fvg_timeframe_label": "16M",
+        "profile_id": "DEFAULT_16_12_8",
+        "retrace_fvg_timeframe": 12,
+        "retrace_fvg_timeframe_label": "12M",
+        "retrace_window_timeframe": 8,
+        "retrace_window_timeframe_label": "8M",
+        "swing_timeframe": 16,
+        "swing_timeframe_label": "16M"
+      },
+      "tp_model": "RR_1_0_RESEARCH"
+    },
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "tunable_parameters": [
+          "timeframe_profile_id",
+          "expansion_ratio_min",
+          "expansion_ratio_max",
+          "retrace_window_8m_candles",
+          "tp_model",
+          "require_expansion_c3",
+          "use_linked_fvg_detection",
+          "main_fvg_match_mode",
+          "main_fvg_match_window_candles",
+          "direct_12m_retrace_entry_enabled"
+        ]
+      },
+      "entry_model": "DIRECT_12M_RETRACE",
+      "expansion_rules": {
+        "expansion_ratio_max": 3.0,
+        "expansion_ratio_min": 1.0,
+        "require_expansion_c3": false
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": true,
+        "expansion_ratio_max": 3.0,
+        "expansion_ratio_min": 1.0,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Profile Recovered High Winrate",
+        "main_fvg_match_mode": "LEGACY_EXPANSION_OR_NEXT_CANDLE",
+        "main_fvg_match_window_candles": 1,
+        "note": "Recovered research-only profile from reports/backtests/research_comparison_bt_624f5cc97f161f27c9eaebb8.json. Formerly RESEARCH_PROFILE_F_DIRECT_12M_RETRACE_ENTRY. Uses the 15M/10M/5M timeframe stack, 1.0-3.0 C3 expansion range, direct 12M retrace entry, one trade per FVG, and variable structural leg target TP.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": false,
+        "profile_id": "PROFILE_RECOVERED_HIGH_WINRATE",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "require_expansion_c3": false,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "PROFILE_15_10_5",
+        "tp_model": "LEG_TARGET_RESEARCH",
+        "tunable_parameters": [
+          "timeframe_profile_id",
+          "expansion_ratio_min",
+          "expansion_ratio_max",
+          "retrace_window_8m_candles",
+          "tp_model",
+          "require_expansion_c3",
+          "use_linked_fvg_detection",
+          "main_fvg_match_mode",
+          "main_fvg_match_window_candles",
+          "direct_12m_retrace_entry_enabled"
+        ],
+        "use_linked_fvg_detection": false
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "LEGACY_EXPANSION_OR_NEXT_CANDLE",
+        "main_fvg_match_window_candles": 1,
+        "use_linked_fvg_detection": false
+      },
+      "profile_hash": "f5887e8dc8fd327b1e5f833f1630f0433a9016064bffe2494e999413d567001d",
+      "profile_id": "PROFILE_RECOVERED_HIGH_WINRATE",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": true,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 5,
+        "internal_fvg_timeframe_label": "5M",
+        "label": "15M / 10M / 5M / 1M",
+        "main_fvg_timeframe": 15,
+        "main_fvg_timeframe_label": "15M",
+        "profile_id": "PROFILE_15_10_5",
+        "retrace_fvg_timeframe": 10,
+        "retrace_fvg_timeframe_label": "10M",
+        "retrace_window_timeframe": 5,
+        "retrace_window_timeframe_label": "5M",
+        "swing_timeframe": 15,
+        "swing_timeframe_label": "15M"
+      },
+      "tp_model": "LEG_TARGET_RESEARCH"
+    },
+    {
+      "compatibility_flags": {
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "tunable_parameters": [
+          "timeframe_profile_id",
+          "expansion_ratio_min",
+          "expansion_ratio_max",
+          "retrace_window_8m_candles",
+          "tp_model",
+          "require_expansion_c3",
+          "use_linked_fvg_detection",
+          "main_fvg_match_mode",
+          "main_fvg_match_window_candles",
+          "direct_12m_retrace_entry_enabled"
+        ]
+      },
+      "entry_model": "DIRECT_12M_RETRACE",
+      "expansion_rules": {
+        "expansion_ratio_max": 3.0,
+        "expansion_ratio_min": 1.0,
+        "require_expansion_c3": false
+      },
+      "full_parameters": {
+        "direct_12m_retrace_entry_enabled": true,
+        "expansion_ratio_max": 3.0,
+        "expansion_ratio_min": 1.0,
+        "fvg_delay_16m_candles": 0,
+        "inherited_base_profile": "STRICT_PROFILE",
+        "label": "Profile 2",
+        "main_fvg_match_mode": "LEGACY_EXPANSION_OR_NEXT_CANDLE",
+        "main_fvg_match_window_candles": 1,
+        "note": "Profile 2: recovered old Profile F from reports/backtests/research_comparison_bt_624f5cc97f161f27c9eaebb8.json. Formerly RESEARCH_PROFILE_F_DIRECT_12M_RETRACE_ENTRY. Uses the 15M/10M/5M timeframe stack, 1.0-3.0 expansion range, direct 10M retrace entry, unlinked legacy FVG matching, one trade per FVG, and structural leg target TP. Backtest reconstruction uses legacy fixed-risk sizing for this profile only.",
+        "one_trade_per_12m_fvg": true,
+        "production_safe": false,
+        "profile_id": "PROFILE_2",
+        "require_1m_bearish_expansion": false,
+        "require_1m_bearish_fvg": false,
+        "require_1m_fvg_retest": false,
+        "require_1m_swing_confirmation": false,
+        "require_expansion_c3": false,
+        "retrace_window_8m_candles": 3,
+        "timeframe_profile_id": "PROFILE_15_10_5",
+        "tp_model": "LEG_TARGET_RESEARCH",
+        "tunable_parameters": [
+          "timeframe_profile_id",
+          "expansion_ratio_min",
+          "expansion_ratio_max",
+          "retrace_window_8m_candles",
+          "tp_model",
+          "require_expansion_c3",
+          "use_linked_fvg_detection",
+          "main_fvg_match_mode",
+          "main_fvg_match_window_candles",
+          "direct_12m_retrace_entry_enabled"
+        ],
+        "use_linked_fvg_detection": false
+      },
+      "fvg_mode": {
+        "main_fvg_match_mode": "LEGACY_EXPANSION_OR_NEXT_CANDLE",
+        "main_fvg_match_window_candles": 1,
+        "use_linked_fvg_detection": false
+      },
+      "profile_hash": "4dccd361897002e51cd3391e8b7e382f4b4d5eb1d660aa6dfd0ac2a7466b60f2",
+      "profile_id": "PROFILE_2",
+      "retrace_rules": {
+        "direct_12m_retrace_entry_enabled": true,
+        "fvg_delay_16m_candles": 0,
+        "one_trade_per_12m_fvg": true,
+        "retrace_window_8m_candles": 3
+      },
+      "timeframe_stack": {
+        "internal_fvg_timeframe": 5,
+        "internal_fvg_timeframe_label": "5M",
+        "label": "15M / 10M / 5M / 1M",
+        "main_fvg_timeframe": 15,
+        "main_fvg_timeframe_label": "15M",
+        "profile_id": "PROFILE_15_10_5",
+        "retrace_fvg_timeframe": 10,
+        "retrace_fvg_timeframe_label": "10M",
+        "retrace_window_timeframe": 5,
+        "retrace_window_timeframe_label": "5M",
+        "swing_timeframe": 15,
+        "swing_timeframe_label": "15M"
+      },
+      "tp_model": "LEG_TARGET_RESEARCH"
+    }
+  ],
+  "protected_area": "PROTECTED_PROFILE_LOGIC",
+  "protected_source_hashes": {
+    "arjiobot/backtesting/research_profiles.py": "b557fe44cb9e33f01f8c3322b646919290b644971b01914d8cc3187764f3caf4",
+    "arjiobot/backtesting/timeframe_profiles.py": "e15f3884c559a5cbdf6c4a8dfb5a38aec60a430befb36dca547c4ef34090d03e",
+    "arjiobot/fvg/fvg.py": "4c09c58c9a2b69deed3f59337ca4244bd4941ed56717b7e6debb3e0713a4e5e9",
+    "arjiobot/fvg/fvg_tap_rules.py": "307d475279548337d50ce54e7d2701fe1b32c20b57b08becac5b81c8e16d00c4",
+    "arjiobot/risk/rr_profiles.py": "34d53ddce0b0acfb6cd517f8dbb3ae0c9843eb7d84f773c159021c9b7d3d33b2",
+    "arjiobot/setup_tracker/setup_invalidation.py": "70b7d42550e792a841f1d8a7f814a1513dde7f77cdd1dc1fcafc6e1b0aae116a",
+    "arjiobot/strategy/strategy_engine.py": "065224b136ba5815887fdb2cb7395a7dceb80503580a5d25dbaec5c6845b4d57",
+    "arjiobot/swings/swings.py": "503c557275dde09d823fd170b84102bbb2cb7698a1f0985d63e4a2449577c2fe",
+    "scripts/backtest_csv.py": "61dd0e5be39bbea2b03818482a9a9388971bdfacebbf5ef07ed00abd5a6c5da7"
+  },
+  "runtime_warning": "Profile freeze active: strategy logic locked.",
+  "schema_version": 1
+}
