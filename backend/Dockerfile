@@ -7,8 +7,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-ENV API_HOST=0.0.0.0
 EXPOSE 8000
 
 # Railway injects $PORT at runtime; fall back to 8000 for local `docker run`.
-CMD ["sh", "-c", "API_PORT=${PORT:-8000} python -m arjiobot.api.dev_server"]
+# Force API_HOST=0.0.0.0 inline so Railway service variables cannot override it.
+CMD ["sh", "-c", "API_HOST=0.0.0.0 API_PORT=${PORT:-8000} python -m arjiobot.api.dev_server"]
