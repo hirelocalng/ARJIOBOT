@@ -97,23 +97,68 @@ DEFAULT_SETTINGS = {
 }
 
 
+def _reapply_env_overrides(loaded: dict[str, object]) -> dict[str, object]:
+    """ADAPTER_MODE / DEFAULT_RISK_AMOUNT / MAX_LEVERAGE, when explicitly
+    set, always win over whatever is persisted (database row or JSON file)
+    and are re-applied on every process start - not just the very first
+    time a row is seeded.
+
+    Without this, a value written before one of these env vars was set (or
+    before it was changed) permanently shadows it: {**DEFAULT_SETTINGS,
+    **saved} always prefers the persisted value once any row exists, so
+    setting e.g. ADAPTER_MODE=BITGET_LIVE in Railway after the database
+    already had an adapter_mode=MOCK row from an earlier deploy did
+    nothing - confirmed by reproducing exactly that sequence locally.
+
+    Trade-off, stated plainly: a dashboard PATCH /api/settings change to
+    one of these three keys only lasts for the life of the running
+    process if the matching env var is set - the env var reasserts itself
+    on every restart. Treating these specific env vars as the
+    infrastructure-level baseline (re-applied every boot) is what actually
+    fixes "I set the env var but it's stuck on the old value."
+    """
+    adapter_mode_env = os.getenv("ADAPTER_MODE", "").strip().upper()
+    if adapter_mode_env in ALLOWED_ADAPTER_MODES and loaded.get("adapter_mode") != adapter_mode_env:
+        logger.info("ADAPTER_MODE=%s overrides persisted adapter_mode=%r", adapter_mode_env, loaded.get("adapter_mode"))
+        loaded["adapter_mode"] = adapter_mode_env
+    risk_env = _positive_number_from_env("DEFAULT_RISK_AMOUNT")
+    if risk_env and loaded.get("risk_amount_per_trade") != risk_env:
+        logger.info("DEFAULT_RISK_AMOUNT=%s overrides persisted risk_amount_per_trade=%r", risk_env, loaded.get("risk_amount_per_trade"))
+        loaded["risk_amount_per_trade"] = risk_env
+    leverage_env = _positive_number_from_env("MAX_LEVERAGE")
+    if leverage_env and loaded.get("max_leverage") != leverage_env:
+        logger.info("MAX_LEVERAGE=%s overrides persisted max_leverage=%r", leverage_env, loaded.get("max_leverage"))
+        loaded["max_leverage"] = leverage_env
+    return loaded
+
+
 def load_settings() -> dict[str, object]:
     db_settings = read_all_settings()
     if db_settings is not None:
+        logger.info("load_settings: read %d row(s) from the database; adapter_mode=%r", len(db_settings), db_settings.get("adapter_mode"))
         if not db_settings:
             # Database reachable but empty: first run. Seed from
             # DEFAULT_SETTINGS, which already incorporates ADAPTER_MODE /
             # DEFAULT_RISK_AMOUNT / MAX_LEVERAGE env vars where set.
-            write_settings(DEFAULT_SETTINGS)
-            return dict(DEFAULT_SETTINGS)
-        return _validated_settings(db_settings)
+            seeded = _reapply_env_overrides(dict(DEFAULT_SETTINGS))
+            write_settings(seeded)
+            logger.info("load_settings: first run, seeded adapter_mode=%r", seeded["adapter_mode"])
+            return seeded
+        result = _reapply_env_overrides(_validated_settings(db_settings))
+        if result != db_settings:
+            write_settings(result)
+        logger.info("load_settings: final adapter_mode=%r (source=database, ADAPTER_MODE env=%r)", result["adapter_mode"], os.getenv("ADAPTER_MODE"))
+        return result
+    logger.info("load_settings: database unavailable, falling back to %s", SETTINGS_PATH)
     if not SETTINGS_PATH.exists():
-        return dict(DEFAULT_SETTINGS)
+        return _reapply_env_overrides(dict(DEFAULT_SETTINGS))
     try:
         saved = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return dict(DEFAULT_SETTINGS)
-    return _validated_settings(saved)
+        return _reapply_env_overrides(dict(DEFAULT_SETTINGS))
+    result = _reapply_env_overrides(_validated_settings(saved))
+    logger.info("load_settings: final adapter_mode=%r (source=json file, ADAPTER_MODE env=%r)", result["adapter_mode"], os.getenv("ADAPTER_MODE"))
+    return result
 
 
 def _validated_settings(saved: dict[str, object]) -> dict[str, object]:
