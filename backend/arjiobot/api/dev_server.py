@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+# Vendored `npm run build` output (frontend/dist) - see frontend/README or the
+# deployment docs for the rebuild-and-recommit step required after frontend changes.
+STATIC_ROOT = Path(__file__).resolve().parents[2] / "static"
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -61,24 +67,52 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
-            if self.path in ("/", "/docs"):
+            if self.path == "/docs":
                 self._send_html(200, _docs_html())
                 return
-            status, payload = app.handle("GET", self.path)
-            self._send(status, payload)
+            if self.path.startswith("/api/") or self.path == "/openapi.json":
+                status, payload = app.handle("GET", self.path)
+                self._send(status, payload)
+                return
+            self._serve_static()
         except Exception:
             self._send_unhandled_error("GET")
 
     def do_HEAD(self) -> None:
         # Some health checks / load balancers probe with HEAD instead of GET.
         try:
-            if self.path in ("/", "/docs"):
+            if self.path == "/docs":
                 self._send_html(200, _docs_html(), include_body=False)
                 return
-            status, payload = app.handle("GET", self.path)
-            self._send(status, payload, include_body=False)
+            if self.path.startswith("/api/") or self.path == "/openapi.json":
+                status, payload = app.handle("GET", self.path)
+                self._send(status, payload, include_body=False)
+                return
+            self._serve_static(include_body=False)
         except Exception:
             self._send_unhandled_error("HEAD")
+
+    def _serve_static(self, *, include_body: bool = True) -> None:
+        """Serve the vendored frontend build. Unknown paths fall back to
+        index.html (the React app has no client-side router, but this keeps
+        any stray path from 404ing instead of loading the dashboard)."""
+        if not STATIC_ROOT.is_dir():
+            self._send_html(404, "<h1>Frontend build not found</h1><p>backend/static/ is missing - rebuild the frontend and re-deploy.</p>", include_body=include_body)
+            return
+        requested = (STATIC_ROOT / self.path.lstrip("/")).resolve() if self.path != "/" else STATIC_ROOT / "index.html"
+        if not requested.is_relative_to(STATIC_ROOT) or not requested.is_file():
+            requested = STATIC_ROOT / "index.html"
+        if not requested.is_file():
+            self._send_html(404, "<h1>Not Found</h1>", include_body=include_body)
+            return
+        content_type = mimetypes.guess_type(str(requested))[0] or "application/octet-stream"
+        body = requested.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if include_body:
+            self.wfile.write(body)
 
     def do_DELETE(self) -> None:
         try:
