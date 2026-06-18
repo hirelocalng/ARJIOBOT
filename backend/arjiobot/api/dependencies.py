@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from arjiobot.exchange.bitget_adapter import BitgetExchangeAdapter
 from arjiobot.exchange.bitget_environment import BitgetEnvironmentService, TradeMode
@@ -27,6 +31,21 @@ FROZEN_VISIBLE_PROFILE_IDS = {"PROFILE_RECOVERED_HIGH_WINRATE", "PROFILE_2"}
 ALLOWED_STRATEGY_PROFILES = {profile.profile_id for profile in get_strategy_profiles()}
 ALLOWED_TIMEFRAME_PROFILES = {"DEFAULT_16_12_8", "PROFILE_15_10_5"}
 ALLOWED_RR_PROFILES = {*SUPPORTED_TP_MODELS, "TIME_BASED_EXIT"}
+ALLOWED_ADAPTER_MODES = {"MOCK", "BITGET_LIVE"}
+
+
+def _adapter_mode_from_env() -> str:
+    """Startup default for adapter_mode, read from ADAPTER_MODE. Dashboard
+    changes via PATCH /api/settings still apply on top of this for the life
+    of the running process."""
+    raw = os.getenv("ADAPTER_MODE", "").strip().upper()
+    if not raw:
+        return ExchangeMode.MOCK.value
+    if raw not in ALLOWED_ADAPTER_MODES:
+        logger.warning("ADAPTER_MODE=%r is not one of %s; defaulting to MOCK", raw, sorted(ALLOWED_ADAPTER_MODES))
+        return ExchangeMode.MOCK.value
+    return raw
+
 
 DEFAULT_SETTINGS = {
     "default_timeframe_profile": "DEFAULT_16_12_8",
@@ -46,7 +65,7 @@ DEFAULT_SETTINGS = {
     "max_weekly_loss": "1500",
     "max_leverage": "",
     "risk_amount_per_trade": "",
-    "adapter_mode": ExchangeMode.MOCK.value,
+    "adapter_mode": _adapter_mode_from_env(),
     "live_trading_enabled": False,
     "trading_mode": TradeMode.OFF.value,
     "environment_lock_verified": "NO",
@@ -81,6 +100,39 @@ def load_settings() -> dict[str, object]:
 def save_settings(settings: dict[str, object]) -> None:
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def bootstrap_live_trading_from_env(state: "ApiState") -> None:
+    """If LIVE_TRADING_ENABLED=true, run the same checks
+    settings.py:_validate_live_trading_candidate requires before a dashboard
+    PATCH /api/settings would accept live_trading_enabled=true, and only set
+    it if every one passes. This does NOT arm live execution - that still
+    requires the separate, explicit POST /api/bitget/mode "ENABLE LIVE"
+    confirmation flow (bitget_environment.live_armed). Never raises - a
+    startup convenience, not a requirement for the app to come up."""
+    if os.getenv("LIVE_TRADING_ENABLED", "").strip().lower() != "true":
+        return
+    try:
+        if state.bitget_environment.last_connection_result is None:
+            try:
+                state.bitget_environment.test_connection(symbol="BTCUSDT")
+            except Exception as exc:
+                logger.warning("LIVE_TRADING_ENABLED=true but the startup Bitget connection check failed: %s", exc)
+                return
+        if not any(pair.get("enabled") for pair in state.monitored_pairs.values()):
+            logger.warning("LIVE_TRADING_ENABLED=true but no monitored pair is enabled; leaving live_trading_enabled=False")
+            return
+        try:
+            if float(str(state.settings.get("risk_amount_per_trade", "0") or "0")) <= 0:
+                raise ValueError
+        except ValueError:
+            logger.warning("LIVE_TRADING_ENABLED=true but risk_amount_per_trade is not set; leaving live_trading_enabled=False until it is configured")
+            return
+        state.settings["live_trading_enabled"] = True
+        save_settings(state.settings)
+        logger.info("LIVE_TRADING_ENABLED=true and all live-trading preconditions passed; live_trading_enabled is now True")
+    except Exception:
+        logger.exception("bootstrap_live_trading_from_env failed unexpectedly; leaving live_trading_enabled=False")
 
 
 def load_pairs() -> dict[str, dict[str, object]]:

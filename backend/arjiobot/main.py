@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI
 
 from arjiobot.api.auth import require_dashboard_auth
+from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
 
@@ -38,7 +39,5 @@ def create_app() -> FastAPI:
 
     for router in ROUTERS:
         app.include_router(router)
+    bootstrap_live_trading_from_env(get_state())
     return app
-
-
-app = create_app()
