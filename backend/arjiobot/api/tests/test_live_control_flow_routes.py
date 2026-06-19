@@ -1,10 +1,12 @@
 """Live control-flow route tests."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.routes import monitoring
 from arjiobot.api.tests.helpers import client
+from arjiobot.market_data.candle_models import Candle, Timeframe
 
 
 def test_monitoring_start_blocks_without_pairs() -> None:
@@ -80,6 +82,66 @@ def test_monitoring_poll_feeds_live_candle_rows_into_strategy_state(monkeypatch)
     assert "not enough live candles" in state.live_setup_detection["last_blocked_reason"]
 
 
+def test_merge_live_candles_appends_new_candles_to_existing() -> None:
+    existing = (_candle(0), _candle(1))
+    fresh = (_candle(2), _candle(3))
+
+    merged = monitoring._merge_live_candles(existing, fresh)
+
+    assert [candle.timestamp for candle in merged] == [candle.timestamp for candle in (*existing, *fresh)]
+
+
+def test_merge_live_candles_replaces_duplicate_timestamp_with_fresh_candle() -> None:
+    existing = (_candle(0, close="100"), _candle(1, close="100"))
+    fresh = (_candle(0, close="999"),)
+
+    merged = monitoring._merge_live_candles(existing, fresh)
+
+    assert len(merged) == 2
+    assert merged[0].close == Decimal("999")
+
+
+def test_merge_live_candles_sorts_chronologically() -> None:
+    existing = (_candle(2),)
+    fresh = (_candle(0), _candle(1))
+
+    merged = monitoring._merge_live_candles(existing, fresh)
+
+    assert [candle.timestamp for candle in merged] == sorted(candle.timestamp for candle in merged)
+
+
+def test_merge_live_candles_trims_to_configured_max_size() -> None:
+    existing = tuple(_candle(i) for i in range(5))
+    fresh = (_candle(5),)
+
+    merged = monitoring._merge_live_candles(existing, fresh, max_size=3)
+
+    assert len(merged) == 3
+    assert [candle.timestamp.minute for candle in merged] == [3, 4, 5]
+
+
+def test_monitoring_poll_merges_fresh_candles_into_existing_live_buffer(monkeypatch) -> None:
+    api = client()
+    state = get_state()
+    state.settings["adapter_mode"] = "BITGET_LIVE"
+    state.monitoring.update({"active": True, "session_id": "test_session"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "NO"}
+    pre_existing = _candle(-10)
+    state.live_candles["BTCUSDT"] = (pre_existing,)
+
+    monkeypatch.setattr(monitoring, "_schedule_poll", lambda session_id, *, delay: None)
+    monkeypatch.setattr(state.bitget_environment, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(state.bitget_environment, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(state.bitget_environment, "fetch_candles", lambda symbol, granularity="1m", limit=1000, product_type="USDT-FUTURES": _bitget_list_rows(symbol))
+
+    monitoring._poll_enabled_pairs("test_session")
+
+    candles = state.live_candles["BTCUSDT"]
+    assert pre_existing.timestamp in {candle.timestamp for candle in candles}
+    assert len(candles) == 4
+    assert [candle.timestamp for candle in candles] == sorted(candle.timestamp for candle in candles)
+
+
 def test_live_trading_on_blocks_without_connected_account() -> None:
     api = client()
     state = get_state()
@@ -135,6 +197,20 @@ def _ticker(symbol: str) -> dict[str, object]:
         "mark_price": "100",
         "index_price": "100",
     }
+
+
+def _candle(minute_offset: int, *, close: str = "100", symbol: str = "BTCUSDT") -> Candle:
+    timestamp = datetime(2024, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=minute_offset)
+    return Candle(
+        symbol=symbol,
+        timeframe=Timeframe(1),
+        timestamp=timestamp,
+        open=close,
+        high=close,
+        low=close,
+        close=close,
+        volume="1",
+    )
 
 
 def _bitget_list_rows(symbol: str) -> dict[str, object]:

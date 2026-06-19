@@ -13,9 +13,11 @@ from arjiobot.api.schemas.common import ok
 from arjiobot.exchange.account_vault import CredentialVaultError, decrypt_credentials
 from arjiobot.live_automation import run_live_automation_once
 from arjiobot.live_setup_detection import candles_from_bitget_rows, detect_live_setups_for_symbol
+from arjiobot.market_data.candle_models import Candle
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 MIN_POLL_INTERVAL_SECONDS = 5
+LIVE_CANDLE_BUFFER_MAX_SIZE = 2000
 
 
 @router.post("/start")
@@ -107,7 +109,8 @@ def _poll_enabled_pairs(session_id: str) -> None:
             ticker = state.bitget_environment.fetch_ticker(symbol)
             candles = state.bitget_environment.fetch_candles(symbol, "1m", 1000)
             rows = _normalize_candle_rows(candles.get("rows", ()))
-            state.live_candles[symbol] = candles_from_bitget_rows(symbol, rows)
+            fresh_candles = candles_from_bitget_rows(symbol, rows)
+            state.live_candles[symbol] = _merge_live_candles(state.live_candles.get(symbol, ()), fresh_candles)
             completed = now_iso()
             state.market_polls[symbol] = {
                 "symbol": symbol,
@@ -184,6 +187,23 @@ def _activate_selected_account_credentials() -> None:
             account["connection_status"] = "NEEDS_RECONNECT"
             account["verification_status"] = "NEEDS_RECONNECT"
             account["last_error"] = str(exc)
+
+
+def _merge_live_candles(
+    existing: tuple[Candle, ...], fresh: tuple[Candle, ...], *, max_size: int = LIVE_CANDLE_BUFFER_MAX_SIZE
+) -> tuple[Candle, ...]:
+    """Merge freshly polled candles into the rolling live buffer.
+
+    Candles are keyed by (symbol, timeframe, timestamp); when the same key
+    appears in both ``existing`` and ``fresh``, the freshly fetched candle wins
+    since it reflects the latest Bitget poll. The result is sorted chronologically
+    and trimmed to the most recent ``max_size`` candles.
+    """
+    merged: dict[tuple[str, object, object], Candle] = {}
+    for candle in (*existing, *fresh):
+        merged[(candle.symbol, candle.timeframe, candle.timestamp)] = candle
+    ordered = tuple(sorted(merged.values(), key=lambda candle: (candle.timestamp, candle.symbol, candle.timeframe.minutes)))
+    return ordered[-max_size:]
 
 
 def _normalize_candle_rows(rows: object) -> tuple[tuple[str, ...], ...]:
