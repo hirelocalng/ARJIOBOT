@@ -9,6 +9,7 @@ a real trade candidate from live candles.
 from __future__ import annotations
 
 import importlib.util
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +24,8 @@ from arjiobot.market_data.candle_models import Candle, CandleStatus, Timeframe
 from arjiobot.setup_tracker.setup_models import Setup, SetupDirection, SetupState, SetupStatus, build_setup_id
 from arjiobot.swings.swing_models import SwingType
 from arjiobot.swings.swings import SwingDetectionEngine
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "scripts" / "backtest_csv.py"
@@ -80,6 +83,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             selected_rr_profile=profile.tp_model if selected_tp_model == "TIME_BASED_EXIT" else str(state.settings.get("selected_rr_profile") or "RR_1_5"),
         )
         detector_state["latest_funnel"] = _compact_funnel(funnel)
+        _log_retrace_diagnostics(symbol, funnel)
         fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
         if fresh is None:
             return _finish(detector_state, "WAITING", "no fresh live trade candidate found", source=source)
@@ -218,6 +222,32 @@ def _trade_key(trade: dict[str, object]) -> str:
 def _compact_funnel(funnel: dict[str, object]) -> dict[str, object]:
     keys = ("candidate_16m_swing_highs", "passed_expansion", "passed_retrace", "entry_ready", "trades", "risk_rejected_count")
     return {key: funnel.get(key) for key in keys if key in funnel}
+
+
+def _log_retrace_diagnostics(symbol: str, funnel: dict[str, Any]) -> None:
+    """Log which funnel stage absorbed expansion-passed candidates whenever
+    none of them reach a fresh trade candidate. The compact funnel kept on
+    detector_state drops the per-stage FVG counts (and, for non-default
+    timeframe profiles, backtest_csv.py's own result dict already strips the
+    16m/12m/8m-labeled keys before returning - see _build_strategy_funnel's
+    timeframe_profile.profile_id != DEFAULT_16_12_8.profile_id branch), so
+    this is otherwise impossible to see outside ad-hoc scripting."""
+    passed_expansion = int(funnel.get("passed_expansion") or 0)
+    passed_retrace = int(funnel.get("passed_retrace") or 0)
+    if passed_expansion == 0 or passed_retrace > 0:
+        return
+    logger.info(
+        "Live retrace diagnostics for %s: passed_expansion=%s -> passed_main_fvg=%s -> passed_retrace_fvg=%s -> "
+        "passed_internal_fvg=%s -> passed_retrace=%s (retrace_window_expired=%s, close_above_fvg_before_entry=%s)",
+        symbol,
+        passed_expansion,
+        funnel.get("passed_main_fvg_timeframe_fvg", funnel.get("passed_16m_fvg")),
+        funnel.get("passed_retrace_fvg_timeframe_fvg", funnel.get("passed_12m_fvg")),
+        funnel.get("passed_internal_fvg_timeframe_fvg", funnel.get("passed_8m_fvg")),
+        passed_retrace,
+        funnel.get("rejected_retrace_window_expired"),
+        funnel.get("rejected_close_above_12m_fvg_before_entry") or funnel.get("rejected_close_above_12m_fvg"),
+    )
 
 
 def _finish(detector_state: dict[str, Any], status: str, reason: str, *, source: str) -> dict[str, Any]:
