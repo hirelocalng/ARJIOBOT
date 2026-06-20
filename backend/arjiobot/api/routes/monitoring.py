@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from threading import Timer
 
 from fastapi import APIRouter
 
-from arjiobot.api.dependencies import get_state, now_iso
+from arjiobot.api.dependencies import ApiState, get_state, now_iso, save_settings
 from arjiobot.api.errors import api_error
 from arjiobot.api.schemas.common import ok
 from arjiobot.exchange.account_vault import CredentialVaultError, decrypt_credentials
 from arjiobot.live_automation import run_live_automation_once
 from arjiobot.live_setup_detection import candles_from_bitget_rows, detect_live_setups_for_symbol
 from arjiobot.market_data.candle_models import Candle
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 MIN_POLL_INTERVAL_SECONDS = 5
@@ -24,6 +27,24 @@ LIVE_CANDLE_BUFFER_MAX_SIZE = 2000
 def start_monitoring(payload: dict[str, object] | None = None):
     payload = payload or {}
     state = get_state()
+    result = _activate_monitoring_session(state)
+    state.settings["monitoring_enabled"] = True
+    save_settings(state.settings)
+    return ok(result)
+
+
+@router.post("/stop")
+def stop_monitoring(payload: dict[str, object] | None = None):
+    state = get_state()
+    state.monitoring.update({"active": False, "stopped_at": now_iso(), "last_error": "None"})
+    state.market_polls.clear()
+    state.setups.clear()
+    state.settings["monitoring_enabled"] = False
+    save_settings(state.settings)
+    return ok({"monitoring_status": "NOT MONITORING", "message": "MONITORING STOPPED"})
+
+
+def _activate_monitoring_session(state: ApiState) -> dict[str, object]:
     enabled_pairs = [pair for pair in state.monitored_pairs.values() if pair.get("enabled")]
     if not enabled_pairs:
         raise api_error(400, "MONITORING_NO_PAIRS", "MONITORING FAILED: no pairs selected")
@@ -48,23 +69,32 @@ def start_monitoring(payload: dict[str, object] | None = None):
         symbol = str(pair.get("symbol", "")).upper()
         state.market_polls[symbol] = _pending_poll(symbol)
     _schedule_poll(session_id, delay=0.5)
-    return ok(
-        {
-            "monitoring_status": "ACTIVE",
-            "message": "MONITORING STARTED - live market polling in progress",
-            "session_id": session_id,
-            "pairs": tuple(state.market_polls),
-        }
-    )
+    return {
+        "monitoring_status": "ACTIVE",
+        "message": "MONITORING STARTED - live market polling in progress",
+        "session_id": session_id,
+        "pairs": tuple(state.market_polls),
+    }
 
 
-@router.post("/stop")
-def stop_monitoring(payload: dict[str, object] | None = None):
-    state = get_state()
-    state.monitoring.update({"active": False, "stopped_at": now_iso(), "last_error": "None"})
-    state.market_polls.clear()
-    state.setups.clear()
-    return ok({"monitoring_status": "NOT MONITORING", "message": "MONITORING STOPPED"})
+def resume_monitoring_if_enabled(state: ApiState) -> None:
+    """Re-arm the polling loop on process startup if monitoring was active
+    before the last restart/redeploy.
+
+    `state.monitoring` is in-memory only and resets to inactive on every
+    boot, but `settings.monitoring_enabled` is persisted (database or JSON
+    fallback - see save_settings). Without this, every redeploy silently
+    turns live monitoring off until a human notices and clicks Start again.
+    Never raises - a startup convenience, not a requirement for the app to
+    come up.
+    """
+    if not state.settings.get("monitoring_enabled"):
+        return
+    try:
+        result = _activate_monitoring_session(state)
+        logger.info("Resumed live monitoring on startup: session=%s pairs=%s", result["session_id"], result["pairs"])
+    except Exception as exc:
+        logger.warning("monitoring_enabled=True but auto-resume on startup failed: %s", exc)
 
 
 @router.get("/status")
@@ -91,7 +121,22 @@ def _pending_poll(symbol: str) -> dict[str, object]:
 
 
 def _poll_enabled_pairs(session_id: str) -> None:
+    """Timer callback for one polling cycle. Always reschedules the next
+    cycle in `finally`, even if this cycle raised - a single bad cycle
+    (e.g. an unexpected credential-decrypt error) must not permanently and
+    silently end the polling chain while `monitoring.active` stays True."""
     state = get_state()
+    try:
+        _run_poll_cycle(state, session_id)
+    except Exception as exc:
+        logger.exception("Live monitoring poll cycle for session %s crashed; rescheduling next poll", session_id)
+        state.monitoring["last_error"] = f"poll cycle crashed: {exc}"
+        state.monitoring["polling_status"] = "ERROR"
+    finally:
+        _schedule_poll(session_id, delay=_poll_interval_seconds())
+
+
+def _run_poll_cycle(state, session_id: str) -> None:
     _activate_selected_account_credentials()
     successes = 0
     failures: list[str] = []
@@ -161,7 +206,6 @@ def _poll_enabled_pairs(session_id: str) -> None:
     state.monitoring["poll_cycle_count"] = int(state.monitoring.get("poll_cycle_count") or 0) + 1
     if successes:
         run_live_automation_once(state, source="MONITORING_POLL")
-    _schedule_poll(session_id, delay=_poll_interval_seconds())
 
 
 def _schedule_poll(session_id: str, *, delay: float) -> None:

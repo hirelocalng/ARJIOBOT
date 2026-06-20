@@ -86,6 +86,9 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         _log_retrace_diagnostics(symbol, funnel)
         fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
         if fresh is None:
+            stale = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state)
+            if stale:
+                _record_stale_skip(symbol, stale, detector_state)
             return _finish(detector_state, "WAITING", "no fresh live trade candidate found", source=source)
 
         setup = _setup_from_trade(
@@ -206,6 +209,60 @@ def _fresh_trade_candidate(trades: object, candles: tuple[Candle, ...], detector
         if entry_time in latest_allowed:
             return trade
     return None
+
+
+def _stale_trade_candidates(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> tuple[dict[str, object], ...]:
+    """Diagnostics only - never changes what gets traded.
+
+    Trade candidates the shared strategy funnel (the same code path the
+    backtest engine uses) found and that have not already been processed,
+    but whose entry candle has rolled outside `_fresh_trade_candidate`'s
+    freshness window. These are real, valid setups by the strategy's own
+    logic; they are skipped purely because nothing polled closely enough to
+    catch them in time - typically after a monitoring restart/outage backfills
+    many candles at once. Surfacing them lets a gap be noticed instead of
+    looking identical to "no setup formed."
+    """
+    if not isinstance(trades, (tuple, list)) or not candles:
+        return ()
+    latest = candles[-1].timestamp
+    latest_allowed = {latest, candles[-2].timestamp if len(candles) > 1 else latest}
+    seen = set(str(key) for key in detector_state.get("processed_trade_keys", []))
+    stale: list[dict[str, object]] = []
+    for trade in trades:
+        if not isinstance(trade, dict) or str(trade.get("outcome")) == "RISK_REJECTED":
+            continue
+        if _trade_key(trade) in seen:
+            continue
+        try:
+            entry_time = datetime.fromisoformat(str(trade["entry_timestamp"]).replace("Z", "+00:00"))
+        except (KeyError, ValueError):
+            continue
+        if entry_time not in latest_allowed:
+            stale.append(trade)
+    return tuple(stale)
+
+
+def _record_stale_skip(symbol: str, stale: tuple[dict[str, object], ...], detector_state: dict[str, Any]) -> None:
+    timestamps = sorted(str(trade.get("entry_timestamp") or "") for trade in stale)
+    detector_state["stale_trade_candidates_skipped_total"] = int(detector_state.get("stale_trade_candidates_skipped_total") or 0) + len(stale)
+    detector_state["last_stale_skip"] = {
+        "symbol": symbol,
+        "count": len(stale),
+        "oldest_entry_timestamp": timestamps[0],
+        "newest_entry_timestamp": timestamps[-1],
+        "detected_at": _now(),
+    }
+    logger.warning(
+        "Live detection for %s found %s valid trade candidate(s) via the shared strategy funnel that are no longer "
+        "fresh (entry_timestamp older than the newest 1-2 live candles) and will NOT be acted on - entry_timestamp "
+        "range %s..%s. This usually indicates a monitoring gap (restart/outage) let live candles get ahead of "
+        "detection before the next poll caught up.",
+        symbol,
+        len(stale),
+        timestamps[0],
+        timestamps[-1],
+    )
 
 
 def _trade_key(trade: dict[str, object]) -> str:

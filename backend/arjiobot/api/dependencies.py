@@ -94,6 +94,12 @@ DEFAULT_SETTINGS = {
     "trading_mode": TradeMode.OFF.value,
     "environment_lock_verified": "NO",
     "active_account_id": "",
+    # Persists the user's intent ("Start Monitoring" was clicked and not yet
+    # stopped) across process restarts/redeploys, so the polling loop can be
+    # auto-resumed on boot instead of silently staying off until someone
+    # notices and clicks Start again. See bootstrap_live_trading_from_env /
+    # resume_monitoring_if_enabled in monitoring.py.
+    "monitoring_enabled": False,
 }
 
 
@@ -287,6 +293,13 @@ class ApiState:
             "processed_trade_keys": [],
             "latest_funnel": {},
             "latest_trade_candidate": {},
+            # Observability for trade candidates the shared strategy funnel
+            # found but the live freshness gate discarded as stale (older
+            # than the newest 1-2 live candles) - e.g. after a monitoring
+            # outage. Execution behavior is unchanged; this only makes the
+            # gap visible instead of silent.
+            "stale_trade_candidates_skipped_total": 0,
+            "last_stale_skip": {},
         }
     )
     live_automation: dict[str, object] = field(
