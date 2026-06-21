@@ -401,3 +401,29 @@ def test_fetch_position_history_tolerates_missing_or_malformed_data(monkeypatch)
 
     assert record["closed_position_count"] == 0
     assert record["closed_positions"] == ()
+
+
+def test_credential_resolution_only_logs_once_for_the_same_identity(caplog) -> None:
+    """_credentials() is called from 7 different methods (mode_status alone
+    calls it twice), and any one status check can fan out to several of
+    them in a single request - this is exactly what was flooding Railway's
+    logs with repeated "Resolved Bitget credentials from VAULT" lines, fast
+    enough to hit its 500 logs/sec rate limit. Logging must only happen on
+    the first resolution or on a real change, not on every redundant call."""
+    import logging
+
+    service = BitgetEnvironmentService()
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key_one", api_secret="secret", passphrase="pass", source="VAULT")
+
+    with caplog.at_level(logging.INFO, logger="arjiobot.exchange.bitget_environment"):
+        for _ in range(5):
+            service._credentials()
+        resolved_messages = [record.message for record in caplog.records if "Resolved Bitget credentials" in record.message]
+        assert len(resolved_messages) == 1, f"expected exactly one log line for 5 identical calls, got {len(resolved_messages)}"
+
+        # A real credential change must still be logged - the cache is keyed
+        # by (source, fingerprint), not just "have we ever logged anything".
+        service.runtime_credentials = BitgetCredentialConfig(api_key="key_two", api_secret="secret", passphrase="pass", source="VAULT")
+        service._credentials()
+        resolved_messages = [record.message for record in caplog.records if "Resolved Bitget credentials" in record.message]
+        assert len(resolved_messages) == 2

@@ -162,6 +162,15 @@ class BitgetEnvironmentService:
         self.last_open_orders: dict[str, object] | None = None
         self.last_position_history: dict[str, object] | None = None
         self.last_dry_run_preview: dict[str, object] | None = None
+        # _credentials() is called from 7 different methods (mode_status alone
+        # calls it twice - once via verify_environment_lock, once via
+        # credential_status), and any one status check can fan out to several
+        # of them in the same request. None of that is wrong to call - it's
+        # just redundant to *log* every single time when nothing changed.
+        # Tracks the last (source, last-4-of-key) pair actually logged so the
+        # INFO line below only fires on the first resolution or on a real
+        # change, not on every redundant call.
+        self._last_logged_credential_identity: tuple[str, str] | None = None
 
     def save_credentials(self, payload: dict[str, object]) -> dict[str, object]:
         mode = str(payload.get("mode") or "LIVE").upper()
@@ -830,7 +839,10 @@ class BitgetEnvironmentService:
             if fail:
                 raise EnvironmentLockError("LIVE credentials are missing")
             return None
-        logger.info("Resolved Bitget credentials from %s", credentials.source)
+        identity = (credentials.source, credentials.fingerprint)
+        if identity != self._last_logged_credential_identity:
+            logger.info("Resolved Bitget credentials from %s", credentials.source)
+            self._last_logged_credential_identity = identity
         return credentials
 
     def credential_diagnostics(self) -> dict[str, object]:
