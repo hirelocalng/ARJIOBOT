@@ -10,12 +10,23 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.tests.helpers import client
 from arjiobot.backtesting.historical_replay import load_ohlcv_csv
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig, TradeMode
 from arjiobot.live_automation import run_live_automation_once
-from arjiobot.live_setup_detection import _apply_attempt_traces, _setup_from_trade, detect_live_setups_for_symbol
+from arjiobot.live_setup_detection import (
+    RESTART_CATCHUP_WINDOW_SECONDS,
+    _apply_attempt_traces,
+    _record_stale_skips_for_radar,
+    _setup_from_trade,
+    _stale_trade_candidates,
+    detect_live_setups_for_symbol,
+)
+from arjiobot.market_data.candle_models import Candle, Timeframe
 from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
@@ -32,6 +43,7 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
         },
         setups={},
         setup_history={},
+        stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},
     )
 
@@ -221,6 +233,7 @@ def test_live_automation_only_acts_on_entry_ready_setups() -> None:
         settings=state.settings,
         setups=state.setups,
         setup_history=state.setup_history,
+        stale_trade_skips=state.stale_trade_skips,
         live_setup_detection={"processed_trade_keys": []},
     )
     detect_live_setups_for_symbol(detection_state, "ADAUSDT")
@@ -234,3 +247,151 @@ def test_live_automation_only_acts_on_entry_ready_setups() -> None:
     assert result["status"] == "WAITING"
     assert result["reason"] == "No ENTRY_READY setup found."
     assert state.bitget_environment.orders == []
+
+
+def _minute_candles(start: datetime, count: int) -> tuple[Candle, ...]:
+    return tuple(
+        Candle(
+            symbol="ADAUSDT",
+            timeframe=Timeframe(1),
+            timestamp=start + timedelta(minutes=index),
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=Decimal("10"),
+        )
+        for index in range(count)
+    )
+
+
+def test_stale_trade_candidate_reports_how_stale_in_candles_and_seconds() -> None:
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 10)  # latest candle timestamp = start + 9 minutes
+    trade = {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": (start + timedelta(minutes=5)).isoformat(),  # 4 candles before latest
+        "source_16m_swing_id": "swing_stale_1",
+    }
+
+    stale = _stale_trade_candidates((trade,), candles, {"processed_trade_keys": []})
+
+    assert len(stale) == 1
+    # 4 candles closed after entry (minutes 6,7,8,9); window allows 1 of those
+    # (the second-latest candle) to still count as fresh, so 3 candles past it.
+    assert stale[0]["candles_past_window"] == 3
+    assert stale[0]["seconds_past_window"] == 180
+
+
+def test_fresh_trade_candidate_is_never_reported_as_stale() -> None:
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 10)
+    fresh_latest = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=9)).isoformat(), "source_16m_swing_id": "a"}
+    fresh_second_latest = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=8)).isoformat(), "source_16m_swing_id": "b"}
+
+    stale = _stale_trade_candidates((fresh_latest, fresh_second_latest), candles, {"processed_trade_keys": []})
+
+    assert stale == ()
+
+
+def test_stale_skip_is_surfaced_on_the_matching_completed_setup_in_setup_radar() -> None:
+    """The exact gap this closes: Setup Radar showed a COMPLETED/100% row with
+    no indication that the matching real trade candidate was ever found and
+    then silently skipped for being stale - this proves the two get joined
+    by swing_16m_id and the skip detail reaches the API response."""
+    api = client()
+    state = get_state()
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 10)
+    trade = {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": (start + timedelta(minutes=5)).isoformat(),
+        "source_16m_swing_id": "swing_completed_1",
+    }
+    stale = _stale_trade_candidates((trade,), candles, {"processed_trade_keys": []})
+    _record_stale_skips_for_radar(state, stale)
+
+    completed = _setup_from_trade(
+        {
+            "trade_id": "trade_completed_1",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": "2026-06-16T01:30:00+00:00",
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_completed",
+            "source_16m_swing_id": "swing_completed_1",
+            "source_16m_fvg_id": "fvg16_completed",
+        },
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    state.setups[completed.setup_id] = completed
+
+    rows = {row["setup_id"]: row for row in api.get("/api/radar").json()["data"]}
+    row = rows[completed.setup_id]
+
+    assert row["stale_skip"] is not None
+    assert row["stale_skip"]["candles_past_window"] == 3
+    assert row["stale_skip"]["seconds_past_window"] == 180
+    assert row["stale_skip"]["swing_16m_id"] == "swing_completed_1"
+    assert row["stale_skip"]["skipped_at"]
+    # No monitoring session was started in this test, so there is nothing to
+    # classify as "near a restart" - must not be misreported as one.
+    assert row["stale_skip"]["likely_restart_related"] is False
+    assert row["stale_skip"]["seconds_since_monitoring_started"] is None
+
+    # A setup with no matching stale skip must not show one at all.
+    unrelated = _setup_from_trade(
+        {
+            "trade_id": "trade_completed_2",
+            "symbol": "ETHUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": "2026-06-16T01:30:00+00:00",
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_unrelated",
+            "source_16m_swing_id": "swing_unrelated",
+            "source_16m_fvg_id": "fvg16_unrelated",
+        },
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    state.setups[unrelated.setup_id] = unrelated
+    rows = {row["setup_id"]: row for row in api.get("/api/radar").json()["data"]}
+    assert rows[unrelated.setup_id]["stale_skip"] is None
+
+
+def test_stale_skip_soon_after_monitoring_started_is_classified_as_restart_catchup() -> None:
+    """Distinguishes "still catching up on a backlog right after a restart"
+    from "this happened well into an otherwise-continuous session" - the
+    real evidence needed to confirm (or rule out) monitoring gaps as the
+    actual cause of staleness, instead of guessing from polling-interval math
+    alone."""
+    state = get_state()
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 10)
+    trade = {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": (start + timedelta(minutes=5)).isoformat(),
+        "source_16m_swing_id": "swing_restart_test",
+    }
+    stale = _stale_trade_candidates((trade,), candles, {"processed_trade_keys": []})
+
+    state.monitoring["started_at"] = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    _record_stale_skips_for_radar(state, stale)
+    recorded = state.stale_trade_skips["swing_restart_test"]
+    assert recorded["likely_restart_related"] is True
+    assert recorded["seconds_since_monitoring_started"] is not None
+    assert recorded["seconds_since_monitoring_started"] < RESTART_CATCHUP_WINDOW_SECONDS
+
+    state.monitoring["started_at"] = (datetime.now(timezone.utc) - timedelta(seconds=RESTART_CATCHUP_WINDOW_SECONDS + 60)).isoformat()
+    _record_stale_skips_for_radar(state, stale)
+    recorded = state.stale_trade_skips["swing_restart_test"]
+    assert recorded["likely_restart_related"] is False
+    assert recorded["seconds_since_monitoring_started"] > RESTART_CATCHUP_WINDOW_SECONDS

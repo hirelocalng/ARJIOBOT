@@ -43,4 +43,19 @@ export type RadarSetup = {
   one_trade_per_fvg_status?: string | null;
   rejection_reason?: string | null;
   source?: string | null;
+  // Set when the real trade candidate for this same swing (a separate Setup
+  // object - see _setup_from_trade vs _apply_one_attempt_trace) was found by
+  // the shared strategy funnel but skipped by live automation for no longer
+  // being fresh (entry candle older than the latest 1-2 live candles).
+  stale_skip?: {
+    swing_16m_id: string;
+    symbol: string;
+    direction: string;
+    entry_timestamp: string;
+    candles_past_window: number;
+    seconds_past_window: number;
+    skipped_at: string;
+    seconds_since_monitoring_started: number | null;
+    likely_restart_related: boolean;
+  } | null;
 };

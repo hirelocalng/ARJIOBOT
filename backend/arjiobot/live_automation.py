@@ -152,7 +152,15 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
         "stage": "SIGNAL",
         "created_at": _now(),
     }
-    logger.info("Live automation: processing ENTRY_READY setup %s %s/%s (source=%s)", setup.setup_id, setup.symbol, setup.direction.value, source)
+    detection_to_execution_seconds = _seconds_since_detected(setup)
+    logger.info(
+        "Live automation: processing ENTRY_READY setup %s %s/%s (source=%s) - %s after detection",
+        setup.setup_id,
+        setup.symbol,
+        setup.direction.value,
+        source,
+        f"{detection_to_execution_seconds:.3f}s" if detection_to_execution_seconds is not None else "unknown",
+    )
     signal = state.strategy_engine.generate_signal_from_setup(setup)
     state.signals[signal.signal_id] = signal
     attempt["signal_id"] = signal.signal_id
@@ -358,3 +366,20 @@ def _positive_decimal(value: object, label: str) -> Decimal:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _seconds_since_detected(setup: Any) -> float | None:
+    """Wall-clock seconds between _setup_from_trade creating this setup
+    (live_setup_detection.py stamps metadata["detected_at_wallclock"] at that
+    moment) and this exact call processing it. Detection and execution
+    already run in the same poll cycle/function call chain - this makes that
+    near-zero gap observable in logs instead of just asserted from reading
+    the code."""
+    raw = getattr(setup, "metadata", {}).get("detected_at_wallclock") if getattr(setup, "metadata", None) else None
+    if not raw:
+        return None
+    try:
+        detected_at = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - detected_at).total_seconds()

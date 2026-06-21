@@ -42,6 +42,16 @@ _RUNNER: ModuleType | None = None
 
 MAX_TRACKED_SETUP_ATTEMPTS = 100
 
+# A stale skip whose detection happens within this many seconds of the
+# current monitoring session's started_at is classified as catching up on a
+# backlog from before this session started (a restart/outage), rather than a
+# gap that opened up during otherwise-continuous polling. 5 minutes is
+# generous relative to the default 15s poll interval - a session that has
+# been running continuously for 5+ minutes has had dozens of poll
+# opportunities, so a skip that far in is far more likely to be routine
+# strategy-level rejection noise than a genuine restart catch-up.
+RESTART_CATCHUP_WINDOW_SECONDS = 300
+
 # Setup Radar attempt stage -> SetupState. A trace reaching "ENTRY_READY" maps to
 # COMPLETED rather than SetupState.ENTRY_READY: the actual automation-triggering
 # ENTRY_READY row is created separately by the existing, untouched
@@ -165,6 +175,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 stale = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state)
                 if stale:
                     _record_stale_skip(symbol, stale, detector_state)
+                    _record_stale_skips_for_radar(state, stale)
                 waiting_reasons.append(f"{direction}: no fresh live trade candidate found")
                 continue
 
@@ -273,6 +284,14 @@ def _setup_from_trade(trade: dict[str, object], *, profile_id: str, timeframe_pr
             "time_exit_close_type": "MARKET",
             "live_trade_key": _trade_key(trade),
             "source": "LIVE_PROFILE_EVALUATOR",
+            # Wall-clock moment this ENTRY_READY setup was created - NOT
+            # entry_time/created_at above, which is the trade's own entry
+            # candle timestamp. live_automation.py's _process_setup logs the
+            # real elapsed time between this and when it starts processing
+            # the setup, to make the "detection and execution already run in
+            # the same poll cycle" claim verifiable from real logs rather
+            # than just code-reading.
+            "detected_at_wallclock": datetime.now(timezone.utc).isoformat(),
         },
     )
 
@@ -476,6 +495,12 @@ def _stale_trade_candidates(trades: object, candles: tuple[Candle, ...], detecto
     catch them in time - typically after a monitoring restart/outage backfills
     many candles at once. Surfacing them lets a gap be noticed instead of
     looking identical to "no setup formed."
+
+    Each returned trade dict carries two added keys describing exactly how
+    stale it is, relative to _fresh_trade_candidate's "latest or
+    second-latest 1m candle" window: candles_past_window (0 means right at
+    the edge of the window, 1 means one candle further gone, etc.) and
+    seconds_past_window (candles_past_window * 60).
     """
     if not isinstance(trades, (tuple, list)) or not candles:
         return ()
@@ -493,7 +518,9 @@ def _stale_trade_candidates(trades: object, candles: tuple[Candle, ...], detecto
         except (KeyError, ValueError):
             continue
         if entry_time not in latest_allowed:
-            stale.append(trade)
+            candles_after_entry = sum(1 for candle in candles if candle.timestamp > entry_time)
+            candles_past_window = max(0, candles_after_entry - 1)
+            stale.append({**trade, "candles_past_window": candles_past_window, "seconds_past_window": candles_past_window * 60})
     return tuple(stale)
 
 
@@ -517,6 +544,63 @@ def _record_stale_skip(symbol: str, stale: tuple[dict[str, object], ...], detect
         timestamps[0],
         timestamps[-1],
     )
+
+
+def _record_stale_skips_for_radar(state: Any, stale: tuple[dict[str, object], ...]) -> None:
+    """Per-swing version of _record_stale_skip, for Setup Radar.
+
+    _record_stale_skip only keeps the single latest skip event for a symbol
+    (overwritten every poll), which is enough for a log line but not enough
+    for radar_record() to say "this specific COMPLETED row was the one that
+    got skipped." Keyed by swing_16m_id - the same id _apply_one_attempt_trace
+    puts on the matching attempt-trace Setup row - so the two can be joined.
+
+    Each record also says how long after the *current* monitoring session
+    started this skip was detected, and whether that's within
+    RESTART_CATCHUP_WINDOW_SECONDS - distinguishing "still catching up on a
+    backlog right after a restart/outage" from "happened well into an
+    otherwise-continuous session", without requiring a separate catch-up
+    code path: the funnel already re-walks the full candidate-swing window
+    on every poll, so anything missed during a gap surfaces here naturally
+    the first time a poll runs after monitoring resumes.
+    """
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    monitoring = getattr(state, "monitoring", None) or {}
+    seconds_since_monitoring_started = None
+    started_at_raw = monitoring.get("started_at") if isinstance(monitoring, dict) else None
+    if started_at_raw and started_at_raw != "None":
+        try:
+            started_at = datetime.fromisoformat(str(started_at_raw).replace("Z", "+00:00"))
+            seconds_since_monitoring_started = (now_dt - started_at).total_seconds()
+        except ValueError:
+            seconds_since_monitoring_started = None
+    likely_restart_related = seconds_since_monitoring_started is not None and seconds_since_monitoring_started <= RESTART_CATCHUP_WINDOW_SECONDS
+    for trade in stale:
+        swing_id = str(trade.get("source_16m_swing_id") or "")
+        if not swing_id:
+            continue
+        state.stale_trade_skips[swing_id] = {
+            "swing_16m_id": swing_id,
+            "symbol": str(trade.get("symbol") or ""),
+            "direction": str(trade.get("direction") or ""),
+            "entry_timestamp": str(trade.get("entry_timestamp") or ""),
+            "candles_past_window": int(trade.get("candles_past_window") or 0),
+            "seconds_past_window": int(trade.get("seconds_past_window") or 0),
+            "skipped_at": now,
+            "seconds_since_monitoring_started": seconds_since_monitoring_started,
+            "likely_restart_related": likely_restart_related,
+        }
+    _evict_oldest_stale_skips(state)
+
+
+def _evict_oldest_stale_skips(state: Any, *, max_count: int = MAX_TRACKED_SETUP_ATTEMPTS) -> None:
+    overflow = len(state.stale_trade_skips) - max_count
+    if overflow <= 0:
+        return
+    oldest_first = sorted(state.stale_trade_skips.items(), key=lambda item: item[1].get("skipped_at") or "")
+    for swing_id, _ in oldest_first[:overflow]:
+        state.stale_trade_skips.pop(swing_id, None)
 
 
 def _trade_key(trade: dict[str, object]) -> str:

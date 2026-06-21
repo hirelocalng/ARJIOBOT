@@ -9,7 +9,7 @@ export function SetupDetails({ setup }: { setup: RadarSetup }) {
         {Object.entries(setup).map(([key, value]) => (
           <div key={key}>
             <div className="text-xs text-muted">{key}</div>
-            <div className="break-words text-sm text-ink">{Array.isArray(value) ? value.join(', ') : value ?? '—'}</div>
+            <div className="break-words text-sm text-ink">{Array.isArray(value) ? value.join(', ') : value && typeof value === 'object' ? JSON.stringify(value) : value ?? '—'}</div>
           </div>
         ))}
       </div>

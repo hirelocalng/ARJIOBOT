@@ -281,6 +281,12 @@ class ApiState:
     settings: dict[str, object] = field(default_factory=load_settings)
     setups: dict[str, object] = field(default_factory=dict)
     setup_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
+    # Keyed by swing_16m_id so Setup Radar can correlate a COMPLETED attempt
+    # row to the matching real trade candidate that the shared strategy
+    # funnel found but live_setup_detection.py skipped for no longer being
+    # fresh (see _stale_trade_candidates / _record_stale_skip). Capped the
+    # same way state.setups is - see _evict_oldest_stale_skips.
+    stale_trade_skips: dict[str, dict[str, object]] = field(default_factory=dict)
     signals: dict[str, object] = field(default_factory=dict)
     trade_plans: dict[str, object] = field(default_factory=dict)
     uploaded_csvs: dict[str, dict[str, object]] = field(default_factory=dict)

@@ -39,6 +39,12 @@ def radar_record(setup) -> dict[str, object]:
         active_profile = get_profile(strategy_profile)
     except ValueError:
         active_profile = get_profile(DEFAULT_PROFILE_ID)
+    # A COMPLETED attempt-trace row and the real trade candidate
+    # live_setup_detection.py found for the same swing are two different
+    # Setup objects (see _apply_one_attempt_trace vs _setup_from_trade) - if
+    # the real one was skipped for no longer being fresh, that fact lives in
+    # state.stale_trade_skips, keyed by the swing_16m_id both rows share.
+    stale_skip = get_state().stale_trade_skips.get(setup.swing_16m_id or "")
     return {
         "setup_id": setup.setup_id,
         "symbol": setup.symbol,
@@ -82,6 +88,7 @@ def radar_record(setup) -> dict[str, object]:
         "one_trade_per_fvg_status": profile_status.get("one_trade_per_fvg_status", "ENFORCED"),
         "rejection_reason": profile_status.get("rejection_reason") or (setup.invalidation_reason.value if setup.invalidation_reason else None),
         "source": metadata.get("source"),
+        "stale_skip": stale_skip,
     }
 
 

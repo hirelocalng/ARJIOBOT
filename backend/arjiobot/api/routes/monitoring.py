@@ -266,6 +266,15 @@ def _run_poll_cycle(state, session_id: str) -> None:
             }
             detect_live_setups_for_symbol(state, symbol, source="MONITORING_POLL")
             successes += 1
+            # Attempt execution immediately for whatever is ENTRY_READY right
+            # now - including the setup this pair's own detection may have
+            # just created - instead of waiting for every other monitored
+            # pair to also be polled first. run_live_automation_once is
+            # idempotent (processed_setup_ids/executed_trade_plan_ids) and
+            # has its own internal exception guard, so calling it once per
+            # pair instead of once per cycle is safe and cheap when there is
+            # nothing new to act on.
+            run_live_automation_once(state, source="MONITORING_POLL")
         except Exception as exc:
             completed = now_iso()
             message = str(exc)
@@ -289,8 +298,6 @@ def _run_poll_cycle(state, session_id: str) -> None:
     state.monitoring["last_error"] = "None" if successes else "; ".join(failures) if failures else "No enabled pairs polled."
     state.monitoring["last_poll_cycle_completed"] = now_iso()
     state.monitoring["poll_cycle_count"] = int(state.monitoring.get("poll_cycle_count") or 0) + 1
-    if successes:
-        run_live_automation_once(state, source="MONITORING_POLL")
 
 
 def _schedule_poll(session_id: str, *, delay: float) -> None:
