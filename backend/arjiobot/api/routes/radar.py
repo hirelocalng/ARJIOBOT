@@ -61,9 +61,13 @@ def radar_record(setup) -> dict[str, object]:
         active_profile = get_profile(DEFAULT_PROFILE_ID)
     # A COMPLETED attempt-trace row and the real trade candidate
     # live_setup_detection.py found for the same swing are two different
-    # Setup objects (see _apply_one_attempt_trace vs _setup_from_trade) - if
-    # the real one was skipped for no longer being fresh, that fact lives in
-    # state.stale_trade_skips, keyed by the swing_16m_id both rows share.
+    # Setup objects (see _apply_one_attempt_trace vs _setup_from_trade);
+    # _suppress_redundant_attempt_trace removes the former once the latter
+    # exists, so only one should ever be visible per swing in steady state.
+    # state.stale_trade_skips (keyed by swing_16m_id) is now only populated
+    # when more than one swing resolved to ENTRY_READY in the same poll -
+    # this swing's real trade is queued behind whichever was picked first
+    # this poll, not abandoned; it is picked up automatically on a later poll.
     stale_skip = get_state().stale_trade_skips.get(setup.swing_16m_id or "")
     return {
         "setup_id": setup.setup_id,
@@ -87,6 +91,7 @@ def radar_record(setup) -> dict[str, object]:
         "time_remaining": None,
         "created_at": setup.created_at.isoformat() if getattr(setup, "created_at", None) else None,
         "updated_at": setup.updated_at.isoformat() if getattr(setup, "updated_at", None) else None,
+        "completed_at": setup.completed_at.isoformat() if getattr(setup, "completed_at", None) else None,
         "invalidated_at": setup.invalidated_at.isoformat() if getattr(setup, "invalidated_at", None) else None,
         "entry_price": metadata.get("entry_signal_price") or metadata.get("latest_price"),
         "swing_16m_id": setup.swing_16m_id,

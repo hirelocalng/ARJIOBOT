@@ -21,6 +21,10 @@ export type RadarSetup = {
   created_at?: string | null;
   updated_at?: string | null;
   invalidated_at?: string | null;
+  // The tap candle's own timestamp - the true moment this setup's chain
+  // completed based on price action, not when a later poll happened to
+  // evaluate/discover it. Only set once progress reaches 100%.
+  completed_at?: string | null;
   entry_price?: string | null;
   swing_16m_id?: string | null;
   expansion_16m_id?: string | null;
@@ -43,10 +47,9 @@ export type RadarSetup = {
   one_trade_per_fvg_status?: string | null;
   rejection_reason?: string | null;
   source?: string | null;
-  // Set when the real trade candidate for this same swing (a separate Setup
-  // object - see _setup_from_trade vs _apply_one_attempt_trace) was found by
-  // the shared strategy funnel but skipped by live automation for no longer
-  // being fresh (entry candle older than the latest 1-2 live candles).
+  // Set only when more than one swing resolved to ENTRY_READY in the same
+  // poll - this one was queued behind whichever was picked first, and will
+  // be picked up automatically on a later poll. Not a permanent skip.
   stale_skip?: {
     swing_16m_id: string;
     symbol: string;

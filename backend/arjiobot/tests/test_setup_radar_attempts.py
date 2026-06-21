@@ -21,9 +21,12 @@ from arjiobot.live_automation import run_live_automation_once
 from arjiobot.live_setup_detection import (
     RESTART_CATCHUP_WINDOW_SECONDS,
     _apply_attempt_traces,
+    _fresh_trade_candidate,
     _record_stale_skips_for_radar,
     _setup_from_trade,
     _stale_trade_candidates,
+    _suppress_redundant_attempt_trace,
+    _trade_key,
     detect_live_setups_for_symbol,
 )
 from arjiobot.market_data.candle_models import Candle, Timeframe
@@ -259,6 +262,12 @@ def test_live_automation_only_acts_on_entry_ready_setups() -> None:
 
     Uses the same fully-armed live state as test_live_automation_routes.py so
     preflight passes and the ENTRY_READY filter itself is what's exercised.
+    Uses synthetic attempt traces (_apply_attempt_traces), not a real CSV
+    detection window, to guarantee no real ENTRY_READY trade exists alongside
+    them - a real strategy evaluation window almost always produces one
+    quickly once a genuinely fresh signal is no longer discarded as stale
+    (see _fresh_trade_candidate), which is the correct, fixed behavior, not
+    something this filter test should depend on being absent.
     """
     api = client()
     state = get_state()
@@ -282,22 +291,16 @@ def test_live_automation_only_acts_on_entry_ready_setups() -> None:
     state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
     state.market_polls["ADAUSDT"] = {"symbol": "ADAUSDT", "poll_success": "YES", "poll_status": "READY"}
 
-    candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
-    detection_state = SimpleNamespace(
-        live_candles={"ADAUSDT": candles_1m[:5000]},
-        settings=state.settings,
-        setups=state.setups,
-        invalidated_setups=state.invalidated_setups,
-        completed_setups=state.completed_setups,
-        setup_history=state.setup_history,
-        stale_trade_skips=state.stale_trade_skips,
-        live_setup_detection={"processed_trade_keys": []},
+    traces = (
+        _swing_trace("swing_active_0", stage="SWING_16M_CONFIRMED", progress_percent=20.0),
+        _swing_trace("swing_invalidated_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True),
+        _swing_trace("swing_completed_2", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),
     )
-    detect_live_setups_for_symbol(detection_state, "ADAUSDT")
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
     tracked = [*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values()]
     assert tracked, "expected attempt rows to exist"
     assert not any(setup.current_state is SetupState.ENTRY_READY for setup in tracked), (
-        "fixture assumption: no real ENTRY_READY trade in this window, only attempt traces"
+        "none of these synthetic traces is a real trade-detection ENTRY_READY setup"
     )
 
     result = api.post("/api/live-automation/run-once").json()["data"]
@@ -453,3 +456,128 @@ def test_stale_skip_soon_after_monitoring_started_is_classified_as_restart_catch
     recorded = state.stale_trade_skips["swing_restart_test"]
     assert recorded["likely_restart_related"] is False
     assert recorded["seconds_since_monitoring_started"] > RESTART_CATCHUP_WINDOW_SECONDS
+
+
+def test_fresh_trade_candidate_is_picked_up_even_when_its_entry_candle_is_long_past() -> None:
+    """The actual fix for "100% of completed setups show Skipped (stale)":
+    the shared strategy funnel only confirms ENTRY_READY once its full
+    retrace window has elapsed, then searches that window front-to-back, so
+    the tap satisfying entry is very often already many candles old the
+    first time it is ever discovered - even with zero monitoring gap. A
+    never-before-seen candidate must be treated as fresh regardless of how
+    chronologically old its own entry candle is."""
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 30)  # latest candle timestamp = start + 29 minutes
+    long_past_trade = {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": (start + timedelta(minutes=2)).isoformat(),  # 26 candles before latest
+        "source_16m_swing_id": "swing_long_past",
+    }
+
+    fresh = _fresh_trade_candidate((long_past_trade,), candles, {"processed_trade_keys": []})
+
+    assert fresh is not None
+    assert fresh["source_16m_swing_id"] == "swing_long_past"
+
+
+def test_fresh_trade_candidate_never_returns_an_already_processed_trade() -> None:
+    """processed_trade_keys, not chronological age, is what must gate
+    re-execution - a trade already turned into a tracked setup on an earlier
+    poll must never be returned again, no matter how the funnel re-discovers it."""
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 10)
+    trade = {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": (start + timedelta(minutes=5)).isoformat(),
+        "source_16m_swing_id": "swing_already_done",
+    }
+    detector_state = {"processed_trade_keys": []}
+
+    first = _fresh_trade_candidate((trade,), candles, detector_state)
+    assert first is not None
+    detector_state["processed_trade_keys"].append(_trade_key(trade))
+
+    second = _fresh_trade_candidate((trade,), candles, detector_state)
+    assert second is None
+
+
+def test_fresh_trade_candidate_picks_the_most_recently_confirmed_never_seen_trade() -> None:
+    """When more than one never-seen candidate exists in the same poll (a
+    genuine backlog), the most recently-confirmed one is picked for
+    execution this poll - the rest are left for _stale_trade_candidates to
+    report as queued, picked up automatically on a later poll."""
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 30)
+    older = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=2)).isoformat(), "source_16m_swing_id": "swing_older"}
+    newer = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=10)).isoformat(), "source_16m_swing_id": "swing_newer"}
+
+    fresh = _fresh_trade_candidate((older, newer), candles, {"processed_trade_keys": []})
+    assert fresh["source_16m_swing_id"] == "swing_newer"
+
+    queued = _stale_trade_candidates((older, newer), candles, {"processed_trade_keys": []}, exclude=fresh)
+    assert len(queued) == 1
+    assert queued[0]["source_16m_swing_id"] == "swing_older"
+
+
+def test_suppress_redundant_attempt_trace_removes_only_the_attempt_tracer_row_for_that_swing() -> None:
+    """Once a real ENTRY_READY trade is tracked for a swing, the
+    attempt-tracer's own COMPLETED row for that same swing_16m_id must be
+    dropped from completed_setups - otherwise one real-world completion
+    shows as two rows (the exact "duplicate ETHUSDT" symptom reported)."""
+    state = _fake_state("ADAUSDT", ())
+    traces = (_swing_trace("swing_shared_0", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),)
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    assert any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups.values())
+
+    _suppress_redundant_attempt_trace(state, "swing_shared_0")
+
+    assert not any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups.values())
+
+
+def test_suppress_redundant_attempt_trace_never_removes_the_real_trade_row_itself() -> None:
+    """The real ENTRY_READY trade's own completed_setups row carries
+    metadata source LIVE_PROFILE_EVALUATOR - the suppression helper must
+    never delete that one, only an attempt-tracer row sharing its swing_16m_id."""
+    state = _fake_state("ADAUSDT", ())
+    trade = {
+        "trade_id": "trade_real_1",
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": "2026-06-16T01:30:00+00:00",
+        "entry_price": "100",
+        "stop_loss": "120",
+        "take_profit": "80",
+        "source_12m_fvg_id": "fvg12_real",
+        "source_16m_swing_id": "swing_shared_real",
+        "source_16m_fvg_id": "fvg16_real",
+    }
+    real_setup = _setup_from_trade(trade, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
+    state.completed_setups[real_setup.setup_id] = real_setup
+
+    _suppress_redundant_attempt_trace(state, "swing_shared_real")
+
+    assert real_setup.setup_id in state.completed_setups
+
+
+def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing() -> None:
+    """End-to-end proof against real strategy data: the swing behind the real
+    ENTRY_READY trade this window produces must not also still have its own
+    separate attempt-tracer COMPLETED row sitting in completed_setups."""
+    candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
+    state = _fake_state("ADAUSDT", candles_1m[:150])
+
+    detect_live_setups_for_symbol(state, "ADAUSDT")
+
+    real_trades = [setup for setup in state.setups.values() if setup.current_state is SetupState.ENTRY_READY]
+    assert real_trades, "fixture assumption: this window produces a real entry-ready trade"
+    for real in real_trades:
+        matching_completed = [
+            setup
+            for setup in state.completed_setups.values()
+            if setup.swing_16m_id == real.swing_16m_id and setup.setup_id != real.setup_id
+        ]
+        assert matching_completed == [], (
+            f"swing {real.swing_16m_id} has both a real trade and a redundant attempt-tracer completed row"
+        )

@@ -57,7 +57,7 @@ def completed():
     union never double-counts or drops it."""
     state = get_state()
     pending_entry_ready = (setup for setup in state.setups.values() if setup.status is SetupStatus.ENTRY_READY)
-    setups = sorted(chain(pending_entry_ready, state.completed_setups.values()), key=lambda setup: setup.updated_at, reverse=True)
+    setups = sorted(chain(pending_entry_ready, state.completed_setups.values()), key=lambda setup: setup.completed_at or setup.updated_at, reverse=True)
     return ok(tuple(radar_record(setup) for setup in setups))
 
 

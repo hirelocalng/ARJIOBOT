@@ -172,12 +172,19 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
 
             fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
             if fresh is None:
-                stale = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state)
-                if stale:
-                    _record_stale_skip(symbol, stale, detector_state)
-                    _record_stale_skips_for_radar(state, stale)
                 waiting_reasons.append(f"{direction}: no fresh live trade candidate found")
                 continue
+
+            # Any other never-seen candidate this same poll besides the one just
+            # picked - this only happens when more than one swing resolves to
+            # ENTRY_READY in the same poll (e.g. a genuine restart/outage backlog
+            # surfacing at once). It is purely a visibility diagnostic now: each
+            # one will still be picked up and acted on, one per poll, on a
+            # subsequent pass - nothing here blocks execution.
+            queued = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state, exclude=fresh)
+            if queued:
+                _record_stale_skip(symbol, queued, detector_state)
+                _record_stale_skips_for_radar(state, queued)
 
             setup = _setup_from_trade(
                 fresh,
@@ -186,6 +193,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 selected_tp_model=selected_tp_model,
                 time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
             )
+            _suppress_redundant_attempt_trace(state, setup.swing_16m_id)
             if setup.setup_id not in state.setups:
                 state.setups[setup.setup_id] = setup
                 state.setup_history[setup.setup_id] = [
@@ -262,6 +270,7 @@ def _setup_from_trade(trade: dict[str, object], *, profile_id: str, timeframe_pr
         status=SetupStatus.ENTRY_READY,
         created_at=entry_time,
         updated_at=entry_time,
+        completed_at=entry_time,
         htf_fvg_id=str(trade.get("source_16m_fvg_id") or trade.get("source_12m_fvg_id") or ""),
         swing_16m_id=str(trade.get("source_16m_swing_id") or ""),
         expansion_16m_id=str(expansion.get("expansion_id") or "verified_by_live_profile_evaluator"),
@@ -378,6 +387,16 @@ def _apply_one_attempt_trace(
     )
     if trace.get("entry_price"):
         metadata["entry_signal_price"] = str(trace["entry_price"])
+
+    # This row's "time completed" is updated_at (now, this poll's eval time)
+    # below, not the tap candle's own chronological timestamp - the funnel
+    # only exposes entry_price/stop_loss/take_profit on an ENTRY_READY trace,
+    # not the tap's own timestamp, so the true price-action completion
+    # moment isn't available here without changing the protected strategy
+    # funnel file (scripts/backtest_csv.py) to add it, which is a separate,
+    # deliberately deferred change pending its own lock-file migration.
+    # _setup_from_trade's real ENTRY_READY setup, by contrast, already sets
+    # completed_at accurately from its own trade dict's entry_timestamp.
 
     field_updates: dict[str, object] = {
         "symbol": str(trace["symbol"]),
@@ -499,54 +518,98 @@ def _evict_oldest(
         setup_history.pop(setup.setup_id, None)
 
 
+def _suppress_redundant_attempt_trace(state: Any, swing_16m_id: str | None) -> None:
+    """Drop the attempt-tracer's own COMPLETED row for a swing once a real
+    ENTRY_READY trade has been tracked for that same swing.
+
+    _apply_one_attempt_trace and _setup_from_trade both derive from the
+    exact same funnel evaluation for a given swing - one is a diagnostic
+    "this chain finished" marker, the other is the real, tradable setup.
+    Without this, a single real-world completion shows as two rows in
+    Setup Radar's Completed tab (same symbol, direction, 100% progress, and
+    near-identical timestamp, since both are produced moments apart within
+    the same poll) which looks like a duplicate-completion bug even though
+    the two setup_ids are never actually equal.
+    """
+    if not swing_16m_id:
+        return
+    for setup_id, setup in list(state.completed_setups.items()):
+        if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
+            state.completed_setups.pop(setup_id, None)
+            state.setup_history.pop(setup_id, None)
+
+
 def _fresh_trade_candidate(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> dict[str, object] | None:
+    """The most recently-confirmed trade candidate that has never been
+    processed before.
+
+    "Fresh" here means "discovered for the first time this poll" - not
+    "its own entry candle is chronologically the latest 1m candle", which is
+    what this used to require. That requirement made a candidate's entry
+    timestamp equal to candles[-1]/candles[-2] - but the shared strategy
+    funnel only confirms ENTRY_READY once the *entire* retrace window
+    (profile.retrace_window_8m_candles worth of 8M candles) has fully
+    elapsed since the 16M FVG confirmed, and then searches that window
+    front-to-back for the first qualifying retrace+tap. The tap that
+    satisfies entry is therefore very often found near the START of an
+    already-elapsed window, not its end - meaning a structurally valid,
+    freshly-confirmed completion was being discovered "too old" by this
+    measure on virtually every occurrence, restart/outage or not.
+    _trade_key/processed_trade_keys already guarantee a given trade is only
+    ever picked up once - that is the freshness signal that actually applies
+    here, not chronological age of the entry candle.
+    """
     if not isinstance(trades, (tuple, list)) or not candles:
         return None
-    latest = candles[-1].timestamp
-    latest_allowed = {latest, candles[-2].timestamp if len(candles) > 1 else latest}
     seen = set(str(key) for key in detector_state.get("processed_trade_keys", []))
     for trade in reversed([trade for trade in trades if isinstance(trade, dict)]):
         if str(trade.get("outcome")) == "RISK_REJECTED":
             continue
         if _trade_key(trade) in seen:
             continue
-        try:
-            entry_time = datetime.fromisoformat(str(trade["entry_timestamp"]).replace("Z", "+00:00"))
-        except (KeyError, ValueError):
+        if "entry_timestamp" not in trade:
             continue
-        if entry_time in latest_allowed:
-            return trade
+        return trade
     return None
 
 
-def _stale_trade_candidates(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> tuple[dict[str, object], ...]:
+def _stale_trade_candidates(
+    trades: object,
+    candles: tuple[Candle, ...],
+    detector_state: dict[str, Any],
+    *,
+    exclude: dict[str, object] | None = None,
+) -> tuple[dict[str, object], ...]:
     """Diagnostics only - never changes what gets traded.
 
-    Trade candidates the shared strategy funnel (the same code path the
-    backtest engine uses) found and that have not already been processed,
-    but whose entry candle has rolled outside `_fresh_trade_candidate`'s
-    freshness window. These are real, valid setups by the strategy's own
-    logic; they are skipped purely because nothing polled closely enough to
-    catch them in time - typically after a monitoring restart/outage backfills
-    many candles at once. Surfacing them lets a gap be noticed instead of
-    looking identical to "no setup formed."
+    Other never-seen trade candidates the shared strategy funnel found this
+    same poll, besides the single one `_fresh_trade_candidate` already
+    picked (passed as `exclude`). This only has entries when more than one
+    swing resolves to ENTRY_READY in the very same poll - typically a
+    restart/outage backlog surfacing at once. Each one will still be picked
+    up and acted on automatically, one per poll, on a later pass; this is
+    purely visibility into "more than one showed up at once", not a list of
+    things that will never be traded.
 
-    Each returned trade dict carries two added keys describing exactly how
-    stale it is, relative to _fresh_trade_candidate's "latest or
-    second-latest 1m candle" window: candles_past_window (0 means right at
-    the edge of the window, 1 means one candle further gone, etc.) and
-    seconds_past_window (candles_past_window * 60).
+    Each returned trade dict carries two added keys describing how old the
+    entry candle already was relative to the latest live candle when found:
+    candles_past_window (0 means right at the latest/second-latest candle,
+    1 means one candle further gone, etc.) and seconds_past_window
+    (candles_past_window * 60).
     """
     if not isinstance(trades, (tuple, list)) or not candles:
         return ()
     latest = candles[-1].timestamp
     latest_allowed = {latest, candles[-2].timestamp if len(candles) > 1 else latest}
     seen = set(str(key) for key in detector_state.get("processed_trade_keys", []))
+    exclude_key = _trade_key(exclude) if exclude is not None else None
     stale: list[dict[str, object]] = []
     for trade in trades:
         if not isinstance(trade, dict) or str(trade.get("outcome")) == "RISK_REJECTED":
             continue
         if _trade_key(trade) in seen:
+            continue
+        if exclude_key is not None and _trade_key(trade) == exclude_key:
             continue
         try:
             entry_time = datetime.fromisoformat(str(trade["entry_timestamp"]).replace("Z", "+00:00"))
@@ -570,10 +633,11 @@ def _record_stale_skip(symbol: str, stale: tuple[dict[str, object], ...], detect
         "detected_at": _now(),
     }
     logger.warning(
-        "Live detection for %s found %s valid trade candidate(s) via the shared strategy funnel that are no longer "
-        "fresh (entry_timestamp older than the newest 1-2 live candles) and will NOT be acted on - entry_timestamp "
-        "range %s..%s. This usually indicates a monitoring gap (restart/outage) let live candles get ahead of "
-        "detection before the next poll caught up.",
+        "Live detection for %s found %s additional never-seen trade candidate(s) via the shared strategy funnel "
+        "this same poll, beyond the one just picked up - entry_timestamp range %s..%s. These are queued, not "
+        "dropped: each will still be picked up automatically, one per poll, on a later pass. More than one at "
+        "once usually means a monitoring gap (restart/outage) let several swings resolve before detection caught "
+        "up, rather than something wrong with any individual candidate.",
         symbol,
         len(stale),
         timestamps[0],
