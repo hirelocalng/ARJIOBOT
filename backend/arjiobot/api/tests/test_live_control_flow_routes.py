@@ -61,6 +61,12 @@ def test_stop_monitoring_clears_live_state() -> None:
     assert state.market_polls == {}
 
 
+def test_live_candle_history_limit_matches_confirmed_backtest_depth() -> None:
+    """31 days of closed 1M candles, matching the PROFILE_2 + DEFAULT_16_12_8 +
+    LEG_TARGET_RESEARCH backtest artifact (candles_loaded: 44,640)."""
+    assert monitoring.LIVE_CANDLE_HISTORY_LIMIT == 44_640
+
+
 def test_monitoring_poll_feeds_live_candle_rows_into_strategy_state(monkeypatch) -> None:
     api = client()
     state = get_state()
@@ -77,6 +83,7 @@ def test_monitoring_poll_feeds_live_candle_rows_into_strategy_state(monkeypatch)
 
     assert state.market_polls["BTCUSDT"]["poll_success"] == "YES"
     assert state.market_polls["BTCUSDT"]["live_candle_count"] == 3
+    assert state.market_polls["BTCUSDT"]["live_candle_history_limit"] == 44_640
     assert len(state.live_candles["BTCUSDT"]) == 3
     assert state.live_setup_detection["last_status"] == "WAITING"
     assert "not enough live candles" in state.live_setup_detection["last_blocked_reason"]

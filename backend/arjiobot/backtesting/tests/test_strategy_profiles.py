@@ -178,7 +178,9 @@ def test_profile_2_matches_old_profile_f_recovered_parameters() -> None:
     assert profile.expansion_ratio_max == 3.0
     assert profile.retrace_window_8m_candles == 3
     assert profile.direct_12m_retrace_entry_enabled is True
-    assert profile.timeframe_profile_id == "PROFILE_15_10_5"
+    # PROFILE_2 always follows the 16M/12M/8M default timeframe stack (user instruction),
+    # diverging here from the otherwise-identical PROFILE_RECOVERED_HIGH_WINRATE.
+    assert profile.timeframe_profile_id == "DEFAULT_16_12_8"
     assert profile.tp_model == "LEG_TARGET_RESEARCH"
     assert profile.require_expansion_c3 is False
     assert profile.use_linked_fvg_detection is False

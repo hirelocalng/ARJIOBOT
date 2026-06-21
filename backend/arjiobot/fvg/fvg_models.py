@@ -71,6 +71,7 @@ class FairValueGap:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     fvg_completion_candle_low: Decimal | None = None
+    fvg_completion_candle_high: Decimal | None = None
 
     def __post_init__(self) -> None:
         """Normalize and validate the FVG model."""
@@ -103,6 +104,12 @@ class FairValueGap:
                 self,
                 "fvg_completion_candle_low",
                 to_decimal(self.fvg_completion_candle_low),
+            )
+        if self.fvg_completion_candle_high is not None:
+            object.__setattr__(
+                self,
+                "fvg_completion_candle_high",
+                to_decimal(self.fvg_completion_candle_high),
             )
 
         self._validate()

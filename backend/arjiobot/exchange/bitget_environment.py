@@ -388,11 +388,19 @@ class BitgetEnvironmentService:
         self.last_tickers[symbol.upper()] = record
         return record
 
-    def fetch_candles(self, symbol: str, granularity: str = "1m", limit: int = 100, product_type: str = DEFAULT_PRODUCT_TYPE) -> dict[str, object]:
-        payload = self._public_request(
-            "/api/v2/mix/market/candles",
-            query={"symbol": symbol.upper(), "productType": product_type, "granularity": granularity, "limit": str(limit)},
-        )
+    def fetch_candles(
+        self,
+        symbol: str,
+        granularity: str = "1m",
+        limit: int = 100,
+        product_type: str = DEFAULT_PRODUCT_TYPE,
+        *,
+        end_time: str | int | None = None,
+    ) -> dict[str, object]:
+        query: dict[str, object] = {"symbol": symbol.upper(), "productType": product_type, "granularity": granularity, "limit": str(limit)}
+        if end_time is not None:
+            query["endTime"] = str(end_time)
+        payload = self._public_request("/api/v2/mix/market/candles", query=query)
         rows = payload.get("data") or []
         if not isinstance(rows, list):
             rows = []
@@ -404,6 +412,60 @@ class BitgetEnvironmentService:
             "candles_loaded": "YES" if rows else "NO",
             "last_candle_timestamp": str(rows[-1][0]) if rows and isinstance(rows[-1], list) and rows[-1] else "N/A",
             "rows": tuple(tuple(str(cell) for cell in row) for row in rows if isinstance(row, list)),
+            "fetched_at": _now(),
+        }
+        self.last_candles[f"{symbol.upper()}:{granularity}"] = record
+        return record
+
+    def backfill_candles(
+        self,
+        symbol: str,
+        granularity: str = "1m",
+        total: int = 44_640,
+        product_type: str = DEFAULT_PRODUCT_TYPE,
+        *,
+        page_size: int = 1000,
+    ) -> dict[str, object]:
+        """Page backward through Bitget's candle history to assemble up to ``total`` candles.
+
+        Bitget's mix candles endpoint caps each request at ~1000 rows, so a single
+        fetch_candles call can never reach a multi-thousand-candle lookback. This pages
+        backward using ``endTime`` (oldest timestamp from the previous page minus
+        1ms) until ``total`` rows are collected or Bitget has no older data left.
+        """
+        collected: dict[str, tuple[str, ...]] = {}
+        end_time: str | int | None = None
+        while len(collected) < total:
+            page = (
+                self.fetch_candles(symbol, granularity, page_size, product_type)
+                if end_time is None
+                else self.fetch_candles(symbol, granularity, page_size, product_type, end_time=end_time)
+            )
+            rows = page["rows"]
+            if not rows:
+                break
+            for row in rows:
+                if row:
+                    collected[row[0]] = row
+            oldest_timestamp = rows[0][0]
+            try:
+                next_end_time = int(oldest_timestamp) - 1
+            except ValueError:
+                break
+            if end_time is not None and str(next_end_time) == str(end_time):
+                break
+            end_time = next_end_time
+            if len(rows) < page_size:
+                break
+        ordered_rows = tuple(collected[key] for key in sorted(collected, key=lambda value: int(value)))[-total:]
+        record = {
+            "symbol": symbol.upper(),
+            "product_type": product_type,
+            "granularity": granularity,
+            "candle_count": len(ordered_rows),
+            "candles_loaded": "YES" if ordered_rows else "NO",
+            "last_candle_timestamp": str(ordered_rows[-1][0]) if ordered_rows else "N/A",
+            "rows": ordered_rows,
             "fetched_at": _now(),
         }
         self.last_candles[f"{symbol.upper()}:{granularity}"] = record

@@ -5,13 +5,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from arjiobot.fvg.fvg_models import FVGDirection
 from arjiobot.fvg.fvg_tap_rules import (
     TapValidationState,
     bearish_tap_close_is_valid,
     candle_touches_fvg,
     evaluate_bearish_12m_tap,
     evaluate_bearish_high_sequence,
+    evaluate_bullish_low_sequence,
     fvg_inside_bearish_leg,
+    fvg_inside_bullish_leg,
 )
 from arjiobot.fvg.tests.test_fvg_models import make_fvg
 from arjiobot.market_data.candle_models import Candle, Timeframe
@@ -122,3 +125,48 @@ def test_location_rule_for_bearish_leg() -> None:
         swing_high_price=Decimal("94"),
         completion_candle_low=Decimal("80"),
     )
+
+
+def test_location_rule_for_bullish_leg() -> None:
+    """12M/8M bullish FVG must sit inside the 16M leg (mirror of the bearish rule)."""
+    bullish_fvg = make_fvg(direction=FVGDirection.BULLISH)
+    assert fvg_inside_bullish_leg(
+        fvg=bullish_fvg,
+        swing_low_price=Decimal("80"),
+        completion_candle_high=Decimal("120"),
+    )
+    assert not fvg_inside_bullish_leg(
+        fvg=bullish_fvg,
+        swing_low_price=Decimal("80"),
+        completion_candle_high=Decimal("94"),
+    )
+    assert not fvg_inside_bullish_leg(
+        fvg=make_fvg(),
+        swing_low_price=Decimal("80"),
+        completion_candle_high=Decimal("120"),
+    )
+
+
+def test_bullish_low_sequence_mirrors_bearish_high_sequence() -> None:
+    """Two lows are allowed, third low invalidates as consolidation (mirror of high-sequence rule)."""
+    fvg = make_fvg(direction=FVGDirection.BULLISH)
+    valid = evaluate_bullish_low_sequence(
+        fvg,
+        [
+            make_candle(0, high="91", low="90", close="91"),
+            make_candle(1, high="93", low="89", close="93"),
+        ],
+    )
+    invalid = evaluate_bullish_low_sequence(
+        fvg,
+        [
+            make_candle(0, high="91", low="90", close="91"),
+            make_candle(1, high="93", low="89", close="93"),
+            make_candle(2, high="94", low="88", close="94"),
+        ],
+    )
+
+    assert valid.state is TapValidationState.VALID
+    assert valid.high_count == 2
+    assert invalid.state is TapValidationState.INVALID
+    assert invalid.high_count == 3

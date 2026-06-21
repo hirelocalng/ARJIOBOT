@@ -23,14 +23,19 @@ def validate_signal_risk(
     """Validate risk constraints and return rejection reasons plus metrics."""
     reasons: list[RiskRejectionReason] = []
     metrics: dict[str, Decimal] = {}
-    if signal.action is not SignalAction.MARKET_SELL_READY:
+    is_bullish = signal.action is SignalAction.MARKET_BUY_READY
+    if signal.action not in (SignalAction.MARKET_SELL_READY, SignalAction.MARKET_BUY_READY):
         reasons.append(RiskRejectionReason.UNSUPPORTED_SIGNAL_ACTION)
     if signal.entry_reference_price is None:
         reasons.append(RiskRejectionReason.MISSING_ENTRY_REFERENCE_PRICE)
         return tuple(reasons), metrics
     if risk_config.fixed_risk_amount is None or risk_config.fixed_risk_amount <= Decimal("0"):
         reasons.append(RiskRejectionReason.INVALID_FIXED_RISK_AMOUNT)
-    if signal.stop_reference_price is None or signal.stop_reference_price <= signal.entry_reference_price:
+    if signal.stop_reference_price is None:
+        reasons.append(RiskRejectionReason.INVALID_STOP_RELATIONSHIP)
+    elif is_bullish and signal.stop_reference_price >= signal.entry_reference_price:
+        reasons.append(RiskRejectionReason.INVALID_STOP_RELATIONSHIP)
+    elif not is_bullish and signal.stop_reference_price <= signal.entry_reference_price:
         reasons.append(RiskRejectionReason.INVALID_STOP_RELATIONSHIP)
     if reasons:
         return tuple(reasons), metrics
@@ -70,8 +75,8 @@ def validate_signal_risk(
             metrics["risk_error"] = Decimal("0")
             return tuple(reasons), metrics
 
-    risk_distance = calculate_risk_distance(entry_reference_price=signal.entry_reference_price, stop_reference_price=signal.stop_reference_price)
-    reward_distance = Decimal("0") if time_based_exit else calculate_reward_distance(entry_reference_price=signal.entry_reference_price, final_target_price=rr_math.take_profit)
+    risk_distance = calculate_risk_distance(entry_reference_price=signal.entry_reference_price, stop_reference_price=signal.stop_reference_price, direction=signal.direction)
+    reward_distance = Decimal("0") if time_based_exit else calculate_reward_distance(entry_reference_price=signal.entry_reference_price, final_target_price=rr_math.take_profit, direction=signal.direction)
     rr_ratio = Decimal("0") if time_based_exit else calculate_rr_ratio(
         entry_reference_price=signal.entry_reference_price,
         stop_reference_price=signal.stop_reference_price,
@@ -96,6 +101,7 @@ def validate_signal_risk(
         risk_amount=rr_math.fixed_risk_amount,
         entry_reference_price=signal.entry_reference_price,
         stop_reference_price=signal.stop_reference_price,
+        direction=signal.direction,
     )
     try:
         isolated = calculate_required_margin(

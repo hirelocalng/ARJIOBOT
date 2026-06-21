@@ -56,8 +56,8 @@ def validate_setup_for_signal(
     if not setup.symbol:
         errors.append("symbol is required")
         reason = SignalRejectionReason.MISSING_REQUIRED_FIELD
-    if setup.direction is not SetupDirection.BEARISH:
-        errors.append("only bearish signals are supported in v1")
+    if setup.direction not in (SetupDirection.BEARISH, SetupDirection.BULLISH):
+        errors.append("unsupported setup direction")
         reason = SignalRejectionReason.UNSUPPORTED_DIRECTION
     if setup.current_state is not SetupState.ENTRY_READY or setup.status is not SetupStatus.ENTRY_READY:
         errors.append("setup is not ENTRY_READY")
@@ -80,17 +80,27 @@ def validate_setup_for_signal(
         reason = SignalRejectionReason.DUPLICATE_SIGNAL
 
     if setup.stop_reference_price is not None and setup.final_target_price is not None:
-        if setup.stop_reference_price <= setup.final_target_price:
-            errors.append("stop reference must be above final target for bearish setup")
-            reason = SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
+        is_bullish = setup.direction is SetupDirection.BULLISH
+        if is_bullish:
+            if setup.stop_reference_price >= setup.final_target_price:
+                errors.append("stop reference must be below final target for bullish setup")
+                reason = SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
+        else:
+            if setup.stop_reference_price <= setup.final_target_price:
+                errors.append("stop reference must be above final target for bearish setup")
+                reason = SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
         entry = entry_reference_price_from_setup(setup)
-        if entry is not None and not (setup.stop_reference_price > entry > setup.final_target_price):
-            errors.append("entry reference must sit between stop and target for bearish setup")
-            reason = SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
+        if entry is not None:
+            in_order = (setup.stop_reference_price < entry < setup.final_target_price) if is_bullish else (setup.stop_reference_price > entry > setup.final_target_price)
+            if not in_order:
+                errors.append(f"entry reference must sit between stop and target for {setup.direction.value.lower()} setup")
+                reason = SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
         latest = latest_price_from_setup(setup)
-        if latest is not None and latest <= setup.final_target_price:
-            errors.append("target already reached before signal")
-            reason = SignalRejectionReason.TARGET_ALREADY_REACHED
+        if latest is not None:
+            target_reached = latest >= setup.final_target_price if is_bullish else latest <= setup.final_target_price
+            if target_reached:
+                errors.append("target already reached before signal")
+                reason = SignalRejectionReason.TARGET_ALREADY_REACHED
 
     return SignalValidationResult(
         validation_passed=not errors,

@@ -23,10 +23,12 @@ from arjiobot.execution.execution_engine import ExecutionEngine  # noqa: E402
 from arjiobot.expansion.expansion import ExpansionDetectionEngine  # noqa: E402
 from arjiobot.fvg.fvg import FVGDetectionEngine  # noqa: E402
 from arjiobot.fvg.fvg_models import FVGDirection, FairValueGap, fvg_to_record  # noqa: E402
-from arjiobot.fvg.fvg_tap_rules import fvg_inside_bearish_leg  # noqa: E402
+from arjiobot.fvg.fvg_tap_rules import fvg_inside_bearish_leg, fvg_inside_bullish_leg  # noqa: E402
 from arjiobot.setup_tracker.setup_invalidation import (
     close_above_12m_fvg,
+    close_below_12m_fvg,
     high_sequence_invalidation_reason,
+    low_sequence_invalidation_reason,
     should_invalidate_retrace_window,
 )  # noqa: E402
 from arjiobot.risk.risk_engine import RiskEngine  # noqa: E402
@@ -734,6 +736,330 @@ def _build_strategy_funnel(
             result.pop(key, None)
     return result
 
+
+def _build_bullish_strategy_funnel(
+    *,
+    profile: StrategyProfile,
+    timeframe_profile: BacktestTimeframeProfile = DEFAULT_16_12_8,
+    candidate_16m_swing_lows: tuple[Swing, ...] | list[Swing],
+    expansions_16m,
+    fvg_16m: tuple[FairValueGap, ...],
+    fvg_12m: tuple[FairValueGap, ...],
+    fvg_8m: tuple[FairValueGap, ...],
+    candles_8m,
+    candles_1m,
+    starting_balance=None,
+    risk_amount_per_trade=None,
+    max_leverage=None,
+    selected_rr_profile=PRODUCTION_RR_PROFILE,
+    fees="0",
+    slippage="0",
+) -> dict[str, object]:
+    """Mirror of _build_strategy_funnel for bullish (swing-low) setups.
+
+    Every comparison here is the bullish mirror of the bearish original:
+    swing lows instead of highs, fvg_inside_bullish_leg instead of
+    fvg_inside_bearish_leg, max/.high instead of min/.low for target math,
+    and _simulate_bullish_trade instead of _simulate_bearish_trade. The
+    bearish function above is untouched.
+    """
+    starting_balance = _required_positive_value(starting_balance, "starting_balance")
+    risk_amount_per_trade = _required_positive_value(risk_amount_per_trade, "risk_amount_per_trade")
+    max_leverage = _required_positive_value(max_leverage, "max_leverage")
+    swing_by_id = {swing.swing_id: swing for swing in candidate_16m_swing_lows}
+    valid_expansions = _profile_valid_expansions(profile=profile, expansions=expansions_16m, swing_by_id=swing_by_id)
+    strategy_16m_fvgs = tuple(fvg for fvg in fvg_16m if _fvg_matches_profile_expansion(fvg, valid_expansions, profile, direction=FVGDirection.BULLISH))
+    fvg_by_expansion = {
+        expansion.expansion_id: next(
+            (fvg for fvg in strategy_16m_fvgs if _one_fvg_matches_expansion(fvg, expansion, profile, direction=FVGDirection.BULLISH)),
+            None,
+        )
+        for expansion in valid_expansions
+    }
+
+    no_12m = 0
+    no_8m = 0
+    retrace_expired = 0
+    close_above = 0
+    third_high = 0
+    target_reached = 0
+    rejected_close_above_12m_fvg_before_entry = 0
+    direct_12m_entries = 0
+    ignored_additional_12m_fvg_tap_after_entry = 0
+    post_entry_close_above_12m_fvg_ignored = 0
+    signals_generated = 0
+    risk_rejected_count = 0
+    passed_retrace_count = 0
+    passed_12m_reaction = 0
+    first_1m_swing_high_candidates = 0
+    rejected_no_first_1m_swing_high = 0
+    passed_first_1m_swing_high = 0
+    second_1m_swing_high_candidates = 0
+    rejected_no_second_1m_swing_high = 0
+    passed_second_1m_swing_high = 0
+    rejected_third_1m_high = 0
+    rejected_1m_close_above_12m_fvg = 0
+    passed_1m_swing_confirmation = 0
+    rejected_no_1m_bearish_expansion = 0
+    passed_1m_bearish_expansion = 0
+    rejected_no_1m_bearish_fvg = 0
+    passed_1m_bearish_fvg = 0
+    rejected_no_return_to_first_1m_fvg = 0
+    rejected_no_return_to_second_1m_fvg = 0
+    passed_return_to_first_1m_fvg = 0
+    passed_return_to_second_1m_fvg = 0
+    rejected_entry_window_expired = 0
+    entry_ready = 0
+    trade_list: list[dict[str, object]] = []
+    risk_rejection_reasons: list[str] = []
+    starting_balance_decimal = Decimal(str(starting_balance))
+    risk_amount_decimal = Decimal(str(risk_amount_per_trade))
+    max_leverage_decimal = Decimal(str(max_leverage))
+    selected_rr_profile = _selected_rr_profile_for_profile(profile, str(selected_rr_profile).upper())
+    selected_rr_value = _selected_rr_value_for_profile(profile, selected_rr_profile)
+
+    for expansion in valid_expansions:
+        fvg16 = fvg_by_expansion.get(expansion.expansion_id)
+        if fvg16 is None or fvg16.fvg_completion_candle_high is None:
+            continue
+        swing = swing_by_id.get(expansion.swing_id)
+        if swing is None:
+            continue
+        related_12m = _fvgs_inside_leg(
+            fvg_12m,
+            direction=fvg16.direction,
+            swing_low_price=swing.price,
+            completion_candle_high=fvg16.fvg_completion_candle_high,
+            start_at=fvg16.confirmed_at,
+        )
+        if not related_12m:
+            no_12m += 1
+            continue
+        fvg12 = related_12m[0]
+        related_8m = _fvgs_inside_leg(
+            fvg_8m,
+            direction=fvg16.direction,
+            swing_low_price=swing.price,
+            completion_candle_high=fvg16.fvg_completion_candle_high,
+            start_at=fvg16.confirmed_at,
+        )
+        if not related_8m:
+            no_8m += 1
+            continue
+        retrace_window = tuple(candle for candle in candles_8m if candle.timestamp >= fvg16.confirmed_at)[: profile.retrace_window_8m_candles]
+        if len(retrace_window) < profile.retrace_window_8m_candles:
+            retrace_expired += 1
+            continue
+        retrace_candle = _first_1m_retrace_into_12m_fvg_within_8m_window(
+            fvg12=fvg12,
+            candles_1m=candles_1m,
+            fvg16_confirmed_at=fvg16.confirmed_at,
+            retrace_window_8m=retrace_window,
+            direction="BULLISH",
+        )
+        if retrace_candle is None:
+            retrace_expired += 1
+            continue
+        passed_retrace_count += 1
+        final_target = max(fvg16.fvg_completion_candle_high, max(candle.high for candle in retrace_window))
+        if profile.direct_12m_retrace_entry_enabled:
+            direct_counts = _classify_direct_12m_retrace_entry_for_direction(fvg12=fvg12, candles_1m=candles_1m, retrace_candle=retrace_candle, direction="BULLISH")
+            rejected_close_above_12m_fvg_before_entry += direct_counts["rejected_close_below_12m_fvg_before_entry"]
+            direct_12m_entries += direct_counts["direct_12m_entries"]
+            ignored_additional_12m_fvg_tap_after_entry += direct_counts["ignored_additional_12m_fvg_tap_after_entry"]
+            post_entry_close_above_12m_fvg_ignored += direct_counts["post_entry_close_below_12m_fvg_ignored"]
+            signals_generated += direct_counts["signals_generated"]
+            entry_ready += direct_counts["entry_ready"]
+            if direct_counts["direct_12m_entries"]:
+                trade = _simulate_bullish_trade(
+                    trade_number=len(trade_list) + 1,
+                    symbol=expansion.symbol,
+                    profile_id=profile.profile_id,
+                    inherited_base_profile=profile.inherited_base_profile,
+                    entry_candle=direct_counts["entry_candle"],
+                    future_candles=tuple(candle for candle in candles_1m if candle.timestamp > direct_counts["entry_candle"].timestamp),
+                    stop_loss=swing.price,
+                    take_profit=final_target,
+                    risk_amount=risk_amount_decimal,
+                    starting_balance=starting_balance_decimal,
+                    max_leverage=max_leverage_decimal,
+                    selected_rr_profile=selected_rr_profile,
+                    tp_model=profile.tp_model,
+                    source_12m_fvg_id=fvg12.fvg_id,
+                    source_16m_swing_id=swing.swing_id,
+                    source_16m_fvg_id=fvg16.fvg_id,
+                    setup_snapshot=_profile_f_setup_snapshot(
+                        profile=profile,
+                        timeframe_profile=timeframe_profile,
+                        expansion=expansion,
+                        swing=swing,
+                        fvg16=fvg16,
+                        fvg12=fvg12,
+                        retrace_window=retrace_window,
+                        retrace_candle=retrace_candle,
+                        entry_candle=direct_counts["entry_candle"],
+                        final_target=final_target,
+                        direction="BULLISH",
+                    ),
+                )
+                if trade["outcome"] == "RISK_REJECTED":
+                    risk_rejected_count += 1
+                    risk_rejection_reasons.append(str(trade["exit_reason"]))
+                else:
+                    trade_list.append(trade)
+            continue
+        confirmation_1m = tuple(candle for candle in candles_1m if candle.timestamp >= retrace_candle.end_timestamp)
+        if any(close_below_12m_fvg(fvg12, candle) for candle in confirmation_1m):
+            close_above += 1
+            continue
+        if low_sequence_invalidation_reason(fvg12, confirmation_1m[:3]) is not None:
+            third_high += 1
+            continue
+        if any(candle.high >= final_target for candle in confirmation_1m):
+            target_reached += 1
+            continue
+        passed_12m_reaction += 1
+        confirmation = _classify_1m_confirmation_bullish(
+            fvg12=fvg12,
+            candles=tuple(candle for candle in candles_1m if candle.timestamp >= fvg12.confirmed_at),
+            final_target=final_target,
+        )
+        first_1m_swing_high_candidates += confirmation["first_1m_swing_high_candidates"]
+        rejected_no_first_1m_swing_high += confirmation["rejected_no_first_1m_swing_high"]
+        passed_first_1m_swing_high += confirmation["passed_first_1m_swing_high"]
+        second_1m_swing_high_candidates += confirmation["second_1m_swing_high_candidates"]
+        rejected_no_second_1m_swing_high += confirmation["rejected_no_second_1m_swing_high"]
+        passed_second_1m_swing_high += confirmation["passed_second_1m_swing_high"]
+        rejected_third_1m_high += confirmation["rejected_third_1m_high"]
+        rejected_1m_close_above_12m_fvg += confirmation["rejected_1m_close_above_12m_fvg"]
+        passed_1m_swing_confirmation += confirmation["passed_1m_swing_confirmation"]
+        rejected_no_1m_bearish_expansion += confirmation["rejected_no_1m_bearish_expansion"]
+        passed_1m_bearish_expansion += confirmation["passed_1m_bearish_expansion"]
+        rejected_no_1m_bearish_fvg += confirmation["rejected_no_1m_bearish_fvg"]
+        passed_1m_bearish_fvg += confirmation["passed_1m_bearish_fvg"]
+        rejected_no_return_to_first_1m_fvg += confirmation["rejected_no_return_to_first_1m_fvg"]
+        rejected_no_return_to_second_1m_fvg += confirmation["rejected_no_return_to_second_1m_fvg"]
+        passed_return_to_first_1m_fvg += confirmation["passed_return_to_first_1m_fvg"]
+        passed_return_to_second_1m_fvg += confirmation["passed_return_to_second_1m_fvg"]
+        rejected_entry_window_expired += confirmation["rejected_entry_window_expired"]
+        entry_ready += confirmation["entry_ready"]
+
+    passed_16m_fvg = len(strategy_16m_fvgs)
+    unaccounted_after_retrace = _unaccounted_after_retrace(
+        passed_retrace=passed_retrace_count,
+        rejected_close_above_12m_fvg=close_above,
+        rejected_third_1m_high=rejected_third_1m_high,
+        rejected_target_reached_before_entry=target_reached,
+        rejected_no_first_1m_swing_high=rejected_no_first_1m_swing_high,
+        rejected_no_second_1m_swing_high=rejected_no_second_1m_swing_high,
+        rejected_1m_close_above_12m_fvg=rejected_1m_close_above_12m_fvg,
+        rejected_no_1m_bearish_expansion=rejected_no_1m_bearish_expansion,
+        rejected_no_1m_bearish_fvg=rejected_no_1m_bearish_fvg,
+        rejected_no_return_to_first_1m_fvg=rejected_no_return_to_first_1m_fvg,
+        rejected_no_return_to_second_1m_fvg=rejected_no_return_to_second_1m_fvg,
+        rejected_entry_window_expired=rejected_entry_window_expired,
+        entry_ready=entry_ready,
+    )
+    if profile.direct_12m_retrace_entry_enabled:
+        unaccounted_after_retrace = passed_retrace_count - rejected_close_above_12m_fvg_before_entry - direct_12m_entries
+    performance_summary = _performance_summary(
+        trades=trade_list,
+        starting_balance=starting_balance_decimal,
+        risk_amount_per_trade=risk_amount_decimal,
+        selected_rr_profile=selected_rr_profile,
+        selected_rr_value=selected_rr_value,
+        signals_generated=signals_generated,
+        risk_rejected_count=risk_rejected_count,
+        risk_rejection_reasons=tuple(risk_rejection_reasons),
+    )
+    _apply_balances(trade_list, starting_balance_decimal)
+    performance_summary = _performance_summary(
+        trades=trade_list,
+        starting_balance=starting_balance_decimal,
+        risk_amount_per_trade=risk_amount_decimal,
+        selected_rr_profile=selected_rr_profile,
+        selected_rr_value=selected_rr_value,
+        signals_generated=signals_generated,
+        risk_rejected_count=risk_rejected_count,
+        risk_rejection_reasons=tuple(risk_rejection_reasons),
+    )
+    swing_label = f"{timeframe_profile.swing_timeframe}m"
+    main_label = f"{timeframe_profile.main_fvg_timeframe}m"
+    retrace_label = f"{timeframe_profile.retrace_fvg_timeframe}m"
+    internal_label = f"{timeframe_profile.internal_fvg_timeframe}m"
+    funnel = {
+        "candidate_16m_swing_highs": len(candidate_16m_swing_lows),
+        "rejected_no_expansion": len(candidate_16m_swing_lows) - len(valid_expansions),
+        "passed_expansion": len(valid_expansions),
+        "rejected_no_immediate_16m_fvg": len(valid_expansions) - passed_16m_fvg,
+        "passed_16m_fvg": passed_16m_fvg,
+        "rejected_no_12m_fvg_inside_leg": no_12m,
+        "passed_12m_fvg": passed_16m_fvg - no_12m,
+        "rejected_no_8m_fvg_inside_leg": no_8m,
+        "passed_8m_fvg": max(0, passed_16m_fvg - no_12m - no_8m),
+        "rejected_retrace_window_expired": retrace_expired,
+        "passed_retrace": passed_retrace_count,
+        "rejected_close_above_12m_fvg": close_above,
+        "rejected_close_above_12m_fvg_before_entry": rejected_close_above_12m_fvg_before_entry,
+        "direct_12m_entries": direct_12m_entries,
+        "ignored_additional_12m_fvg_tap_after_entry": ignored_additional_12m_fvg_tap_after_entry,
+        "post_entry_close_above_12m_fvg_ignored": post_entry_close_above_12m_fvg_ignored,
+        "rejected_third_high": third_high,
+        "rejected_target_reached_before_entry": target_reached,
+        "passed_12m_reaction": passed_12m_reaction,
+        "first_1m_swing_high_candidates": first_1m_swing_high_candidates,
+        "rejected_no_first_1m_swing_high": rejected_no_first_1m_swing_high,
+        "passed_first_1m_swing_high": passed_first_1m_swing_high,
+        "second_1m_swing_high_candidates": second_1m_swing_high_candidates,
+        "rejected_no_second_1m_swing_high": rejected_no_second_1m_swing_high,
+        "passed_second_1m_swing_high": passed_second_1m_swing_high,
+        "rejected_third_1m_high": rejected_third_1m_high,
+        "rejected_1m_close_above_12m_fvg": rejected_1m_close_above_12m_fvg,
+        "passed_1m_swing_confirmation": passed_1m_swing_confirmation,
+        "rejected_no_1m_bearish_expansion": rejected_no_1m_bearish_expansion,
+        "passed_1m_bearish_expansion": passed_1m_bearish_expansion,
+        "rejected_no_1m_bearish_fvg": rejected_no_1m_bearish_fvg,
+        "passed_1m_bearish_fvg": passed_1m_bearish_fvg,
+        "rejected_no_return_to_first_1m_fvg": rejected_no_return_to_first_1m_fvg,
+        "rejected_no_return_to_second_1m_fvg": rejected_no_return_to_second_1m_fvg,
+        "passed_return_to_first_1m_fvg": passed_return_to_first_1m_fvg,
+        "passed_return_to_second_1m_fvg": passed_return_to_second_1m_fvg,
+        "rejected_entry_window_expired": rejected_entry_window_expired,
+        "entry_ready": entry_ready,
+        "signals_generated": signals_generated,
+        "trades": len(trade_list) if profile.direct_12m_retrace_entry_enabled else 0,
+        "risk_rejected_count": risk_rejected_count,
+        "risk_rejection_reasons": tuple(risk_rejection_reasons),
+        "trade_list": tuple(trade_list),
+        "performance_summary": performance_summary,
+        "trade_accounting_check": performance_summary["trade_accounting_check"],
+        "unaccounted_after_retrace": unaccounted_after_retrace,
+    }
+    result = {
+        **funnel,
+        f"candidate_{swing_label}_swing_highs": len(candidate_16m_swing_lows),
+        f"passed_{main_label}_fvg": passed_16m_fvg,
+        f"passed_{retrace_label}_fvg": funnel["passed_12m_fvg"],
+        f"passed_{internal_label}_fvg": funnel["passed_8m_fvg"],
+        "candidate_swing_timeframe_swing_highs": len(candidate_16m_swing_lows),
+        "passed_main_fvg_timeframe_fvg": passed_16m_fvg,
+        "passed_retrace_fvg_timeframe_fvg": funnel["passed_12m_fvg"],
+        "passed_internal_fvg_timeframe_fvg": funnel["passed_8m_fvg"],
+    }
+    if timeframe_profile.profile_id != DEFAULT_16_12_8.profile_id:
+        for key in (
+            "candidate_16m_swing_highs",
+            "rejected_no_immediate_16m_fvg",
+            "passed_16m_fvg",
+            "rejected_no_12m_fvg_inside_leg",
+            "passed_12m_fvg",
+            "rejected_no_8m_fvg_inside_leg",
+            "passed_8m_fvg",
+        ):
+            result.pop(key, None)
+    return result
+
+
 def _research_expansions(swings):
     rows = []
     for swing in swings:
@@ -925,6 +1251,7 @@ def _profile_f_setup_snapshot(
     retrace_candle,
     entry_candle,
     final_target,
+    direction: str = "BEARISH",
 ) -> dict[str, object]:
     c1 = swing.left_candle
     c2 = swing.middle_candle
@@ -934,7 +1261,8 @@ def _profile_f_setup_snapshot(
     average_reference_range = (c1_range + c2_range) / Decimal("2")
     expansion_ratio = Decimal(str(getattr(expansion, "expansion_ratio", "0")))
     retrace_deadline = retrace_window[-1].end_timestamp if retrace_window else fvg16.confirmed_at
-    entry_boundary_respected = entry_candle.close <= fvg12.upper_boundary
+    is_bullish = str(direction).upper() == "BULLISH"
+    entry_boundary_respected = entry_candle.close >= fvg12.lower_boundary if is_bullish else entry_candle.close <= fvg12.upper_boundary
     expansion_passed = profile.expansion_ratio_min <= float(expansion_ratio) <= profile.expansion_ratio_max
     return {
         **_profile_lock_fields(profile=profile, timeframe_profile=timeframe_profile),
@@ -959,7 +1287,7 @@ def _profile_f_setup_snapshot(
         "expansion_passed": expansion_passed,
         "expansion_rejection_reason": None if expansion_passed else "EXPANSION_RATIO_OUTSIDE_RANGE",
         "inherited_base_profile": profile.inherited_base_profile,
-        "setup_direction": "BEARISH",
+        "setup_direction": "BULLISH" if is_bullish else "BEARISH",
         "timeframe_profile": timeframe_profile.profile_id,
         "higher_timeframe_context": {
             "required_context": "STRICT_PROFILE_HTF_DIRECTIONAL_CONTEXT",
@@ -1935,6 +2263,109 @@ def _fvg_retest_seen(fvg: FairValueGap, candles) -> bool:
     return False
 
 
+def _classify_1m_confirmation_bullish(*, fvg12: FairValueGap, candles, final_target) -> dict[str, int]:
+    """Mirror of _classify_1m_confirmation for bullish (swing-low) setups."""
+    counts = _empty_1m_confirmation_counts()
+    tap_index = _first_fvg_tap_index(fvg12, candles)
+    if tap_index is None or tap_index == 0 or tap_index + 1 >= len(candles):
+        counts["rejected_no_first_1m_swing_high"] = 1
+        return counts
+
+    if any(candle.high >= final_target for candle in candles[: tap_index + 1]):
+        counts["rejected_entry_window_expired"] = 1
+        return counts
+
+    first_index = tap_index
+    counts["first_1m_swing_high_candidates"] = 1
+    if candles[first_index].close < fvg12.lower_boundary:
+        counts["rejected_1m_close_above_12m_fvg"] = 1
+        return counts
+    if _is_swing_low_at(candles, first_index):
+        counts["passed_first_1m_swing_high"] = 1
+        confirmed_index = first_index + 1
+    else:
+        second_index = first_index + 1
+        if second_index + 1 >= len(candles):
+            counts["rejected_no_second_1m_swing_high"] = 1
+            return counts
+        counts["second_1m_swing_high_candidates"] = 1
+        if candles[second_index].close < fvg12.lower_boundary:
+            counts["rejected_1m_close_above_12m_fvg"] = 1
+            return counts
+        if not _is_swing_low_at(candles, second_index):
+            counts["rejected_no_second_1m_swing_high"] = 1
+            return counts
+        counts["passed_second_1m_swing_high"] = 1
+        confirmed_index = second_index + 1
+
+    if _third_1m_low_forms_inside_fvg(fvg12, candles, confirmed_index + 1):
+        counts["rejected_third_1m_high"] = 1
+        return counts
+
+    counts["passed_1m_swing_confirmation"] = 1
+    expansion_index = _first_bullish_1m_expansion_index(candles, confirmed_index + 1)
+    if expansion_index is None:
+        counts["rejected_no_1m_bearish_expansion"] = 1
+        return counts
+    counts["passed_1m_bearish_expansion"] = 1
+
+    bullish_fvgs = tuple(
+        fvg
+        for fvg in FVGDetectionEngine().detect_fvgs(candles[expansion_index - 2 :]).fvgs
+        if fvg.direction is FVGDirection.BULLISH
+    )
+    if not bullish_fvgs:
+        counts["rejected_no_1m_bearish_fvg"] = 1
+        return counts
+    counts["passed_1m_bearish_fvg"] = 1
+
+    first_fvg = bullish_fvgs[0]
+    if _fvg_retest_seen(first_fvg, candles):
+        counts["passed_return_to_first_1m_fvg"] = 1
+        counts["entry_ready"] = 1
+        return counts
+
+    if len(bullish_fvgs) > 1:
+        second_fvg = bullish_fvgs[1]
+        if _fvg_retest_seen(second_fvg, candles):
+            counts["passed_return_to_second_1m_fvg"] = 1
+            counts["entry_ready"] = 1
+            return counts
+        counts["rejected_no_return_to_second_1m_fvg"] = 1
+        return counts
+
+    counts["rejected_no_return_to_first_1m_fvg"] = 1
+    return counts
+
+
+def _is_swing_low_at(candles, index: int) -> bool:
+    """Mirror of _is_swing_high_at for swing lows."""
+    if index <= 0 or index + 1 >= len(candles):
+        return False
+    return candles[index].low < candles[index - 1].low and candles[index].low < candles[index + 1].low
+
+
+def _third_1m_low_forms_inside_fvg(fvg: FairValueGap, candles, start_index: int) -> bool:
+    """Mirror of _third_1m_high_forms_inside_fvg for swing lows."""
+    for index in range(max(1, start_index), min(len(candles) - 1, start_index + 4)):
+        if _is_swing_low_at(candles, index) and candles[index].high >= fvg.lower_boundary and candles[index].low <= fvg.upper_boundary:
+            return True
+    return False
+
+
+def _first_bullish_1m_expansion_index(candles, start_index: int) -> int | None:
+    """Mirror of _first_bearish_1m_expansion_index for bullish expansions."""
+    for index in range(max(2, start_index), len(candles)):
+        c1, c2, c3 = candles[index - 2], candles[index - 1], candles[index]
+        average_size = (c1.range_size + c2.range_size) / 2
+        if average_size <= 0:
+            continue
+        ratio = c3.range_size / average_size
+        if ratio >= 1 and c3.high > max(c1.high, c2.high):
+            return index
+    return None
+
+
 def _unaccounted_after_retrace(
     *,
     passed_retrace: int,
@@ -1968,9 +2399,9 @@ def _unaccounted_after_retrace(
     return passed_retrace - accounted
 
 
-def _fvg_matches_profile_expansion(fvg: FairValueGap, expansions, profile: StrategyProfile) -> bool:
+def _fvg_matches_profile_expansion(fvg: FairValueGap, expansions, profile: StrategyProfile, direction: FVGDirection = FVGDirection.BEARISH) -> bool:
     for expansion in expansions:
-        if _one_fvg_matches_expansion(fvg, expansion, profile):
+        if _one_fvg_matches_expansion(fvg, expansion, profile, direction=direction):
             return True
     return False
 
@@ -1988,8 +2419,8 @@ def _expansion_is_swing_c3(expansion, swing: Swing | None) -> bool:
     )
 
 
-def _one_fvg_matches_expansion(fvg: FairValueGap, expansion, profile: StrategyProfile) -> bool:
-    if fvg.direction is not FVGDirection.BEARISH:
+def _one_fvg_matches_expansion(fvg: FairValueGap, expansion, profile: StrategyProfile, direction: FVGDirection = FVGDirection.BEARISH) -> bool:
+    if fvg.direction is not direction:
         return False
     if fvg.related_expansion_id and fvg.related_expansion_id != expansion.expansion_id:
         return False
@@ -2282,10 +2713,24 @@ def _fvgs_inside_leg(
     fvgs: tuple[FairValueGap, ...],
     *,
     direction: FVGDirection,
-    swing_high_price,
-    completion_candle_low,
+    swing_high_price=None,
+    completion_candle_low=None,
+    swing_low_price=None,
+    completion_candle_high=None,
     start_at: datetime,
 ) -> tuple[FairValueGap, ...]:
+    if direction is FVGDirection.BULLISH:
+        return tuple(
+            fvg
+            for fvg in fvgs
+            if fvg.direction is direction
+            and fvg.confirmed_at >= start_at
+            and fvg_inside_bullish_leg(
+                fvg=fvg,
+                swing_low_price=swing_low_price,
+                completion_candle_high=completion_candle_high,
+            )
+        )
     return tuple(
         fvg
         for fvg in fvgs

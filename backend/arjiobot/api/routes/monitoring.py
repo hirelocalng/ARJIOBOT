@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import datetime, timezone
 from threading import Timer
 
 from fastapi import APIRouter
@@ -11,6 +12,7 @@ from fastapi import APIRouter
 from arjiobot.api.dependencies import ApiState, get_state, now_iso, save_settings
 from arjiobot.api.errors import api_error
 from arjiobot.api.schemas.common import ok
+from arjiobot.backtesting.historical_replay import build_timeframe_profile
 from arjiobot.exchange.account_vault import CredentialVaultError, decrypt_credentials
 from arjiobot.live_automation import run_live_automation_once
 from arjiobot.live_setup_detection import candles_from_bitget_rows, detect_live_setups_for_symbol
@@ -20,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 MIN_POLL_INTERVAL_SECONDS = 5
-LIVE_CANDLE_BUFFER_MAX_SIZE = 2000
+LIVE_CANDLE_HISTORY_LIMIT = 44_640
+DERIVED_CHART_TIMEFRAMES_MINUTES: tuple[int, ...] = (60, 30, 16, 12, 8)
 
 
 @router.post("/start")
@@ -100,7 +103,78 @@ def resume_monitoring_if_enabled(state: ApiState) -> None:
 @router.get("/status")
 def monitoring_status():
     state = get_state()
-    return ok({"monitoring": state.monitoring, "pairs": tuple(state.market_polls.values())})
+    return ok({"monitoring": {**state.monitoring, "watchdog": _watchdog_status(state.monitoring)}, "pairs": tuple(state.market_polls.values())})
+
+
+def _watchdog_status(monitoring: dict[str, object]) -> dict[str, object]:
+    """Surface whether the poll cycle has gone silent for longer than expected.
+
+    The poll chain already self-heals from exceptions and re-arms on process
+    boot (see _poll_enabled_pairs / resume_monitoring_if_enabled); the one
+    failure mode neither covers is a *hung* (not crashed) cycle, which would
+    otherwise look identical to "no issue" from the outside. This makes that
+    gap visible without adding a redundant supervisory thread.
+    """
+    if not monitoring.get("active"):
+        return {"is_stale": False, "reason": "monitoring is not active"}
+    reference = monitoring.get("last_poll_cycle_completed") or monitoring.get("started_at")
+    if not reference or reference == "None":
+        return {"is_stale": False, "reason": "no poll cycle has completed yet"}
+    try:
+        parsed = datetime.fromisoformat(str(reference).replace("Z", "+00:00"))
+    except ValueError:
+        return {"is_stale": True, "reason": f"unparseable timestamp: {reference}"}
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    interval = int(monitoring.get("poll_interval_seconds") or MIN_POLL_INTERVAL_SECONDS)
+    threshold_seconds = max(interval * 3, MIN_POLL_INTERVAL_SECONDS * 3)
+    elapsed_seconds = (datetime.now(timezone.utc) - parsed).total_seconds()
+    is_stale = elapsed_seconds > threshold_seconds
+    if is_stale:
+        logger.warning(
+            "Live monitoring poll cycle has gone silent for %.0fs (threshold %ss) - last completed at %s. "
+            "The poll chain may be hung on a blocking call.",
+            elapsed_seconds,
+            threshold_seconds,
+            reference,
+        )
+    return {
+        "is_stale": is_stale,
+        "seconds_since_last_completed_cycle": round(elapsed_seconds, 1),
+        "threshold_seconds": threshold_seconds,
+        "reason": "poll cycle is current" if not is_stale else "no completed poll cycle within 3x the configured interval",
+    }
+
+
+@router.get("/candles/{symbol}")
+def live_timeframe_candles(symbol: str):
+    """Read-only view of the live 1H/30M/16M/12M/8M chart series kept for ``symbol``."""
+    state = get_state()
+    symbol = symbol.upper()
+    by_timeframe = state.live_timeframe_candles.get(symbol, {})
+    return ok(
+        {
+            "symbol": symbol,
+            "one_minute_candle_count": len(state.live_candles.get(symbol, ())),
+            "timeframes": {
+                f"{minutes}M": {
+                    "candle_count": len(candles),
+                    "latest": _candle_summary(candles[-1]) if candles else None,
+                }
+                for minutes, candles in sorted(by_timeframe.items())
+            },
+        }
+    )
+
+
+def _candle_summary(candle: Candle) -> dict[str, str]:
+    return {
+        "timestamp": candle.timestamp.isoformat(),
+        "open": str(candle.open),
+        "high": str(candle.high),
+        "low": str(candle.low),
+        "close": str(candle.close),
+    }
 
 
 def _pending_poll(symbol: str) -> dict[str, object]:
@@ -126,6 +200,7 @@ def _poll_enabled_pairs(session_id: str) -> None:
     (e.g. an unexpected credential-decrypt error) must not permanently and
     silently end the polling chain while `monitoring.active` stays True."""
     state = get_state()
+    _watchdog_status(state.monitoring)  # logs a warning on its own if the previous cycle went silent
     try:
         _run_poll_cycle(state, session_id)
     except Exception as exc:
@@ -152,10 +227,19 @@ def _run_poll_cycle(state, session_id: str) -> None:
         try:
             contract = state.bitget_environment.fetch_contract_config(symbol)
             ticker = state.bitget_environment.fetch_ticker(symbol)
-            candles = state.bitget_environment.fetch_candles(symbol, "1m", 1000)
+            existing_candle_count = len(state.live_candles.get(symbol, ()))
+            if existing_candle_count < LIVE_CANDLE_HISTORY_LIMIT:
+                # Cold start for this symbol: a single fetch_candles call caps at ~1000
+                # rows and can never reach the full buffer on its own, so page backward
+                # once to bootstrap the full lookback before falling back to the cheap
+                # latest-1000 fetch on every later cycle (see backfill_candles).
+                candles = state.bitget_environment.backfill_candles(symbol, "1m", total=LIVE_CANDLE_HISTORY_LIMIT)
+            else:
+                candles = state.bitget_environment.fetch_candles(symbol, "1m", 1000)
             rows = _normalize_candle_rows(candles.get("rows", ()))
             fresh_candles = candles_from_bitget_rows(symbol, rows)
             state.live_candles[symbol] = _merge_live_candles(state.live_candles.get(symbol, ()), fresh_candles)
+            state.live_timeframe_candles[symbol] = _derived_timeframe_candles(state.live_candles[symbol])
             completed = now_iso()
             state.market_polls[symbol] = {
                 "symbol": symbol,
@@ -176,6 +260,7 @@ def _run_poll_cycle(state, session_id: str) -> None:
                 "index_price": ticker.get("index_price", "N/A"),
                 "last_candle_timeframe_update": completed,
                 "live_candle_count": len(state.live_candles.get(symbol, ())),
+                "live_candle_history_limit": LIVE_CANDLE_HISTORY_LIMIT,
                 "last_error": "",
                 "next_scheduled_refresh_time": completed,
             }
@@ -234,7 +319,7 @@ def _activate_selected_account_credentials() -> None:
 
 
 def _merge_live_candles(
-    existing: tuple[Candle, ...], fresh: tuple[Candle, ...], *, max_size: int = LIVE_CANDLE_BUFFER_MAX_SIZE
+    existing: tuple[Candle, ...], fresh: tuple[Candle, ...], *, max_size: int = LIVE_CANDLE_HISTORY_LIMIT
 ) -> tuple[Candle, ...]:
     """Merge freshly polled candles into the rolling live buffer.
 
@@ -248,6 +333,16 @@ def _merge_live_candles(
         merged[(candle.symbol, candle.timeframe, candle.timestamp)] = candle
     ordered = tuple(sorted(merged.values(), key=lambda candle: (candle.timestamp, candle.symbol, candle.timeframe.minutes)))
     return ordered[-max_size:]
+
+
+def _derived_timeframe_candles(candles_1m: tuple[Candle, ...]) -> dict[int, tuple[Candle, ...]]:
+    """Build the 1H/30M/16M/12M/8M chart series kept live from the 1-minute buffer.
+
+    Informational/diagnostic only - the strategy funnel keeps sourcing exactly the
+    timeframes its active timeframe_profile_id specifies (see live_setup_detection.py);
+    this does not change strategy behavior.
+    """
+    return {minutes: build_timeframe_profile(candles_1m, minutes) for minutes in DERIVED_CHART_TIMEFRAMES_MINUTES}
 
 
 def _normalize_candle_rows(rows: object) -> tuple[tuple[str, ...], ...]:

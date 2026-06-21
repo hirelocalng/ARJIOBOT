@@ -283,6 +283,7 @@ class ApiState:
     backtest_runs: dict[str, dict[str, object]] = field(default_factory=dict)
     market_polls: dict[str, dict[str, object]] = field(default_factory=dict)
     live_candles: dict[str, tuple[object, ...]] = field(default_factory=dict)
+    live_timeframe_candles: dict[str, dict[int, tuple[object, ...]]] = field(default_factory=dict)
     live_setup_detection: dict[str, object] = field(
         default_factory=lambda: {
             "last_run_at": "None",

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Sequence
 
 from arjiobot.fvg.fvg_models import FairValueGap
-from arjiobot.fvg.fvg_tap_rules import candle_touches_fvg, evaluate_bearish_high_sequence
+from arjiobot.fvg.fvg_tap_rules import candle_touches_fvg, evaluate_bearish_high_sequence, evaluate_bullish_low_sequence
 from arjiobot.market_data.candle_models import Candle, ensure_utc
 from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupState, SetupStatus
 
@@ -48,6 +48,11 @@ def close_above_12m_fvg(fvg_12m: FairValueGap, candle_1m: Candle) -> bool:
     return candle_touches_fvg(fvg_12m, candle_1m) and candle_1m.close > fvg_12m.upper_boundary
 
 
+def close_below_12m_fvg(fvg_12m: FairValueGap, candle_1m: Candle) -> bool:
+    """Return whether a 1M candle taps and closes below the 12M FVG (mirror of close_above_12m_fvg)."""
+    return candle_touches_fvg(fvg_12m, candle_1m) and candle_1m.close < fvg_12m.lower_boundary
+
+
 def high_sequence_invalidation_reason(
     fvg_12m: FairValueGap,
     candles_1m: Sequence[Candle],
@@ -59,3 +64,16 @@ def high_sequence_invalidation_reason(
     if result.high_count >= 3:
         return InvalidationReason.THIRD_HIGH_INSIDE_12M_FVG
     return InvalidationReason.CLOSE_ABOVE_12M_FVG
+
+
+def low_sequence_invalidation_reason(
+    fvg_12m: FairValueGap,
+    candles_1m: Sequence[Candle],
+) -> InvalidationReason | None:
+    """Return low/consolidation invalidation reason, if any (mirror of high_sequence_invalidation_reason)."""
+    result = evaluate_bullish_low_sequence(fvg_12m, candles_1m)
+    if result.state.value != "INVALID":
+        return None
+    if result.high_count >= 3:
+        return InvalidationReason.THIRD_LOW_INSIDE_12M_FVG
+    return InvalidationReason.CLOSE_BELOW_12M_FVG

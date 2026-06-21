@@ -95,7 +95,7 @@ def build_validation_report() -> dict[str, object]:
         "Ready For Integration": "YES",
     }
     limitations = [
-        "v1 generates bearish MARKET_SELL_READY signals only.",
+        "v1 generates MARKET_SELL_READY (bearish) or MARKET_BUY_READY (bullish) signals, mirrored from setup direction.",
         "v1 does not calculate risk, size, leverage, or execution details.",
         "v1 persistence is in-memory behind deterministic service APIs.",
     ]

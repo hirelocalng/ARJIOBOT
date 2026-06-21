@@ -482,7 +482,7 @@
         "label": "Profile 2",
         "main_fvg_match_mode": "LEGACY_EXPANSION_OR_NEXT_CANDLE",
         "main_fvg_match_window_candles": 1,
-        "note": "Profile 2: recovered old Profile F from reports/backtests/research_comparison_bt_624f5cc97f161f27c9eaebb8.json. Formerly RESEARCH_PROFILE_F_DIRECT_12M_RETRACE_ENTRY. Uses the 15M/10M/5M timeframe stack, 1.0-3.0 expansion range, direct 10M retrace entry, unlinked legacy FVG matching, one trade per FVG, and structural leg target TP. Backtest reconstruction uses legacy fixed-risk sizing for this profile only.",
+        "note": "Profile 2: recovered old Profile F from reports/backtests/research_comparison_bt_624f5cc97f161f27c9eaebb8.json. Formerly RESEARCH_PROFILE_F_DIRECT_12M_RETRACE_ENTRY. Always uses the 16M/12M/8M default timeframe stack, 1.0-3.0 expansion range, direct 12M retrace entry, unlinked legacy FVG matching, one trade per FVG, and structural leg target TP. Backtest reconstruction uses legacy fixed-risk sizing for this profile only.",
         "one_trade_per_12m_fvg": true,
         "production_safe": false,
         "profile_id": "PROFILE_2",
@@ -492,7 +492,7 @@
         "require_1m_swing_confirmation": false,
         "require_expansion_c3": false,
         "retrace_window_8m_candles": 3,
-        "timeframe_profile_id": "PROFILE_15_10_5",
+        "timeframe_profile_id": "DEFAULT_16_12_8",
         "tp_model": "LEG_TARGET_RESEARCH",
         "tunable_parameters": [
           "timeframe_profile_id",
@@ -513,7 +513,7 @@
         "main_fvg_match_window_candles": 1,
         "use_linked_fvg_detection": false
       },
-      "profile_hash": "4dccd361897002e51cd3391e8b7e382f4b4d5eb1d660aa6dfd0ac2a7466b60f2",
+      "profile_hash": "2cfe188680f1265699f176942c53f0821abd47900f012e16e5f44c61aa9952a9",
       "profile_id": "PROFILE_2",
       "retrace_rules": {
         "direct_12m_retrace_entry_enabled": true,
@@ -522,33 +522,33 @@
         "retrace_window_8m_candles": 3
       },
       "timeframe_stack": {
-        "internal_fvg_timeframe": 5,
-        "internal_fvg_timeframe_label": "5M",
-        "label": "15M / 10M / 5M / 1M",
-        "main_fvg_timeframe": 15,
-        "main_fvg_timeframe_label": "15M",
-        "profile_id": "PROFILE_15_10_5",
-        "retrace_fvg_timeframe": 10,
-        "retrace_fvg_timeframe_label": "10M",
-        "retrace_window_timeframe": 5,
-        "retrace_window_timeframe_label": "5M",
-        "swing_timeframe": 15,
-        "swing_timeframe_label": "15M"
+        "internal_fvg_timeframe": 8,
+        "internal_fvg_timeframe_label": "8M",
+        "label": "16M / 12M / 8M / 1M",
+        "main_fvg_timeframe": 16,
+        "main_fvg_timeframe_label": "16M",
+        "profile_id": "DEFAULT_16_12_8",
+        "retrace_fvg_timeframe": 12,
+        "retrace_fvg_timeframe_label": "12M",
+        "retrace_window_timeframe": 8,
+        "retrace_window_timeframe_label": "8M",
+        "swing_timeframe": 16,
+        "swing_timeframe_label": "16M"
       },
       "tp_model": "LEG_TARGET_RESEARCH"
     }
   ],
   "protected_area": "PROTECTED_PROFILE_LOGIC",
   "protected_source_hashes": {
-    "arjiobot/backtesting/research_profiles.py": "b557fe44cb9e33f01f8c3322b646919290b644971b01914d8cc3187764f3caf4",
+    "arjiobot/backtesting/research_profiles.py": "54080ea8dbe8d40cf5c05db1b24647d1e936d05adbd339d1070533fdde1bd135",
     "arjiobot/backtesting/timeframe_profiles.py": "e15f3884c559a5cbdf6c4a8dfb5a38aec60a430befb36dca547c4ef34090d03e",
-    "arjiobot/fvg/fvg.py": "4c09c58c9a2b69deed3f59337ca4244bd4941ed56717b7e6debb3e0713a4e5e9",
-    "arjiobot/fvg/fvg_tap_rules.py": "307d475279548337d50ce54e7d2701fe1b32c20b57b08becac5b81c8e16d00c4",
+    "arjiobot/fvg/fvg.py": "72230b5a1e61c5b9425a87ac04b4a602323af814afda81b6798597b32ee46482",
+    "arjiobot/fvg/fvg_tap_rules.py": "e64b1696e6bce029bde42eb734bf1b625e8a6b4dea1ddd5b2d62027753111d68",
     "arjiobot/risk/rr_profiles.py": "34d53ddce0b0acfb6cd517f8dbb3ae0c9843eb7d84f773c159021c9b7d3d33b2",
-    "arjiobot/setup_tracker/setup_invalidation.py": "70b7d42550e792a841f1d8a7f814a1513dde7f77cdd1dc1fcafc6e1b0aae116a",
-    "arjiobot/strategy/strategy_engine.py": "065224b136ba5815887fdb2cb7395a7dceb80503580a5d25dbaec5c6845b4d57",
+    "arjiobot/setup_tracker/setup_invalidation.py": "2b3c5e5d23fa7cb4cfb28fefec96b8dd391340ea60e89fb5fa1552a0b5b7fd2b",
+    "arjiobot/strategy/strategy_engine.py": "6f0738b58c9ae1f7c3e32f88ab4e3f381803788bcc47b26936afb887f604237d",
     "arjiobot/swings/swings.py": "503c557275dde09d823fd170b84102bbb2cb7698a1f0985d63e4a2449577c2fe",
-    "scripts/backtest_csv.py": "61dd0e5be39bbea2b03818482a9a9388971bdfacebbf5ef07ed00abd5a6c5da7"
+    "scripts/backtest_csv.py": "9e522adab3f777576069a122d6a2d4938f72f969e113b1c832b7e251f9fbd6b9"
   },
   "runtime_warning": "Profile freeze active: strategy logic locked.",
   "schema_version": 1

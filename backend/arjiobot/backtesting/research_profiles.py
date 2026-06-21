@@ -219,7 +219,7 @@ PROFILE_2 = StrategyProfile(
     require_1m_bearish_expansion=False,
     require_1m_bearish_fvg=False,
     require_1m_fvg_retest=False,
-    timeframe_profile_id="PROFILE_15_10_5",
+    timeframe_profile_id="DEFAULT_16_12_8",
     tp_model="LEG_TARGET_RESEARCH",
     require_expansion_c3=False,
     use_linked_fvg_detection=False,
@@ -240,8 +240,8 @@ PROFILE_2 = StrategyProfile(
     note=(
         "Profile 2: recovered old Profile F from "
         "reports/backtests/research_comparison_bt_624f5cc97f161f27c9eaebb8.json. "
-        "Formerly RESEARCH_PROFILE_F_DIRECT_12M_RETRACE_ENTRY. Uses the 15M/10M/5M "
-        "timeframe stack, 1.0-3.0 expansion range, direct 10M retrace entry, "
+        "Formerly RESEARCH_PROFILE_F_DIRECT_12M_RETRACE_ENTRY. Always uses the 16M/12M/8M "
+        "default timeframe stack, 1.0-3.0 expansion range, direct 12M retrace entry, "
         "unlinked legacy FVG matching, one trade per FVG, and structural leg target TP. "
         "Backtest reconstruction uses legacy fixed-risk sizing for this profile only."
     ),

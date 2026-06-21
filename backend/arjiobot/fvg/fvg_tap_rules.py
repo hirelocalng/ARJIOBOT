@@ -97,3 +97,44 @@ def fvg_inside_bearish_leg(
     if fvg.direction is not FVGDirection.BEARISH:
         return False
     return fvg.upper_boundary <= swing_high_price and fvg.lower_boundary >= completion_candle_low
+
+
+def fvg_inside_bullish_leg(
+    *,
+    fvg: FairValueGap,
+    swing_low_price,
+    completion_candle_high,
+) -> bool:
+    """Return whether a bullish 12M/8M FVG sits inside the approved 16M leg (mirror of fvg_inside_bearish_leg)."""
+    if fvg.direction is not FVGDirection.BULLISH:
+        return False
+    return fvg.lower_boundary >= swing_low_price and fvg.upper_boundary <= completion_candle_high
+
+
+def evaluate_bullish_low_sequence(
+    fvg: FairValueGap,
+    candles: Sequence[Candle],
+) -> TapValidationResult:
+    """Evaluate second low and third-low consolidation rules (mirror of evaluate_bearish_high_sequence)."""
+    low_count = 0
+    previous_low = None
+    for candle in candles:
+        if not candle_touches_fvg(fvg, candle):
+            continue
+        if candle.close < fvg.lower_boundary:
+            return TapValidationResult(
+                TapValidationState.INVALID,
+                "confirmation candle closed below FVG",
+                low_count,
+            )
+        if previous_low is None or candle.low < previous_low:
+            low_count += 1
+            previous_low = candle.low
+            if low_count >= 3:
+                return TapValidationResult(
+                    TapValidationState.INVALID,
+                    "third low inside FVG invalidates setup",
+                    low_count,
+                )
+    state = TapValidationState.VALID if low_count else TapValidationState.WAITING
+    return TapValidationResult(state, "low sequence remains valid", low_count)

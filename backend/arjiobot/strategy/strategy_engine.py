@@ -12,7 +12,7 @@ from typing import DefaultDict, Iterable, Sequence
 from collections import defaultdict
 
 from arjiobot.market_data.candle_models import ensure_utc
-from arjiobot.setup_tracker.setup_models import Setup
+from arjiobot.setup_tracker.setup_models import Setup, SetupDirection
 from arjiobot.strategy.signal_deduplication import has_generated_signal_for_setup
 from arjiobot.strategy.signal_validation import entry_reference_price_from_setup, validate_setup_for_signal
 from arjiobot.strategy.strategy_models import (
@@ -104,6 +104,9 @@ class StrategyEngine:
         rejection_reason = validation.rejection_reason
         if not validation.validation_passed and rejection_reason is None:
             rejection_reason = SignalRejectionReason.UNKNOWN_VALIDATION_ERROR
+        is_bullish = setup.direction is SetupDirection.BULLISH
+        action = SignalAction.MARKET_BUY_READY if is_bullish else SignalAction.MARKET_SELL_READY
+        entry_reference_type = EntryReferenceType.MARKET_BUY if is_bullish else EntryReferenceType.MARKET_SELL
         signal = TradeSignal(
             signal_id=build_signal_id(
                 setup_id=setup.setup_id,
@@ -114,12 +117,12 @@ class StrategyEngine:
             setup_id=setup.setup_id,
             symbol=setup.symbol,
             direction=setup.direction,
-            action=SignalAction.MARKET_SELL_READY,
+            action=action,
             status=status,
             created_at=generated_at_utc,
             updated_at=generated_at_utc,
             generated_at=generated_at_utc,
-            entry_reference_type=EntryReferenceType.MARKET_SELL,
+            entry_reference_type=entry_reference_type,
             entry_reference_price=entry_reference_price_from_setup(setup),
             stop_reference_price=setup.stop_reference_price,
             final_target_price=setup.final_target_price,

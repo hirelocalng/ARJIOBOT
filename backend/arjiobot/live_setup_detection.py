@@ -48,7 +48,10 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
 
         profile = get_profile(str(state.settings.get("active_strategy_profile") or state.settings.get("default_backtesting_profile") or "PROFILE_2"))
         selected_tp_model = str(state.settings.get("selected_rr_profile") or profile.tp_model).upper()
-        timeframe_profile = get_timeframe_profile(str(profile.timeframe_profile_id or state.settings.get("default_timeframe_profile") or "DEFAULT_16_12_8"))
+        # The saved live setting must win over the profile's built-in default - e.g.
+        # PROFILE_2's built-in timeframe_profile_id must not override an operator's
+        # explicit choice to run live trading on DEFAULT_16_12_8.
+        timeframe_profile = get_timeframe_profile(str(state.settings.get("default_timeframe_profile") or profile.timeframe_profile_id or "DEFAULT_16_12_8"))
         runner = _runner()
         required_minutes = runner._required_timeframes(timeframe_profile)
         profiles = {minutes: build_timeframe_profile(candles, minutes) for minutes in required_minutes}
@@ -57,6 +60,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
 
         swing_results = SwingDetectionEngine().detect_all_swings(profiles[timeframe_profile.swing_timeframe])
         bearish_swing_highs = [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH]
+        bullish_swing_lows = [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW]
         expansions_main = runner._research_expansions(swing_results.all_swings)
         fvg_results = {
             minutes: FVGDetectionEngine().detect_fvgs(
@@ -67,10 +71,9 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             for minutes in required_minutes
             if minutes != 1
         }
-        funnel = runner._build_strategy_funnel(
+        shared_funnel_kwargs = dict(
             profile=profile,
             timeframe_profile=timeframe_profile,
-            candidate_16m_swing_highs=bearish_swing_highs,
             expansions_16m=expansions_main,
             fvg_16m=fvg_results[timeframe_profile.main_fvg_timeframe].fvgs,
             fvg_12m=fvg_results[timeframe_profile.retrace_fvg_timeframe].fvgs,
@@ -82,38 +85,70 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             max_leverage=state.settings.get("max_leverage"),
             selected_rr_profile=profile.tp_model if selected_tp_model == "TIME_BASED_EXIT" else str(state.settings.get("selected_rr_profile") or "RR_1_5"),
         )
-        detector_state["latest_funnel"] = _compact_funnel(funnel)
-        _log_retrace_diagnostics(symbol, funnel)
-        fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
-        if fresh is None:
-            stale = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state)
-            if stale:
-                _record_stale_skip(symbol, stale, detector_state)
-            return _finish(detector_state, "WAITING", "no fresh live trade candidate found", source=source)
+        # Sell-side (bearish, swing-high) and buy-side (bullish, swing-low) funnels run
+        # side by side through the same shared strategy logic - see scripts/backtest_csv.py
+        # _build_strategy_funnel / _build_bullish_strategy_funnel. Neither path is favored.
+        # Each direction is built and processed in full isolation (see _detect_for_direction)
+        # so a bug surfacing in one direction's funnel can never block the other - in
+        # particular, a problem in the newer bullish path must never degrade the
+        # proven bearish path's ability to keep taking trades, and vice versa.
+        created_setup_ids: list[str] = []
+        waiting_reasons: list[str] = []
+        direction_errors: list[str] = []
+        for direction, builder, candidate_swings, compact_kwargs in (
+            ("BEARISH", runner._build_strategy_funnel, {"candidate_16m_swing_highs": bearish_swing_highs}, {}),
+            ("BULLISH", runner._build_bullish_strategy_funnel, {"candidate_16m_swing_lows": bullish_swing_lows}, {"direction": "BULLISH"}),
+        ):
+            try:
+                funnel = builder(**candidate_swings, **shared_funnel_kwargs)
+            except Exception as exc:
+                logger.exception("Live %s funnel evaluation for %s failed; other direction is unaffected", direction, symbol)
+                detector_state.setdefault("latest_funnel", {})[direction.lower()] = {"error": str(exc)}
+                direction_errors.append(f"{direction}: {exc}")
+                continue
+            detector_state.setdefault("latest_funnel", {})[direction.lower()] = _compact_funnel(funnel, **compact_kwargs)
+            _log_retrace_diagnostics(symbol, funnel, direction=direction)
 
-        setup = _setup_from_trade(
-            fresh,
-            profile_id=profile.profile_id,
-            timeframe_profile_id=timeframe_profile.profile_id,
-            selected_tp_model=selected_tp_model,
-            time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
-        )
-        if setup.setup_id not in state.setups:
-            state.setups[setup.setup_id] = setup
-            state.setup_history[setup.setup_id] = [
-                {
-                    "from_state": None,
-                    "to_state": SetupState.ENTRY_READY.value,
-                    "changed_at": setup.updated_at.isoformat(),
-                    "reason": "live profile evaluator created entry-ready setup",
-                    "source": source,
-                }
-            ]
-        detector_state.setdefault("processed_trade_keys", []).append(_trade_key(fresh))
-        del detector_state["processed_trade_keys"][:-200]
-        detector_state["created_setup_count"] = int(detector_state.get("created_setup_count") or 0) + 1
-        detector_state["latest_trade_candidate"] = {key: str(fresh.get(key, "")) for key in ("trade_id", "symbol", "direction", "entry_timestamp", "entry_price", "stop_loss", "take_profit", "source_12m_fvg_id")}
-        return _finish(detector_state, "SETUP_CREATED", f"created ENTRY_READY setup {setup.setup_id}", source=source)
+            fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
+            if fresh is None:
+                stale = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state)
+                if stale:
+                    _record_stale_skip(symbol, stale, detector_state)
+                waiting_reasons.append(f"{direction}: no fresh live trade candidate found")
+                continue
+
+            setup = _setup_from_trade(
+                fresh,
+                profile_id=profile.profile_id,
+                timeframe_profile_id=timeframe_profile.profile_id,
+                selected_tp_model=selected_tp_model,
+                time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
+            )
+            if setup.setup_id not in state.setups:
+                state.setups[setup.setup_id] = setup
+                state.setup_history[setup.setup_id] = [
+                    {
+                        "from_state": None,
+                        "to_state": SetupState.ENTRY_READY.value,
+                        "changed_at": setup.updated_at.isoformat(),
+                        "reason": "live profile evaluator created entry-ready setup",
+                        "source": source,
+                    }
+                ]
+            detector_state.setdefault("processed_trade_keys", []).append(_trade_key(fresh))
+            del detector_state["processed_trade_keys"][:-200]
+            detector_state["created_setup_count"] = int(detector_state.get("created_setup_count") or 0) + 1
+            detector_state["latest_trade_candidate"] = {key: str(fresh.get(key, "")) for key in ("trade_id", "symbol", "direction", "entry_timestamp", "entry_price", "stop_loss", "take_profit", "source_12m_fvg_id")}
+            created_setup_ids.append(setup.setup_id)
+
+        if created_setup_ids:
+            return _finish(detector_state, "SETUP_CREATED", f"created ENTRY_READY setup(s): {', '.join(created_setup_ids)}", source=source)
+        if direction_errors and len(direction_errors) == 2:
+            detector_state["last_status"] = "ERROR"
+            detector_state["last_error"] = "; ".join(direction_errors)
+            detector_state["last_blocked_reason"] = "; ".join(direction_errors)
+            return {"source": source, "status": "ERROR", "reason": "; ".join(direction_errors), "created_at": _now()}
+        return _finish(detector_state, "WAITING", "; ".join(waiting_reasons + direction_errors) or "no fresh live trade candidate found", source=source)
     except Exception as exc:
         detector_state["last_status"] = "ERROR"
         detector_state["last_error"] = str(exc)
@@ -276,12 +311,15 @@ def _trade_key(trade: dict[str, object]) -> str:
     )
 
 
-def _compact_funnel(funnel: dict[str, object]) -> dict[str, object]:
+def _compact_funnel(funnel: dict[str, object], *, direction: str = "BEARISH") -> dict[str, object]:
     keys = ("candidate_16m_swing_highs", "passed_expansion", "passed_retrace", "entry_ready", "trades", "risk_rejected_count")
-    return {key: funnel.get(key) for key in keys if key in funnel}
+    compact = {key: funnel.get(key) for key in keys if key in funnel}
+    if direction == "BULLISH" and "candidate_16m_swing_highs" in compact:
+        compact["candidate_16m_swing_lows"] = compact.pop("candidate_16m_swing_highs")
+    return compact
 
 
-def _log_retrace_diagnostics(symbol: str, funnel: dict[str, Any]) -> None:
+def _log_retrace_diagnostics(symbol: str, funnel: dict[str, Any], *, direction: str = "BEARISH") -> None:
     """Log which funnel stage absorbed expansion-passed candidates whenever
     none of them reach a fresh trade candidate. The compact funnel kept on
     detector_state drops the per-stage FVG counts (and, for non-default
@@ -294,9 +332,10 @@ def _log_retrace_diagnostics(symbol: str, funnel: dict[str, Any]) -> None:
     if passed_expansion == 0 or passed_retrace > 0:
         return
     logger.info(
-        "Live retrace diagnostics for %s: passed_expansion=%s -> passed_main_fvg=%s -> passed_retrace_fvg=%s -> "
-        "passed_internal_fvg=%s -> passed_retrace=%s (retrace_window_expired=%s, close_above_fvg_before_entry=%s)",
+        "Live retrace diagnostics for %s (%s): passed_expansion=%s -> passed_main_fvg=%s -> passed_retrace_fvg=%s -> "
+        "passed_internal_fvg=%s -> passed_retrace=%s (retrace_window_expired=%s, close_through_fvg_before_entry=%s)",
         symbol,
+        direction,
         passed_expansion,
         funnel.get("passed_main_fvg_timeframe_fvg", funnel.get("passed_16m_fvg")),
         funnel.get("passed_retrace_fvg_timeframe_fvg", funnel.get("passed_12m_fvg")),

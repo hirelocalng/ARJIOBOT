@@ -336,6 +336,7 @@ class FVGDetectionEngine:
             is_entry_fvg=c2.timeframe.minutes in (8, 12),
             is_target_fvg=c2.timeframe.minutes >= 16,
             fvg_completion_candle_low=c3.low if direction is FVGDirection.BEARISH else None,
+            fvg_completion_candle_high=c3.high if direction is FVGDirection.BULLISH else None,
         )
         score = self.scorer.score(fvg=fvg, related_expansion=expansion, related_swing=swing)
         return replace(fvg, strength_score=score)

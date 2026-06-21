@@ -6,6 +6,7 @@ guard. It does not weaken strategy, risk, profile, or exchange locks.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -14,6 +15,8 @@ from arjiobot.exchange.bitget_environment import LIVE_CONFIRMATION_TEXT, TradeMo
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalStatus
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_live_automation_state(state: Any) -> dict[str, Any]:
@@ -83,7 +86,27 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
             return record
 
         for setup in sorted(entry_ready_setups, key=lambda item: item.updated_at):
-            attempts.append(_process_setup(state, automation, setup, source=source))
+            try:
+                attempts.append(_process_setup(state, automation, setup, source=source))
+            except Exception as exc:
+                # One setup's failure (malformed field, transient order-placement
+                # error, etc.) must not block every other ENTRY_READY setup in this
+                # cycle - including ones from the other trade direction - from being
+                # attempted. Without this, a single bad setup at the front of the
+                # sort order would silently and permanently starve all later ones,
+                # every cycle, forever.
+                failed_attempt = {
+                    "source": source,
+                    "setup_id": setup.setup_id,
+                    "symbol": setup.symbol,
+                    "stage": "SETUP_PROCESSING",
+                    "status": "ERROR",
+                    "reason": str(exc),
+                    "created_at": _now(),
+                }
+                logger.exception("Live automation failed to process setup %s; continuing with remaining setups", setup.setup_id)
+                _append_attempt(automation, failed_attempt)
+                attempts.append(failed_attempt)
 
         submitted = [attempt for attempt in attempts if attempt.get("status") == "SUBMITTED"]
         automation["last_status"] = "SUBMITTED" if submitted else "BLOCKED"

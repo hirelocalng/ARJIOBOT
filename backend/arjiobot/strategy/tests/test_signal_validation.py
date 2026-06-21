@@ -48,11 +48,21 @@ def test_rejects_missing_required_fields() -> None:
     assert result.rejection_reason is SignalRejectionReason.MISSING_REQUIRED_FIELD
 
 
-def test_rejects_unsupported_direction() -> None:
-    setup = replace(make_entry_ready_setup(), direction=SetupDirection.BULLISH)
-    result = validate_setup_for_signal(setup, checked_at=setup.updated_at)
+def _make_bullish_entry_ready_setup(*, latest_price: str = "90"):
+    """Mirror of make_entry_ready_setup's bearish fixture: stop(60) < entry(90) < target(110)."""
+    return replace(
+        make_entry_ready_setup(latest_price=latest_price),
+        direction=SetupDirection.BULLISH,
+        stop_reference_price=Decimal("60"),
+        final_target_price=Decimal("110"),
+    )
 
-    assert result.rejection_reason is SignalRejectionReason.UNSUPPORTED_DIRECTION
+
+def test_accepts_bullish_setup_mirroring_bearish_criteria() -> None:
+    result = validate_setup_for_signal(_make_bullish_entry_ready_setup(), checked_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    assert result.validation_passed
+    assert result.rejection_reason is None
 
 
 def test_rejects_invalid_stop_target_relationship() -> None:
@@ -62,8 +72,22 @@ def test_rejects_invalid_stop_target_relationship() -> None:
     assert result.rejection_reason is SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
 
 
+def test_rejects_invalid_stop_target_relationship_bullish() -> None:
+    setup = replace(_make_bullish_entry_ready_setup(), stop_reference_price=Decimal("120"))
+    result = validate_setup_for_signal(setup, checked_at=setup.updated_at)
+
+    assert result.rejection_reason is SignalRejectionReason.INVALID_STOP_TARGET_RELATIONSHIP
+
+
 def test_rejects_target_already_reached() -> None:
     setup = replace(make_entry_ready_setup(latest_price="65"))
+    result = validate_setup_for_signal(setup, checked_at=setup.updated_at)
+
+    assert result.rejection_reason is SignalRejectionReason.TARGET_ALREADY_REACHED
+
+
+def test_rejects_target_already_reached_bullish() -> None:
+    setup = replace(_make_bullish_entry_ready_setup(latest_price="115"))
     result = validate_setup_for_signal(setup, checked_at=setup.updated_at)
 
     assert result.rejection_reason is SignalRejectionReason.TARGET_ALREADY_REACHED
