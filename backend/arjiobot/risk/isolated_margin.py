@@ -177,21 +177,31 @@ def calculate_required_margin(*, fixed_sl_loss, entry_price, stop_loss, max_leve
     required_margin = _without_exponent(required_notional / max_lev)
     can_execute = required_margin <= available
 
+    # extra={} fields are NOT rendered by dev_server.py's logging.basicConfig
+    # format string (it only references %(asctime)s/%(levelname)s/%(name)s/
+    # %(message)s) - every one of these numbers was silently dropped from the
+    # actual log output, leaving just the bare line "Isolated margin sizing"
+    # with no indication of why a trade was or wasn't sized. Put the values
+    # directly in the message so they show up in Railway's log stream.
     logger.info(
-        "Isolated margin sizing",
-        extra={
-            "fixed_sl_loss": str(fixed_loss),
-            "entry_price": str(entry),
-            "stop_loss": str(stop),
-            "stop_distance_percent": str(stop_distance_percent),
-            "required_notional": str(required_notional),
-            "max_leverage": str(max_lev),
-            "required_margin": str(required_margin),
-            "available_margin": str(available),
-            "can_execute": can_execute,
-        },
+        "Margin check: fixed_sl_loss=%s entry_price=%s stop_loss=%s stop_distance_percent=%s "
+        "required_notional=%s max_leverage=%s required_margin=%s available_margin=%s sufficient=%s",
+        fixed_loss,
+        entry,
+        stop,
+        stop_distance_percent,
+        required_notional,
+        max_lev,
+        required_margin,
+        available,
+        can_execute,
     )
     if not can_execute:
+        logger.warning(
+            "Margin check FAILED: required_margin=%s exceeds available_margin=%s - trade blocked before reaching Bitget",
+            required_margin,
+            available,
+        )
         raise ValueError("BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN")
 
     return RequiredMarginPlan(
