@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONFIRMATION_TEXT, TradeMode
+from arjiobot.live_setup_detection import move_setup_to_completed
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalStatus
@@ -230,6 +231,12 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     automation.setdefault("executed_trade_plan_ids", []).append(plan.trade_plan_id)
     state.strategy_engine.mark_signal_status(signal.signal_id, SignalStatus.SENT_TO_EXECUTION, datetime.now(timezone.utc), reason="live automation submitted order")
     state.risk_engine.update_trade_plan_status(plan.trade_plan_id, TradePlanStatus.SENT_TO_EXECUTION, datetime.now(timezone.utc), reason="live automation submitted order")
+    # This setup's Setup Radar lifecycle is done - it is now a live trade.
+    # Move it out of the uncapped in-progress pool into completed_setups
+    # (capped at 100) so it shows up in Setup Radar's COMPLETED history with
+    # this attempt's bitget_order_id/trade_plan_id (see radar.py's
+    # _related_execution), and stops being listed as "in progress".
+    move_setup_to_completed(state, setup)
     _append_attempt(automation, attempt)
     logger.info(
         "Live automation: order PLACED on Bitget for setup %s (%s) - bitget_order_id=%s trade_plan_id=%s",

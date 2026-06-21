@@ -64,8 +64,13 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
         invalidated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
         invalidation_reason=InvalidationReason.RETRACE_WINDOW_EXPIRED,
     )
-    for setup in (active, entry_ready, completed, invalidated):
-        state.setups[setup.setup_id] = setup
+    # Mirrors how _store_setup/move_setup_to_completed actually route a real
+    # setup: ACTIVE and pending ENTRY_READY stay in the uncapped in-progress
+    # pool, COMPLETED and INVALIDATED live in their own capped-at-100 stores.
+    state.setups[active.setup_id] = active
+    state.setups[entry_ready.setup_id] = entry_ready
+    state.completed_setups[completed.setup_id] = completed
+    state.invalidated_setups[invalidated.setup_id] = invalidated
 
     in_progress = api.get("/api/setups/in-progress").json()["data"]
     completed_rows = api.get("/api/setups/completed").json()["data"]

@@ -42,10 +42,17 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
             "max_leverage": "20",
         },
         setups={},
+        invalidated_setups={},
+        completed_setups={},
         setup_history={},
         stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},
     )
+
+
+def _all_tracked(state) -> list:
+    """Every setup across all three stores - mirrors radar.py's _all_setups."""
+    return [*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values()]
 
 
 def test_swing_only_attempt_is_logged_and_visible_with_its_symbol() -> None:
@@ -54,12 +61,13 @@ def test_swing_only_attempt_is_logged_and_visible_with_its_symbol() -> None:
 
     detect_live_setups_for_symbol(state, "ADAUSDT")
 
-    assert state.setups, "expected at least one tracked setup attempt"
+    tracked = _all_tracked(state)
+    assert tracked, "expected at least one tracked setup attempt"
     # Critical display requirement: every attempt, at every stage, carries its symbol.
-    assert all(setup.symbol == "ADAUSDT" for setup in state.setups.values())
-    assert any(setup.swing_16m_id for setup in state.setups.values())
+    assert all(setup.symbol == "ADAUSDT" for setup in tracked)
+    assert any(setup.swing_16m_id for setup in tracked)
     # At minimum, attempts should exist at or beyond the swing stage (20%).
-    assert all(setup.progress_percent >= 20.0 for setup in state.setups.values())
+    assert all(setup.progress_percent >= 20.0 for setup in tracked)
 
 
 def test_failed_expansion_attempt_is_retained_with_invalidation_reason() -> None:
@@ -68,9 +76,10 @@ def test_failed_expansion_attempt_is_retained_with_invalidation_reason() -> None
 
     detect_live_setups_for_symbol(state, "ADAUSDT")
 
+    # A failed/invalidated attempt now lives in invalidated_setups, not setups.
     expansion_failures = [
         setup
-        for setup in state.setups.values()
+        for setup in state.invalidated_setups.values()
         if setup.invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
     ]
     assert expansion_failures, "expected at least one swing whose expansion never confirmed"
@@ -109,31 +118,77 @@ def test_entry_ready_setup_from_trade_still_reaches_100_percent() -> None:
     assert setup.status is SetupStatus.ENTRY_READY
 
 
-def test_only_latest_100_attempts_are_retained() -> None:
-    candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
-    state = _fake_state("ADAUSDT", candles_1m[:6000])
-    detect_live_setups_for_symbol(state, "ADAUSDT")
-    assert len(state.setups) <= 100
+def _swing_trace(swing_id: str, *, stage: str, progress_percent: float, invalidation_reason: str | None = None, is_terminal: bool = False) -> dict[str, object]:
+    return {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "swing_16m_id": swing_id,
+        "swing_timestamp": (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(swing_id.split("_")[-1]))).isoformat(),
+        "swing_price": "100",
+        "expansion_16m_id": None,
+        "fvg_16m_id": None,
+        "fvg_12m_id": None,
+        "fvg_8m_id": None,
+        "entry_price": None,
+        "stop_loss": None,
+        "take_profit": None,
+        "stage": stage,
+        "progress_percent": progress_percent,
+        "invalidation_reason": invalidation_reason,
+        "is_terminal": is_terminal,
+    }
 
-    # Keep extending the live candle window (more polls, more swing candidates)
-    # until the cap is exercised.
-    for end in range(6000, len(candles_1m), 1000):
-        state.live_candles["ADAUSDT"] = candles_1m[:end]
-        detect_live_setups_for_symbol(state, "ADAUSDT")
-        assert len(state.setups) <= 100, f"100-cap violated with {len(state.setups)} tracked setups"
-        if len(state.setups) == 100:
-            break
-    else:
-        raise AssertionError("expected enough swing candidates across this fixture to exercise the 100-cap")
 
-    assert all(setup.symbol == "ADAUSDT" for setup in state.setups.values())
+def test_invalidated_history_is_capped_at_100_independently_of_in_progress() -> None:
+    """invalidated_setups must keep only the latest 100, oldest evicted first -
+    and must not be affected by how many in-progress setups exist, since they
+    are now two entirely separate stores (see _store_setup)."""
+    state = _fake_state("ADAUSDT", ())
+    traces = tuple(
+        _swing_trace(f"swing_inv_{i}", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+        for i in range(105)
+    )
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert len(state.invalidated_setups) == 100
+    assert state.setups == {}, "invalidated setups must never land in the in-progress store"
+    # Oldest 5 (swing_inv_0..4) were evicted; the most recent must survive.
+    remaining_ids = {setup.swing_16m_id for setup in state.invalidated_setups.values()}
+    assert "swing_inv_104" in remaining_ids
+    assert "swing_inv_0" not in remaining_ids
+
+
+def test_completed_history_is_capped_at_100_independently_of_in_progress() -> None:
+    state = _fake_state("ADAUSDT", ())
+    traces = tuple(_swing_trace(f"swing_done_{i}", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True) for i in range(105))
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert len(state.completed_setups) == 100
+    assert state.setups == {}, "completed setups must never land in the in-progress store"
+    remaining_ids = {setup.swing_16m_id for setup in state.completed_setups.values()}
+    assert "swing_done_104" in remaining_ids
+    assert "swing_done_0" not in remaining_ids
+
+
+def test_in_progress_pool_has_no_cap() -> None:
+    """IN PROGRESS is explicitly uncapped per the Setup Radar spec - unlike
+    invalidated/completed, it must hold every currently-active attempt with
+    no eviction at all, however many there are."""
+    state = _fake_state("ADAUSDT", ())
+    traces = tuple(_swing_trace(f"swing_active_{i}", stage="SWING_16M_CONFIRMED", progress_percent=20.0) for i in range(150))
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert len(state.setups) == 150
+    assert state.invalidated_setups == {}
+    assert state.completed_setups == {}
 
 
 def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
-    candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
-    state = _fake_state("ADAUSDT", candles_1m[:5000])
-    detect_live_setups_for_symbol(state, "ADAUSDT")
-
+    """A real ENTRY_READY setup (_setup_from_trade) stays in the uncapped
+    in-progress pool, untouched by completed_setups/invalidated_setups
+    filling up around it - it only ever leaves once live automation actually
+    submits an order for it (move_setup_to_completed)."""
+    state = _fake_state("ADAUSDT", ())
     pending_trade = {
         "trade_id": "trade_pending_1",
         "symbol": "ADAUSDT",
@@ -149,14 +204,12 @@ def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
     pending = _setup_from_trade(pending_trade, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
     state.setups[pending.setup_id] = pending
 
-    for end in range(5000, len(candles_1m), 1000):
-        state.live_candles["ADAUSDT"] = candles_1m[:end]
-        detect_live_setups_for_symbol(state, "ADAUSDT")
-        if len(state.setups) >= 100:
-            break
+    traces = tuple(_swing_trace(f"swing_flood_{i}", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True) for i in range(105))
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    assert pending.setup_id in state.setups, "an ENTRY_READY setup must never be evicted by the attempt cap"
+    assert pending.setup_id in state.setups, "a pending ENTRY_READY setup must never be evicted"
     assert state.setups[pending.setup_id].status is SetupStatus.ENTRY_READY
+    assert len(state.completed_setups) == 100, "the flood of unrelated completions must still respect its own cap"
 
 
 def test_invalidation_reason_clears_when_a_later_poll_resolves_favorably() -> None:
@@ -183,14 +236,16 @@ def test_invalidation_reason_clears_when_a_later_poll_resolves_favorably() -> No
     failed_trace = {**base_trace, "stage": "SWING_16M_CONFIRMED", "progress_percent": 20.0, "invalidation_reason": "EXPANSION_NOT_CONFIRMED", "is_terminal": True}
 
     _apply_attempt_traces(state, "ADAUSDT", (failed_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
-    [setup] = state.setups.values()
+    [setup] = state.invalidated_setups.values()
     assert setup.status is SetupStatus.INVALIDATED
     assert setup.invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
     assert setup.invalidated_at is not None
+    assert state.setups == {}
 
     resolved_trace = {**base_trace, "stage": "ENTRY_READY", "progress_percent": 100.0, "invalidation_reason": None, "is_terminal": True}
     _apply_attempt_traces(state, "ADAUSDT", (resolved_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
-    [setup] = state.setups.values()
+    assert state.invalidated_setups == {}, "must move out of invalidated_setups once it resolves favorably"
+    [setup] = state.completed_setups.values()
     assert setup.progress_percent == 100.0
     assert setup.status is SetupStatus.COMPLETED
     assert setup.invalidation_reason is None, "stale invalidation reason must not survive onto a resolved attempt"
@@ -232,13 +287,16 @@ def test_live_automation_only_acts_on_entry_ready_setups() -> None:
         live_candles={"ADAUSDT": candles_1m[:5000]},
         settings=state.settings,
         setups=state.setups,
+        invalidated_setups=state.invalidated_setups,
+        completed_setups=state.completed_setups,
         setup_history=state.setup_history,
         stale_trade_skips=state.stale_trade_skips,
         live_setup_detection={"processed_trade_keys": []},
     )
     detect_live_setups_for_symbol(detection_state, "ADAUSDT")
-    assert state.setups, "expected attempt rows to exist"
-    assert not any(setup.current_state is SetupState.ENTRY_READY for setup in state.setups.values()), (
+    tracked = [*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values()]
+    assert tracked, "expected attempt rows to exist"
+    assert not any(setup.current_state is SetupState.ENTRY_READY for setup in tracked), (
         "fixture assumption: no real ENTRY_READY trade in this window, only attempt traces"
     )
 

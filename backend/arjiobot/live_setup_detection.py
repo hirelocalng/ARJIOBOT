@@ -358,7 +358,12 @@ def _apply_one_attempt_trace(
         target_status = SetupStatus.ACTIVE
     now = datetime.now(timezone.utc)
 
-    existing = state.setups.get(setup_id)
+    # existing may currently live in any of the three stores - a setup that
+    # was invalidated on an earlier poll but whose underlying check can
+    # genuinely change with more candles (e.g. expansion confirmation - see
+    # the stale invalidation_reason fix below) needs to be found and moved,
+    # not recreated from scratch as if this were the first time it's seen.
+    existing = state.setups.get(setup_id) or state.invalidated_setups.get(setup_id) or state.completed_setups.get(setup_id)
     new_progress = max(existing.progress_percent if existing is not None else 0.0, float(trace.get("progress_percent") or 0.0))
 
     metadata = dict(existing.metadata) if existing is not None else {}
@@ -420,7 +425,6 @@ def _apply_one_attempt_trace(
             ),
             **field_updates,
         )
-        state.setups[setup_id] = setup
         state.setup_history[setup_id] = [
             {
                 "from_state": None,
@@ -430,7 +434,7 @@ def _apply_one_attempt_trace(
                 "source": source,
             }
         ]
-        _evict_oldest_setup_attempts(state)
+        _store_setup(state, setup, is_invalidated=is_invalidated, target_status=target_status)
         return
 
     if existing.current_state != target_state:
@@ -443,25 +447,56 @@ def _apply_one_attempt_trace(
                 "source": source,
             }
         )
-    state.setups[setup_id] = replace(existing, **field_updates)
+    _store_setup(state, replace(existing, **field_updates), is_invalidated=is_invalidated, target_status=target_status)
 
 
-def _evict_oldest_setup_attempts(state: Any, *, max_count: int = MAX_TRACKED_SETUP_ATTEMPTS) -> None:
-    """Keep only the latest MAX_TRACKED_SETUP_ATTEMPTS rows, oldest evicted first.
-
-    A setup pending live execution (status ENTRY_READY) is never evicted, so a
-    burst of new attempts can never push out a trade automation hasn't acted on yet.
+def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status: SetupStatus) -> None:
+    """Route a setup to the one store matching its current status, removing
+    it from the other two first - a setup that resolves (invalidated or
+    completed) leaves the uncapped in-progress pool and lands in its own
+    capped-at-100 history; one that resolves *favorably* after a prior
+    invalidation (see the stale invalidation_reason handling above this
+    function) moves back out of invalidated_setups into the live pool.
     """
-    overflow = len(state.setups) - max_count
+    state.setups.pop(setup.setup_id, None)
+    state.invalidated_setups.pop(setup.setup_id, None)
+    state.completed_setups.pop(setup.setup_id, None)
+    if is_invalidated:
+        state.invalidated_setups[setup.setup_id] = setup
+        _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
+    elif target_status is SetupStatus.COMPLETED:
+        state.completed_setups[setup.setup_id] = setup
+        _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
+    else:
+        state.setups[setup.setup_id] = setup
+
+
+def move_setup_to_completed(state: Any, setup: Any) -> None:
+    """Move a real ENTRY_READY setup (_setup_from_trade) into completed_setups
+    once live automation actually submits its order - called from
+    live_automation.py's _process_setup. Its Setup Radar lifecycle is done at
+    that point (it is now a live trade, visible on the Execution page via the
+    matching Bitget order), so it leaves the uncapped in-progress pool the
+    same way an attempt-trace COMPLETED row does.
+    """
+    state.setups.pop(setup.setup_id, None)
+    state.completed_setups[setup.setup_id] = setup
+    _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
+
+
+def _evict_oldest(
+    store: dict[str, Any],
+    setup_history: dict[str, list[dict[str, object]]],
+    *,
+    key: Any,
+    max_count: int = MAX_TRACKED_SETUP_ATTEMPTS,
+) -> None:
+    overflow = len(store) - max_count
     if overflow <= 0:
         return
-    evictable = sorted(
-        (setup for setup in state.setups.values() if setup.status is not SetupStatus.ENTRY_READY),
-        key=lambda setup: setup.created_at,
-    )
-    for setup in evictable[:overflow]:
-        state.setups.pop(setup.setup_id, None)
-        state.setup_history.pop(setup.setup_id, None)
+    for setup in sorted(store.values(), key=key)[:overflow]:
+        store.pop(setup.setup_id, None)
+        setup_history.pop(setup.setup_id, None)
 
 
 def _fresh_trade_candidate(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> dict[str, object] | None:

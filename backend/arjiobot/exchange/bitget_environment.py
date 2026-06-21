@@ -160,6 +160,7 @@ class BitgetEnvironmentService:
         self.last_account_payload: dict[str, object] | None = None
         self.last_positions: dict[str, object] | None = None
         self.last_open_orders: dict[str, object] | None = None
+        self.last_position_history: dict[str, object] | None = None
         self.last_dry_run_preview: dict[str, object] | None = None
 
     def save_credentials(self, payload: dict[str, object]) -> dict[str, object]:
@@ -329,6 +330,47 @@ class BitgetEnvironmentService:
             "data_present": True,
         }
         self.last_open_orders = record
+        return record
+
+    def fetch_position_history(self, symbol: str | None = None, product_type: str = DEFAULT_PRODUCT_TYPE, *, limit: int = 100) -> dict[str, object]:
+        """Closed-position history from Bitget's documented V2 Mix API
+        (/api/v2/mix/position/history-position) - the source of real entry/
+        exit price, realized PnL, and fees for the Execution page's CLOSED
+        TRADES and PNL tabs. Modeled on fetch_positions/fetch_open_orders
+        above, which already use this exact private-request + sanitize
+        pattern successfully against the real exchange.
+
+        Not yet verified against a real authenticated response in this
+        environment (no live credentials/network access here) - the row
+        shape is passed through as-is (sanitized of secrets only) rather
+        than remapped into renamed fields, specifically so nothing is lost
+        if Bitget's actual field names differ from what's expected; see
+        account_status.py / Executions.tsx for the defensive .get() lookups
+        that read from these rows.
+        """
+        query: dict[str, object] = {"productType": product_type, "marginCoin": DEFAULT_MARGIN_COIN, "limit": str(limit)}
+        if symbol:
+            query["symbol"] = symbol.upper()
+        payload = self._private_request("GET", "/api/v2/mix/position/history-position", query=query)
+        data = payload.get("data")
+        rows = data.get("list") if isinstance(data, dict) else data
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list):
+            rows = []
+        closed_positions = tuple(_sanitize_exchange_row(row) for row in rows if isinstance(row, dict))
+        record = {
+            "code": payload.get("code"),
+            "msg": payload.get("msg"),
+            "symbol": symbol.upper() if symbol else "ALL",
+            "product_type": product_type,
+            "margin_coin": DEFAULT_MARGIN_COIN,
+            "closed_position_count": len(closed_positions),
+            "closed_positions": closed_positions,
+            "fetched_at": _now(),
+            "data_present": True,
+        }
+        self.last_position_history = record
         return record
 
     def fetch_contract_config(self, symbol: str, product_type: str = DEFAULT_PRODUCT_TYPE) -> dict[str, object]:

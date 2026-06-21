@@ -346,3 +346,58 @@ def _error(response) -> str:
     if isinstance(detail, dict):
         return str(detail.get("error", {}).get("message") or detail)
     return str(detail)
+
+
+def test_fetch_position_history_parses_closed_positions_and_sanitizes_secrets(monkeypatch) -> None:
+    service = BitgetEnvironmentService()
+    captured: dict[str, object] = {}
+
+    def fake_private_request(method: str, path: str, *, query=None, body=None, credentials=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["query"] = query
+        return {
+            "code": "00000",
+            "msg": "success",
+            "data": {
+                "list": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "holdSide": "long",
+                        "openPriceAvg": "90",
+                        "closeAvgPrice": "95",
+                        "netProfit": "50",
+                        "totalFee": "1.2",
+                        "openTotalPos": "1",
+                        "closeTotalPos": "1",
+                        "ctime": "1750000000000",
+                        "utime": "1750000600000",
+                        "api_key": "should-never-appear",
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(service, "_private_request", fake_private_request)
+
+    record = service.fetch_position_history("BTCUSDT")
+
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/api/v2/mix/position/history-position"
+    assert captured["query"]["symbol"] == "BTCUSDT"
+    assert record["closed_position_count"] == 1
+    closed = record["closed_positions"][0]
+    assert closed["symbol"] == "BTCUSDT"
+    assert closed["netProfit"] == "50"
+    assert "api_key" not in closed, "secrets must be stripped even if echoed back by the exchange"
+    assert service.last_position_history is record
+
+
+def test_fetch_position_history_tolerates_missing_or_malformed_data(monkeypatch) -> None:
+    service = BitgetEnvironmentService()
+    monkeypatch.setattr(service, "_private_request", lambda method, path, **kwargs: {"code": "00000", "msg": "success", "data": None})
+
+    record = service.fetch_position_history()
+
+    assert record["closed_position_count"] == 0
+    assert record["closed_positions"] == ()

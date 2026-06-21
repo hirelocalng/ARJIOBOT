@@ -27,6 +27,8 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
             "max_leverage": "20",
         },
         setups={},
+        invalidated_setups={},
+        completed_setups={},
         setup_history={},
         stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},

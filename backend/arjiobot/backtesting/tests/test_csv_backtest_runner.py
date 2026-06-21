@@ -989,7 +989,7 @@ def test_radar_contract_exposes_profile_f_status_fields() -> None:
         assert field in backend
         assert field in frontend_type
     assert "16M FVG" in frontend_table
-    assert "One/FVG" in frontend_table
+    assert "RR/TP Profile" in frontend_table
 
 
 def _assert_confirmation_funnel_balances(funnel: dict[str, int]) -> None:

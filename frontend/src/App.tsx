@@ -20,7 +20,6 @@ import { getRadar, getInProgressSetups, getCompletedSetups, getInvalidatedSetups
 import { listSignals } from './api/signals';
 import { listTradePlans } from './api/risk';
 import { listExecutions } from './api/execution';
-import { getBitgetOrders, type BitgetOrdersResponse } from './api/bitget';
 import { listBacktestRuns } from './api/backtesting';
 import { getAuthStatus } from './api/auth';
 import { getDashboardToken } from './api/client';
@@ -58,7 +57,6 @@ export function App() {
   const [signals, setSignals] = useState<TradeSignal[]>([]);
   const [plans, setPlans] = useState<TradePlan[]>([]);
   const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
-  const [bitgetOrders, setBitgetOrders] = useState<BitgetOrdersResponse | null>(null);
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [controlPlane, setControlPlane] = useState<ControlPlaneSnapshot | null>(null);
   const [selectedSetupId, setSelectedSetupId] = useState<string | null>(null);
@@ -81,7 +79,6 @@ export function App() {
         listSignals(),
         listTradePlans(),
         listExecutions(),
-        getBitgetOrders(),
         listBacktestRuns(),
         getControlPlane()
       ]);
@@ -103,9 +100,8 @@ export function App() {
       setSignals(value(8, signals));
       setPlans(value(9, plans));
       setExecutions(value(10, executions));
-      setBitgetOrders(value(11, bitgetOrders));
-      setRuns(value(12, runs));
-      setControlPlane(value(13, controlPlane));
+      setRuns(value(11, runs));
+      setControlPlane(value(12, controlPlane));
       setApiError(errors.length ? errors.join(' | ') : null);
     } finally {
       refreshInFlight.current = false;
@@ -160,7 +156,7 @@ export function App() {
     Risk: <RiskSettings settings={settings} onRefresh={refresh} controlPlane={controlPlane} />,
     Signals: <Signals signals={signals} setups={setups} onRefresh={refresh} />,
     'Trade Plans': <TradePlans plans={plans} signals={signals} onRefresh={refresh} />,
-    Executions: <Executions executions={executions} plans={plans} bitgetOrders={bitgetOrders} onRefresh={refresh} />,
+    Executions: <Executions executions={executions} plans={plans} onRefresh={refresh} />,
     Backtesting: <Backtesting runs={runs} settings={settings} onRefresh={refresh} />,
     Reports: <Reports />,
     Settings: <Settings settings={settings} onRefresh={refresh} controlPlane={controlPlane} accounts={accounts} />

@@ -279,7 +279,19 @@ class ApiState:
     execution_service: ExecutionService = field(default_factory=ExecutionService)
     monitored_pairs: dict[str, dict[str, object]] = field(default_factory=load_pairs)
     settings: dict[str, object] = field(default_factory=load_settings)
+    # In-progress (ACTIVE) and pending-execution (ENTRY_READY) setups only -
+    # not capped, per the Setup Radar spec ("IN PROGRESS: no cap, show all
+    # currently being tracked"). A setup leaves this dict the moment it
+    # resolves: into invalidated_setups, into completed_setups, or (for a
+    # real ENTRY_READY trade) into completed_setups once live automation
+    # actually submits it (see live_automation.py _process_setup).
     setups: dict[str, object] = field(default_factory=dict)
+    # Separate, independently-capped-at-100 histories (see
+    # MAX_TRACKED_SETUP_ATTEMPTS in live_setup_detection.py) - kept apart
+    # from `setups` so a burst of in-progress attempts can never push
+    # completed/invalidated history out, and vice versa.
+    invalidated_setups: dict[str, object] = field(default_factory=dict)
+    completed_setups: dict[str, object] = field(default_factory=dict)
     setup_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     # Keyed by swing_16m_id so Setup Radar can correlate a COMPLETED attempt
     # row to the matching real trade candidate that the shared strategy

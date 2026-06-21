@@ -58,4 +58,13 @@ export type RadarSetup = {
     seconds_since_monitoring_started: number | null;
     likely_restart_related: boolean;
   } | null;
+  swing_price?: string | null;
+  // Best-effort link to the real Bitget order live automation submitted for
+  // this setup - null if no submitted attempt is found within the latest 50
+  // automation attempts (see _related_execution in radar.py).
+  related_execution?: {
+    trade_plan_id: string | null;
+    bitget_order_id: string | null;
+    submitted_at: string | null;
+  } | null;
 };

@@ -31,6 +31,26 @@ def _stage_status(progress_percent: float, threshold: float) -> str:
     return "CONFIRMED" if progress_percent >= threshold else "WAITING"
 
 
+def _related_execution(setup) -> dict[str, object] | None:
+    """Best-effort link from a COMPLETED/ENTRY_READY setup to the real Bitget
+    order live automation submitted for it, if any. live_automation.py's
+    attempts list already carries setup_id on every record (see
+    _process_setup), so this is a lookup, not new tracking - but it is
+    capped at the latest 50 attempts (_append_attempt), so a setup whose
+    trade happened long enough ago may no longer have a matching entry even
+    though the trade itself did go through.
+    """
+    attempts = getattr(get_state(), "live_automation", {}).get("attempts", [])
+    for attempt in reversed(attempts):
+        if attempt.get("setup_id") == setup.setup_id and attempt.get("status") == "SUBMITTED":
+            return {
+                "trade_plan_id": attempt.get("trade_plan_id"),
+                "bitget_order_id": attempt.get("bitget_order_id"),
+                "submitted_at": attempt.get("submitted_at"),
+            }
+    return None
+
+
 def radar_record(setup) -> dict[str, object]:
     profile_status = getattr(setup, "profile_f_status", {}) or {}
     metadata = getattr(setup, "metadata", {}) or {}
@@ -89,12 +109,20 @@ def radar_record(setup) -> dict[str, object]:
         "rejection_reason": profile_status.get("rejection_reason") or (setup.invalidation_reason.value if setup.invalidation_reason else None),
         "source": metadata.get("source"),
         "stale_skip": stale_skip,
+        "swing_price": metadata.get("swing_price") or None,
+        "related_execution": _related_execution(setup),
     }
+
+
+def _all_setups(state) -> tuple:
+    """Every tracked setup across all three stores - in-progress (uncapped),
+    invalidated (capped at 100), completed (capped at 100)."""
+    return (*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values())
 
 
 @router.get("")
 def radar():
-    return ok(tuple(radar_record(setup) for setup in get_state().setups.values()))
+    return ok(tuple(radar_record(setup) for setup in _all_setups(get_state())))
 
 
 @router.get("/live")
@@ -102,16 +130,17 @@ def live_radar():
     state = get_state()
     if not state.monitoring.get("active"):
         return ok({"status": "NOT MONITORING", "message": "NO ACTIVE LIVE SETUPS", "setups": ()})
-    setups = tuple({**radar_record(setup), "source": "LIVE_MARKET_DATA"} for setup in state.setups.values())
+    setups = tuple({**radar_record(setup), "source": "LIVE_MARKET_DATA"} for setup in _all_setups(state))
     return ok({"status": "ACTIVE" if setups else "WAITING", "message": "NO ACTIVE LIVE SETUPS" if not setups else "LIVE SETUPS ACTIVE", "setups": setups})
 
 
 @router.get("/history")
 def radar_history():
-    """Latest tracked setup attempts (up to the 100-attempt cap), newest first.
+    """Latest tracked setup attempts across all three stores, newest first.
 
     Includes every status - active, entry-ready, invalidated, expired, completed -
-    so failed/invalidated attempts remain visible until pushed out by the cap.
+    so failed/invalidated attempts remain visible until pushed out by their
+    own store's 100-cap (in-progress/entry-ready is not capped).
     """
-    setups = sorted(get_state().setups.values(), key=lambda setup: setup.created_at, reverse=True)
+    setups = sorted(_all_setups(get_state()), key=lambda setup: setup.created_at, reverse=True)
     return ok(tuple(radar_record(setup) for setup in setups))

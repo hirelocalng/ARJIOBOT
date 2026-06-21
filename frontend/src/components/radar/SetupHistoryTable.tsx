@@ -2,6 +2,7 @@ import type { RadarSetup } from '../../types/radar';
 import { DataTable } from '../tables/DataTable';
 import { StatusBadge } from '../layout/StatusBadge';
 import { DEFAULT_PRODUCTION_PROFILE } from '../../utils/constants';
+import { friendlyStageLabel } from '../../utils/setupStage';
 
 // This table only ever receives INVALIDATED/EXPIRED rows now (SetupRadar.tsx
 // routes COMPLETED/ENTRY_READY to the In Progress table instead), but tone by
@@ -23,7 +24,7 @@ export function SetupHistoryTable({ setups, onSelect }: { setups: RadarSetup[]; 
         { header: 'Type', render: (row) => row.direction },
         { header: 'Invalidation Reason', render: (row) => row.invalidation_reason ?? row.rejection_reason ?? '-' },
         { header: 'Completed %', render: (row) => `${row.progress_percent.toFixed(0)}%` },
-        { header: 'Failed/Final Stage', render: (row) => <StatusBadge label={row.current_state} tone={statusTone(row.status)} /> },
+        { header: 'Failed/Final Stage', render: (row) => <StatusBadge label={friendlyStageLabel(row.current_state, row.direction)} tone={statusTone(row.status)} /> },
         { header: 'Strategy Profile', render: (row) => row.strategy_profile ?? DEFAULT_PRODUCTION_PROFILE },
         { header: 'Timeframe Profile', render: (row) => row.timeframe_profile ?? '-' },
         { header: 'RR/TP Model', render: (row) => row.selected_tp_model ?? '-' },
