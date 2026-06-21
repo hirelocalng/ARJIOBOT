@@ -80,3 +80,50 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
     for row in invalidated_rows:
         assert row["progress_percent"] < 100.0
         assert row["invalidation_reason"] is not None
+
+
+def test_per_stage_columns_stay_in_sync_with_progress_and_state() -> None:
+    """radar_record() used to read setup.profile_f_status, an attribute no
+    real Setup instance ever sets - every per-stage column (16M FVG,
+    Expansion, 12M FVG, 8M Count, 12M Entry) silently rendered as a
+    placeholder ("WAITING") regardless of real progress, including on rows
+    where current_state/progress_percent correctly showed COMPLETED/100%.
+    The per-stage fields must now be derived from progress_percent, which is
+    a monotonic high-water mark that can only advance by actually passing
+    each prior stage in order."""
+    api = client()
+    state = get_state()
+
+    early = _make_setup(setup_id="set_early", symbol="BTCUSDT", current_state=SetupState.SWING_16M_CONFIRMED, progress_percent=20.0)
+    mid = _make_setup(setup_id="set_mid", symbol="ETHUSDT", current_state=SetupState.FVG_12M_CONFIRMED, progress_percent=65.0)
+    done = _make_setup(setup_id="set_done", symbol="SOLUSDT", current_state=SetupState.ENTRY_READY, status=SetupStatus.ENTRY_READY, progress_percent=100.0)
+    for setup in (early, mid, done):
+        state.setups[setup.setup_id] = setup
+
+    rows = {row["setup_id"]: row for row in api.get("/api/radar").json()["data"]}
+
+    # Only the swing stage (20%) has passed - every later stage column must
+    # still read WAITING, not a stale/incorrect CONFIRMED.
+    assert rows["set_early"]["expansion_ratio"] == "WAITING"
+    assert rows["set_early"]["fvg_16m_status"] == "WAITING"
+    assert rows["set_early"]["fvg_12m_status"] == "WAITING"
+    assert rows["set_early"]["eight_minute_candle_count_after_16m_fvg"] == "WAITING"
+    assert rows["set_early"]["entry_candle_boundary_respected"] is False
+
+    # Passed through 12M FVG (65%) - everything up to and including that
+    # stage must read CONFIRMED, but 8M/entry (not yet reached) stay WAITING.
+    assert rows["set_mid"]["expansion_ratio"] == "CONFIRMED"
+    assert rows["set_mid"]["fvg_16m_status"] == "CONFIRMED"
+    assert rows["set_mid"]["fvg_12m_status"] == "CONFIRMED"
+    assert rows["set_mid"]["eight_minute_candle_count_after_16m_fvg"] == "WAITING"
+    assert rows["set_mid"]["entry_candle_boundary_respected"] is False
+
+    # 100% complete - this is the exact bug report: every stage must show
+    # CONFIRMED here, not WAITING next to a COMPLETED/100% state.
+    assert rows["set_done"]["current_state"] == "ENTRY_READY"
+    assert rows["set_done"]["progress_percent"] == 100.0
+    assert rows["set_done"]["expansion_ratio"] == "CONFIRMED"
+    assert rows["set_done"]["fvg_16m_status"] == "CONFIRMED"
+    assert rows["set_done"]["fvg_12m_status"] == "CONFIRMED"
+    assert rows["set_done"]["eight_minute_candle_count_after_16m_fvg"] == "CONFIRMED"
+    assert rows["set_done"]["entry_candle_boundary_respected"] is True
