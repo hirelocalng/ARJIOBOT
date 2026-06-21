@@ -84,6 +84,32 @@ def test_non_default_timeframe_profiles_survive_a_restart(tmp_path, monkeypatch)
         )
 
 
+def test_saved_risk_amount_survives_a_restart_even_with_default_risk_amount_env_set(tmp_path, monkeypatch) -> None:
+    """DEFAULT_RISK_AMOUNT used to be re-applied on every load_settings() call,
+    not just the very first time a row was seeded - a PATCH /api/settings
+    change to risk_amount_per_trade got silently overwritten back to the env
+    var's value on every restart, and that overwrite was then persisted,
+    destroying the saved choice rather than just shadowing it. DEFAULT_SETTINGS
+    already seeds risk_amount_per_trade from this env var on first run; that
+    must be the only place it applies."""
+    monkeypatch.setattr(dependencies, "SETTINGS_PATH", tmp_path / "runtime_settings.json")
+    monkeypatch.setenv("DEFAULT_RISK_AMOUNT", "25")
+    api = client()
+
+    response = api.patch("/api/settings", json={"risk_amount_per_trade": "10"})
+    assert response.status_code == 200
+    assert response.json()["data"]["risk_amount_per_trade"] == "10"
+
+    reloaded = dependencies.reset_state().settings
+    assert reloaded["risk_amount_per_trade"] == "10", "saved risk_amount_per_trade reverted to the DEFAULT_RISK_AMOUNT env var after a simulated restart"
+
+    # Setting it back to the env var's value manually must also stick -
+    # because it was chosen, not because it's being forced.
+    api.patch("/api/settings", json={"risk_amount_per_trade": "25"})
+    reloaded_again = dependencies.reset_state().settings
+    assert reloaded_again["risk_amount_per_trade"] == "25"
+
+
 def test_invalid_settings_options_are_rejected() -> None:
     api = client()
 

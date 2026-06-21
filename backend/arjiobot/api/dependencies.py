@@ -110,37 +110,36 @@ DEFAULT_SETTINGS = {
 
 
 def _reapply_env_overrides(loaded: dict[str, object]) -> dict[str, object]:
-    """ADAPTER_MODE / DEFAULT_RISK_AMOUNT / MAX_LEVERAGE, when explicitly
-    set, always win over whatever is persisted (database row or JSON file)
-    and are re-applied on every process start - not just the very first
-    time a row is seeded.
+    """ADAPTER_MODE, when explicitly set, always wins over whatever is
+    persisted (database row or JSON file) and is re-applied on every
+    process start - not just the very first time a row is seeded.
 
-    Without this, a value written before one of these env vars was set (or
-    before it was changed) permanently shadows it: {**DEFAULT_SETTINGS,
-    **saved} always prefers the persisted value once any row exists, so
-    setting e.g. ADAPTER_MODE=BITGET_LIVE in Railway after the database
-    already had an adapter_mode=MOCK row from an earlier deploy did
-    nothing - confirmed by reproducing exactly that sequence locally.
+    Without this, a value written before ADAPTER_MODE was set (or before
+    it was changed) permanently shadows it: {**DEFAULT_SETTINGS, **saved}
+    always prefers the persisted value once any row exists, so setting
+    e.g. ADAPTER_MODE=BITGET_LIVE in Railway after the database already
+    had an adapter_mode=MOCK row from an earlier deploy did nothing -
+    confirmed by reproducing exactly that sequence locally. ADAPTER_MODE
+    is treated as an infrastructure-level baseline that should always win,
+    by design - this is the one exception, not the general pattern.
 
-    Trade-off, stated plainly: a dashboard PATCH /api/settings change to
-    one of these three keys only lasts for the life of the running
-    process if the matching env var is set - the env var reasserts itself
-    on every restart. Treating these specific env vars as the
-    infrastructure-level baseline (re-applied every boot) is what actually
-    fixes "I set the env var but it's stuck on the old value."
+    DEFAULT_RISK_AMOUNT / MAX_LEVERAGE used to be re-applied here the same
+    way, every load, every restart - which meant a dashboard PATCH
+    /api/settings change to risk_amount_per_trade or max_leverage could
+    never survive a restart as long as the matching env var stayed set: it
+    got silently overwritten back to the env var's value and that
+    overwritten value was then written back to the database, destroying
+    the user's saved choice rather than just shadowing it for one process
+    lifetime. DEFAULT_SETTINGS already seeds both of these from their env
+    vars on the very first run (before any row exists) via
+    _positive_number_from_env() above - that's the only place they should
+    apply. A dashboard-saved value must win after that, including a
+    dashboard-saved value that happens to equal the env var's default.
     """
     adapter_mode_env = os.getenv("ADAPTER_MODE", "").strip().upper()
     if adapter_mode_env in ALLOWED_ADAPTER_MODES and loaded.get("adapter_mode") != adapter_mode_env:
         logger.info("ADAPTER_MODE=%s overrides persisted adapter_mode=%r", adapter_mode_env, loaded.get("adapter_mode"))
         loaded["adapter_mode"] = adapter_mode_env
-    risk_env = _positive_number_from_env("DEFAULT_RISK_AMOUNT")
-    if risk_env and loaded.get("risk_amount_per_trade") != risk_env:
-        logger.info("DEFAULT_RISK_AMOUNT=%s overrides persisted risk_amount_per_trade=%r", risk_env, loaded.get("risk_amount_per_trade"))
-        loaded["risk_amount_per_trade"] = risk_env
-    leverage_env = _positive_number_from_env("MAX_LEVERAGE")
-    if leverage_env and loaded.get("max_leverage") != leverage_env:
-        logger.info("MAX_LEVERAGE=%s overrides persisted max_leverage=%r", leverage_env, loaded.get("max_leverage"))
-        loaded["max_leverage"] = leverage_env
     return loaded
 
 
