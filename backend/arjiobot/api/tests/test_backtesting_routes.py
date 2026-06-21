@@ -2,7 +2,20 @@
 
 from datetime import datetime, timedelta, timezone
 
+from arjiobot.api.routes import backtesting as backtesting_routes
 from arjiobot.api.tests.helpers import client
+
+
+def test_csv_upload_rejects_files_over_the_size_limit(monkeypatch) -> None:
+    monkeypatch.setattr(backtesting_routes, "MAX_CSV_UPLOAD_BYTES", 10)
+    api = client()
+    csv = "timestamp,open,high,low,close,volume\n2026-01-01T00:00:00Z,1,2,1,2,10\n"
+
+    response = api.post("/api/backtesting/upload-csv", files={"file": ("BTCUSDT-1m-2026-01.csv", csv, "text/csv")})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "CSV_UPLOAD_TOO_LARGE"
+    assert "exceeds" in response.json()["error"]["message"]
 
 
 def test_csv_upload_and_backtest_run_routes() -> None:

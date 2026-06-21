@@ -33,6 +33,9 @@ export function Backtesting({ runs, settings, onRefresh }: { runs: BacktestRun[]
   const [timeExitMinutesTouched, setTimeExitMinutesTouched] = useState(false);
   const [profileTouched, setProfileTouched] = useState(false);
   const [status, setStatus] = useState('Idle');
+  const [statusTone, setStatusTone] = useState<'idle' | 'busy' | 'ok' | 'error'>('idle');
+  const [isUploading, setIsUploading] = useState(false);
+  const [lastUploadFile, setLastUploadFile] = useState<File | null>(null);
   const [uploadId, setUploadId] = useState<string | null>(null);
   const [uploadedCsv, setUploadedCsv] = useState<CsvUpload | null>(null);
   const [selectedRun, setSelectedRun] = useState<BacktestRun | null>(null);
@@ -90,8 +93,11 @@ export function Backtesting({ runs, settings, onRefresh }: { runs: BacktestRun[]
   const symbolOptions = Array.from(new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', uploadedCsv?.detected_symbol, selectedSymbol].filter(Boolean) as string[]));
 
   async function handleUpload(file: File) {
+    setLastUploadFile(file);
+    setIsUploading(true);
+    setStatusTone('busy');
     try {
-      setStatus('Uploading CSV');
+      setStatus(`Uploading ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)}MB) - large files can take a while to parse`);
       setUploadId(null);
       setUploadedCsv(null);
       const uploaded = await uploadCsv(file, selectedSymbol);
@@ -102,26 +108,34 @@ export function Backtesting({ runs, settings, onRefresh }: { runs: BacktestRun[]
         setManualSymbol('');
       }
       setStatus(`CSV uploaded: ${uploaded.filename} (${uploaded.candles_loaded} candles)`);
+      setStatusTone('ok');
     } catch (error) {
       setUploadId(null);
       setUploadedCsv(null);
       setStatus(error instanceof Error ? `CSV upload failed: ${error.message}` : 'CSV upload failed');
+      setStatusTone('error');
+    } finally {
+      setIsUploading(false);
     }
   }
 
   async function handleRun() {
+    setStatusTone('busy');
     try {
       setStatus(`Running ${profile}`);
       if (!uploadId) {
         setStatus('Backtest failed: upload a CSV first');
+        setStatusTone('error');
         return;
       }
       if (!uploadedCsv || uploadedCsv.upload_id !== uploadId) {
         setStatus('Backtest failed: upload metadata is stale. Upload the CSV again.');
+        setStatusTone('error');
         return;
       }
       if (!selectedSymbol) {
         setStatus('Backtest failed: select or enter a symbol');
+        setStatusTone('error');
         return;
       }
       const run = await runBacktest({
@@ -158,19 +172,24 @@ export function Backtesting({ runs, settings, onRefresh }: { runs: BacktestRun[]
       setSelectedRun(run);
       await onRefresh();
       setStatus(`${profile} backtest complete`);
+      setStatusTone('ok');
     } catch (error) {
       setStatus(error instanceof Error ? `Backtest failed: ${error.message}` : 'Backtest failed');
+      setStatusTone('error');
     }
   }
 
   async function openRun(run: BacktestRun) {
+    setStatusTone('busy');
     try {
       setStatus(`Loading details for ${run.run_id}`);
       setSelectedRun(await getBacktestRun(run.run_id));
       setStatus(`Viewing details for ${run.run_id}`);
+      setStatusTone('ok');
     } catch (error) {
       setSelectedRun(run);
       setStatus(error instanceof Error ? `Could not load ${run.run_id}: ${error.message}` : `Could not load ${run.run_id}`);
+      setStatusTone('error');
     }
   }
 
@@ -202,7 +221,14 @@ export function Backtesting({ runs, settings, onRefresh }: { runs: BacktestRun[]
         <div className={`rounded-md border px-3 py-2 text-xs ${researchMode ? 'border-amber-400/40 bg-amber-400/10 text-amber-100' : 'border-emerald-400/30 bg-emerald-400/10 text-emerald-100'}`}>
           {researchMode ? 'Research-only profile active' : 'Production-safe profile active'}
         </div>
-        <input className="md:col-span-3" type="file" accept=".csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); }} />
+        <input className="md:col-span-2" type="file" accept=".csv" disabled={isUploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void handleUpload(file); }} />
+        <button
+          className="rounded-md border border-slate-700 px-3 py-2 text-sm font-semibold text-slate-200 disabled:opacity-40"
+          disabled={!lastUploadFile || isUploading}
+          onClick={() => lastUploadFile && void handleUpload(lastUploadFile)}
+        >
+          {isUploading ? 'Uploading…' : 'Retry Upload'}
+        </button>
         <button className="rounded-md bg-action px-3 py-2 text-sm font-semibold text-slate-950 md:col-span-2" onClick={() => void handleRun()}>Run Backtest</button>
       </div>
       {researchMode && (
@@ -254,7 +280,20 @@ export function Backtesting({ runs, settings, onRefresh }: { runs: BacktestRun[]
           slippage,
         }} />
       </div>
-      <div className="rounded-lg border border-slate-800 bg-panel p-4 text-sm text-slate-200">Backtest status: {status}</div>
+      <div
+        className={`flex items-center gap-2 rounded-lg border p-4 text-sm ${
+          statusTone === 'error'
+            ? 'border-danger/40 bg-danger/10 text-danger'
+            : statusTone === 'ok'
+              ? 'border-success/40 bg-success/10 text-success'
+              : statusTone === 'busy'
+                ? 'border-action/40 bg-action/10 text-action'
+                : 'border-slate-800 bg-panel text-slate-200'
+        }`}
+      >
+        {isUploading && <span className="h-4 w-4 flex-none animate-spin rounded-full border-2 border-current border-t-transparent" aria-hidden="true" />}
+        <span>Backtest status: {status}</span>
+      </div>
       {activeRun && <BacktestRunDetails run={activeRun} />}
       <div className="grid gap-3 md:grid-cols-4">
         <Metric label="Total trades" value={(activeSummary?.performance_summary as Record<string, unknown> | undefined)?.total_trades ?? activeSummary?.trades_simulated ?? activeRun?.trades?.length ?? 0} />
@@ -318,7 +357,11 @@ function BacktestRunDetails({ run }: { run: BacktestRun }) {
         <div className="rounded-md border border-action/30 bg-action/10 px-3 py-1 text-xs text-action">Selected run: {run.run_id} - {run.profile_id ?? DEFAULT_PRODUCTION_PROFILE}</div>
       </div>
       {warnings.length > 0 && <div className="rounded-md border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-100">{warnings.map(String).join(' ')}</div>}
-      <div className="grid gap-3 lg:grid-cols-2">
+      {/* items-start: panels in the same row vary wildly in content length (Dataset has
+          9 rows, Profile Applied ~28; Strategy Funnel has 50+, Invalidations can have 0) -
+          without it, grid's default stretch makes a short/empty panel match its much
+          taller row-mate's height, leaving large blocks of dead space. */}
+      <div className="grid items-start gap-3 lg:grid-cols-2">
         <KeyValuePanel title="Dataset" rows={{
           upload_id: summary.upload_id ?? run.upload_id ?? 'None',
           filename: summary.filename ?? run.filename ?? 'None',

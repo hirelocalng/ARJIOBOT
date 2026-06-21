@@ -8,6 +8,7 @@ import io
 import logging
 import re
 import sys
+import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -25,6 +26,13 @@ from arjiobot.backtesting.timeframe_profiles import get_timeframe_profile
 from arjiobot.risk.rr_profiles import PRODUCTION_RR_PROFILE, SUPPORTED_TP_MODELS, resolve_rr_value
 
 API_SUPPORTED_TP_MODELS = (*SUPPORTED_TP_MODELS, "TIME_BASED_EXIT")
+
+# CSV row-by-row parsing (load_ohlcv_csv_text) is O(rows) with real per-row cost
+# (Decimal conversions, OHLC validation) - measured at roughly 0.5s/MB of 1-minute
+# OHLCV data. 50MB is already ~9 months of 1-minute candles for one symbol; beyond
+# that, reject with a clear error instead of risking a slow request that looks
+# identical to a hang from the client's point of view.
+MAX_CSV_UPLOAD_BYTES = 50 * 1024 * 1024
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = BACKEND_ROOT / "scripts"
@@ -48,13 +56,25 @@ def profiles():
 
 @router.post("/upload-csv")
 def upload_csv(file: UploadFile = File(...), selected_symbol: str | None = Form(None)):
+    request_started = time.perf_counter()
+    filename = file.filename or "uploaded.csv" if file is not None else "uploaded.csv"
     try:
         if file is None or not hasattr(file, "file"):
             raise api_error(400, "CSV_UPLOAD_REQUIRED", "CSV upload file is required.")
+        read_started = time.perf_counter()
         data = file.file.read()
         if isinstance(data, str):
             data = data.encode("utf-8")
-        filename = file.filename or "uploaded.csv"
+        read_elapsed = time.perf_counter() - read_started
+        size_mb = len(data) / (1024 * 1024)
+        logger.info("CSV upload %s: received %.2fMB in %.2fs", filename, size_mb, read_elapsed)
+        if len(data) > MAX_CSV_UPLOAD_BYTES:
+            logger.warning("CSV upload %s rejected: %.2fMB exceeds the %.0fMB limit", filename, size_mb, MAX_CSV_UPLOAD_BYTES / (1024 * 1024))
+            raise api_error(
+                400,
+                "CSV_UPLOAD_TOO_LARGE",
+                f"CSV file is {size_mb:.1f}MB, which exceeds the {MAX_CSV_UPLOAD_BYTES // (1024 * 1024)}MB upload limit. Split it into smaller date ranges.",
+            )
         detected_symbol, has_symbol_column = _detect_csv_symbol(data, filename)
         if detected_symbol == "UNKNOWN" and selected_symbol:
             detected_symbol = _normalize_manual_symbol(selected_symbol)
@@ -65,7 +85,10 @@ def upload_csv(file: UploadFile = File(...), selected_symbol: str | None = Form(
                 "Could not detect a trading symbol from the CSV. Include a symbol column or use a filename like ETHUSDT-1m-2024-01.csv.",
             )
         content = data.decode("utf-8-sig")
+        parse_started = time.perf_counter()
         candles = load_ohlcv_csv_text(content, default_symbol=detected_symbol)
+        parse_elapsed = time.perf_counter() - parse_started
+        logger.info("CSV upload %s: parsed %d candles in %.2fs (%.2fMB)", filename, len(candles), parse_elapsed, size_mb)
     except UnicodeDecodeError as exc:
         raise api_error(400, "CSV_UPLOAD_INVALID_ENCODING", "CSV must be UTF-8 encoded.") from exc
     except (OSError, ValueError) as exc:
@@ -73,7 +96,7 @@ def upload_csv(file: UploadFile = File(...), selected_symbol: str | None = Form(
     except Exception as exc:
         if hasattr(exc, "status_code") and hasattr(exc, "detail"):
             raise
-        logger.exception("CSV upload failed for %s", getattr(file, "filename", "uploaded.csv"))
+        logger.exception("CSV upload failed for %s", filename)
         raise api_error(500, "CSV_UPLOAD_FAILED", "CSV upload failed. The server returned a JSON error instead of an empty response.") from exc
     if candles:
         symbols = sorted({candle.symbol.upper() for candle in candles})
@@ -93,6 +116,7 @@ def upload_csv(file: UploadFile = File(...), selected_symbol: str | None = Form(
         "uploaded_at": now_iso(),
     }
     get_state().uploaded_csv_contents[upload_id] = content
+    logger.info("CSV upload %s: total request time %.2fs (upload_id=%s)", filename, time.perf_counter() - request_started, upload_id)
     return ok(get_state().uploaded_csvs[upload_id])
 
 

@@ -5,7 +5,11 @@ export const uploadCsv = (file: File, selectedSymbol?: string) => {
   const form = new FormData();
   form.append('file', file);
   if (selectedSymbol?.trim()) form.append('selected_symbol', selectedSymbol.trim().toUpperCase());
-  return request<CsvUpload>('/api/backtesting/upload-csv', { method: 'POST', body: form });
+  // Default client timeout (client.ts) is 12s, tuned for normal JSON requests.
+  // Parsing a multi-month 1-minute CSV plus the upload itself can legitimately
+  // take longer than that - this was the actual cause of "API request timed
+  // out after 12s: /api/backtesting/upload-csv", not a server-side hang.
+  return request<CsvUpload>('/api/backtesting/upload-csv', { method: 'POST', body: form, timeoutMs: 90000 });
 };
 export const listBacktestProfiles = () => request<BacktestProfile[]>('/api/backtesting/profiles');
 export const runBacktest = (payload: {

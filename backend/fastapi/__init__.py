@@ -7,9 +7,12 @@ FastAPI package can replace this shim when dependencies are available.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 class HTTPException(Exception):
@@ -106,6 +109,17 @@ class FastAPI:
                     return 200, _jsonable(result)
                 except HTTPException as exc:
                     return exc.status_code, _jsonable(exc.detail)
+                except Exception:
+                    # Previously uncaught here: any non-HTTPException error from a
+                    # route (or from _jsonable serializing its result) propagated
+                    # to dev_server.py's do_POST/do_PATCH/do_DELETE, which DOES log
+                    # it - but only for methods that route through do_POST etc. If
+                    # this method's own caller doesn't separately log (or the error
+                    # happens in a context where it does but the message is still
+                    # easy to miss), the operator sees a generic 500 with nothing
+                    # in the logs to act on. Log here, at the source, every time.
+                    logger.exception("Unhandled error in route %s %s", method, path)
+                    return 500, {"success": False, "error": {"code": "INTERNAL_SERVER_ERROR", "message": "Backend encountered an unexpected error. Check the server log for details."}}
         return 404, {"detail": "Not Found"}
 
 
