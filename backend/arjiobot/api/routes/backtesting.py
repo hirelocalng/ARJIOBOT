@@ -28,11 +28,13 @@ from arjiobot.risk.rr_profiles import PRODUCTION_RR_PROFILE, SUPPORTED_TP_MODELS
 API_SUPPORTED_TP_MODELS = (*SUPPORTED_TP_MODELS, "TIME_BASED_EXIT")
 
 # CSV row-by-row parsing (load_ohlcv_csv_text) is O(rows) with real per-row cost
-# (Decimal conversions, OHLC validation) - measured at roughly 0.5s/MB of 1-minute
-# OHLCV data. 50MB is already ~9 months of 1-minute candles for one symbol; beyond
-# that, reject with a clear error instead of risking a slow request that looks
-# identical to a hang from the client's point of view.
-MAX_CSV_UPLOAD_BYTES = 50 * 1024 * 1024
+# (Decimal conversions, OHLC validation) - measured at ~0.4s/MB of 1-minute OHLCV
+# data. The client allows up to 300s (uploadCsv's timeoutMs) for the whole
+# request, so cap parse time at well under half that (~120s here, 300MB) and
+# leave the rest of the budget for upload transfer over a slow connection -
+# beyond that, reject with a clear error instead of risking a slow request
+# that looks identical to a hang from the client's point of view.
+MAX_CSV_UPLOAD_BYTES = 300 * 1024 * 1024
 
 BACKEND_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = BACKEND_ROOT / "scripts"
