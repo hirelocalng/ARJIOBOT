@@ -46,16 +46,30 @@ def test_setup_model_defaults_and_normalization() -> None:
 
 
 def test_invalidated_setup_requires_reason_and_time() -> None:
+    # make_setup()'s default progress_percent (150, clamped to 100) is
+    # irrelevant here but collides with the "can't be 100% and invalidated"
+    # invariant - override it so this test stays focused on reason/timestamp.
     with pytest.raises(ValueError, match="reason"):
-        make_setup(current_state=SetupState.INVALIDATED, status=SetupStatus.INVALIDATED)
+        make_setup(current_state=SetupState.INVALIDATED, status=SetupStatus.INVALIDATED, progress_percent=40.0)
 
     setup = make_setup(
         current_state=SetupState.INVALIDATED,
         status=SetupStatus.INVALIDATED,
+        progress_percent=40.0,
         invalidated_at=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
         invalidation_reason=InvalidationReason.MANUAL_INVALIDATION,
     )
     assert setup.invalidation_reason is InvalidationReason.MANUAL_INVALIDATION
+
+
+def test_a_100_percent_setup_cannot_also_be_invalidated() -> None:
+    with pytest.raises(ValueError, match="100% complete and invalidated"):
+        make_setup(
+            current_state=SetupState.COMPLETED,
+            status=SetupStatus.COMPLETED,
+            progress_percent=100.0,
+            invalidation_reason=InvalidationReason.RETRACE_WINDOW_EXPIRED,
+        )
 
 
 def test_setup_id_is_deterministic() -> None:

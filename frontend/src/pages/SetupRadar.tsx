@@ -1,36 +1,54 @@
+import { useState } from 'react';
 import { SetupRadarTable } from '../components/radar/SetupRadarTable';
+import { SetupCompletedTable } from '../components/radar/SetupCompletedTable';
 import { SetupHistoryTable } from '../components/radar/SetupHistoryTable';
 import type { RadarSetup } from '../types/radar';
 
-// COMPLETED belongs here, not in the Invalidated table below: it means the
-// attempt walked every stage to a real entry signal (success), which is the
-// opposite of invalidated. Lumping it in with INVALIDATED/EXPIRED is what
-// produced setups that looked "100% done" yet displayed a leftover failure
-// reason - see _apply_one_attempt_trace in live_setup_detection.py for the
-// matching backend fix (stale invalidation_reason is now cleared on resolve).
-const IN_PROGRESS_STATUSES = new Set(['ACTIVE', 'ENTRY_READY', 'COMPLETED']);
+type Tab = 'IN_PROGRESS' | 'COMPLETED' | 'INVALIDATED';
 
-export function SetupRadar({ setups, history, onSelect }: { setups: RadarSetup[]; history: RadarSetup[]; onSelect: (setup: RadarSetup) => void }) {
-  const inProgress = setups.filter((setup) => IN_PROGRESS_STATUSES.has(setup.status ?? ''));
-  const entryReady = inProgress.filter((setup) => setup.status === 'ENTRY_READY');
-  const invalidated = history.filter((setup) => !IN_PROGRESS_STATUSES.has(setup.status ?? ''));
+export function SetupRadar({
+  inProgress,
+  completed,
+  invalidated,
+  onSelect
+}: {
+  inProgress: RadarSetup[];
+  completed: RadarSetup[];
+  invalidated: RadarSetup[];
+  onSelect: (setup: RadarSetup) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<Tab>('IN_PROGRESS');
+
+  const tabs: { id: Tab; label: string; count: number }[] = [
+    { id: 'IN_PROGRESS', label: 'In Progress', count: inProgress.length },
+    { id: 'COMPLETED', label: 'Completed', count: completed.length },
+    { id: 'INVALIDATED', label: 'Invalidated', count: invalidated.length }
+  ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       <div>
         <h1 className="text-xl font-semibold text-ink">Setup Radar</h1>
         <p className="text-sm text-muted">
-          {inProgress.length} in progress ({entryReady.length} entry-ready) · {invalidated.length} invalidated (latest {history.length} of up to 100 tracked attempts)
+          {inProgress.length} in progress · {completed.length} completed · {invalidated.length} invalidated (latest 100)
         </p>
       </div>
-      <div>
-        <h2 className="mb-2 text-sm font-semibold uppercase text-muted">In Progress</h2>
-        <SetupRadarTable setups={inProgress} onSelect={onSelect} />
+      <div className="flex gap-2">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`rounded-md border px-4 py-2 text-sm font-semibold transition-colors ${
+              activeTab === tab.id ? 'border-action bg-action/10 text-action' : 'border-slate-800 bg-panel text-muted hover:text-ink'
+            }`}
+          >
+            {tab.label.toUpperCase()} ({tab.count})
+          </button>
+        ))}
       </div>
-      <div>
-        <h2 className="mb-2 text-sm font-semibold uppercase text-muted">Invalidated</h2>
-        <SetupHistoryTable setups={invalidated} onSelect={onSelect} />
-      </div>
+      {activeTab === 'IN_PROGRESS' && <SetupRadarTable setups={inProgress} onSelect={onSelect} />}
+      {activeTab === 'COMPLETED' && <SetupCompletedTable setups={completed} onSelect={onSelect} />}
+      {activeTab === 'INVALIDATED' && <SetupHistoryTable setups={invalidated} onSelect={onSelect} />}
     </div>
   );
 }

@@ -20,6 +20,8 @@ export type RadarSetup = {
   time_remaining: string | null;
   created_at?: string | null;
   updated_at?: string | null;
+  invalidated_at?: string | null;
+  entry_price?: string | null;
   swing_16m_id?: string | null;
   expansion_16m_id?: string | null;
   fvg_16m_id?: string | null;

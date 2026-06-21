@@ -41,6 +41,8 @@ def radar_record(setup) -> dict[str, object]:
         "time_remaining": None,
         "created_at": setup.created_at.isoformat() if getattr(setup, "created_at", None) else None,
         "updated_at": setup.updated_at.isoformat() if getattr(setup, "updated_at", None) else None,
+        "invalidated_at": setup.invalidated_at.isoformat() if getattr(setup, "invalidated_at", None) else None,
+        "entry_price": metadata.get("entry_signal_price") or metadata.get("latest_price"),
         "swing_16m_id": setup.swing_16m_id,
         "expansion_16m_id": setup.expansion_16m_id,
         "fvg_16m_id": setup.fvg_16m_id,

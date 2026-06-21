@@ -13,22 +13,22 @@ function statusTone(status?: string): 'warn' | 'danger' | 'neutral' {
 }
 
 export function SetupHistoryTable({ setups, onSelect }: { setups: RadarSetup[]; onSelect?: (setup: RadarSetup) => void }) {
-  const sorted = [...setups].sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''));
+  const sorted = [...setups].sort((a, b) => (b.invalidated_at ?? b.updated_at ?? '').localeCompare(a.invalidated_at ?? a.updated_at ?? ''));
   return (
     <DataTable
       rows={sorted}
       emptyLabel="NO INVALIDATED SETUPS YET"
       columns={[
-        { header: 'Symbol', render: (row) => <button className="text-action font-semibold" onClick={() => onSelect?.(row)}>{row.symbol}</button> },
-        { header: 'Direction', render: (row) => row.direction },
-        { header: 'Max Progress', render: (row) => `${row.progress_percent.toFixed(0)}%` },
+        { header: 'Pair', render: (row) => <button className="text-action font-semibold" onClick={() => onSelect?.(row)}>{row.symbol}</button> },
+        { header: 'Type', render: (row) => row.direction },
+        { header: 'Invalidation Reason', render: (row) => row.invalidation_reason ?? row.rejection_reason ?? '-' },
+        { header: 'Completed %', render: (row) => `${row.progress_percent.toFixed(0)}%` },
         { header: 'Failed/Final Stage', render: (row) => <StatusBadge label={row.current_state} tone={statusTone(row.status)} /> },
-        { header: 'Reason', render: (row) => row.invalidation_reason ?? row.rejection_reason ?? '-' },
         { header: 'Strategy Profile', render: (row) => row.strategy_profile ?? DEFAULT_PRODUCTION_PROFILE },
         { header: 'Timeframe Profile', render: (row) => row.timeframe_profile ?? '-' },
         { header: 'RR/TP Model', render: (row) => row.selected_tp_model ?? '-' },
-        { header: 'Created', render: (row) => row.created_at?.replace('T', ' ').slice(0, 19) ?? '-' },
-        { header: 'Updated', render: (row) => row.updated_at?.replace('T', ' ').slice(0, 19) ?? '-' }
+        { header: 'Time Added', render: (row) => row.created_at?.replace('T', ' ').slice(0, 19) ?? '-' },
+        { header: 'When Failed', render: (row) => (row.invalidated_at ?? row.updated_at)?.replace('T', ' ').slice(0, 19) ?? '-' }
       ]}
     />
   );

@@ -146,6 +146,8 @@ class Setup:
                 raise ValueError("invalidated setups require reason and timestamp")
         if self.current_state is SetupState.ENTRY_READY and self.status is not SetupStatus.ENTRY_READY:
             raise ValueError("entry-ready setup status must be ENTRY_READY")
+        if self.progress_percent >= 100.0 and self.invalidation_reason is not None:
+            raise ValueError("a setup cannot be both 100% complete and invalidated")
 
 
 @dataclass(frozen=True, slots=True)

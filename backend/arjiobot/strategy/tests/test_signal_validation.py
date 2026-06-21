@@ -32,6 +32,10 @@ def test_rejects_invalidated_and_expired_setups() -> None:
         make_entry_ready_setup(),
         current_state=SetupState.INVALIDATED,
         status=SetupStatus.INVALIDATED,
+        # make_entry_ready_setup()'s progress_percent (100) is irrelevant to
+        # this test but collides with the "can't be 100% and invalidated"
+        # invariant once invalidation_reason is set below.
+        progress_percent=40.0,
         invalidated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         invalidation_reason=InvalidationReason.MANUAL_INVALIDATION,
     )
