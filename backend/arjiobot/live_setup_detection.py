@@ -374,6 +374,16 @@ def _apply_one_attempt_trace(
     if is_invalidated:
         field_updates["invalidated_at"] = now
         field_updates["invalidation_reason"] = InvalidationReason(str(trace["invalidation_reason"]))
+    elif existing is not None and existing.invalidation_reason is not None:
+        # A swing whose expansion/FVG check failed on an earlier poll can still
+        # resolve favorably on a later one once more candles arrive (e.g. an
+        # expansion that takes more bars to confirm) - replace() only overrides
+        # the keys listed here, so without this the setup's stale INVALIDATED
+        # reason/timestamp would survive onto its new ACTIVE/COMPLETED row and
+        # the radar would show a "100% complete" or "still active" attempt that
+        # also displays an old invalidation reason.
+        field_updates["invalidated_at"] = None
+        field_updates["invalidation_reason"] = None
 
     if existing is None:
         setup = Setup(

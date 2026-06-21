@@ -15,7 +15,7 @@ from arjiobot.api.tests.helpers import client
 from arjiobot.backtesting.historical_replay import load_ohlcv_csv
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig, TradeMode
 from arjiobot.live_automation import run_live_automation_once
-from arjiobot.live_setup_detection import _setup_from_trade, detect_live_setups_for_symbol
+from arjiobot.live_setup_detection import _apply_attempt_traces, _setup_from_trade, detect_live_setups_for_symbol
 from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
@@ -145,6 +145,44 @@ def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
 
     assert pending.setup_id in state.setups, "an ENTRY_READY setup must never be evicted by the attempt cap"
     assert state.setups[pending.setup_id].status is SetupStatus.ENTRY_READY
+
+
+def test_invalidation_reason_clears_when_a_later_poll_resolves_favorably() -> None:
+    """A swing that fails on one poll (e.g. expansion not confirmed yet) but
+    resolves favorably on a later poll (more candles arrived) must not keep
+    displaying its old invalidation reason once it is ACTIVE/COMPLETED again -
+    that stale combination ("100% complete" or "still active" next to a leftover
+    invalidation reason) is the literal Setup Radar bug being fixed here."""
+    state = _fake_state("ADAUSDT", ())
+    base_trace = {
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "swing_16m_id": "swing_1",
+        "swing_timestamp": "2026-06-16T01:00:00+00:00",
+        "swing_price": "100",
+        "expansion_16m_id": None,
+        "fvg_16m_id": None,
+        "fvg_12m_id": None,
+        "fvg_8m_id": None,
+        "entry_price": None,
+        "stop_loss": None,
+        "take_profit": None,
+    }
+    failed_trace = {**base_trace, "stage": "SWING_16M_CONFIRMED", "progress_percent": 20.0, "invalidation_reason": "EXPANSION_NOT_CONFIRMED", "is_terminal": True}
+
+    _apply_attempt_traces(state, "ADAUSDT", (failed_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
+    [setup] = state.setups.values()
+    assert setup.status is SetupStatus.INVALIDATED
+    assert setup.invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
+    assert setup.invalidated_at is not None
+
+    resolved_trace = {**base_trace, "stage": "ENTRY_READY", "progress_percent": 100.0, "invalidation_reason": None, "is_terminal": True}
+    _apply_attempt_traces(state, "ADAUSDT", (resolved_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
+    [setup] = state.setups.values()
+    assert setup.progress_percent == 100.0
+    assert setup.status is SetupStatus.COMPLETED
+    assert setup.invalidation_reason is None, "stale invalidation reason must not survive onto a resolved attempt"
+    assert setup.invalidated_at is None
 
 
 def test_live_automation_only_acts_on_entry_ready_setups() -> None:

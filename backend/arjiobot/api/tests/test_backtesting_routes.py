@@ -1,9 +1,12 @@
 ﻿"""Backtesting route tests."""
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from arjiobot.api.routes import backtesting as backtesting_routes
 from arjiobot.api.tests.helpers import client
+
+REPO_DATA_DIR = Path(__file__).resolve().parents[4] / "data"
 
 
 def test_csv_upload_rejects_files_over_the_size_limit(monkeypatch) -> None:
@@ -182,6 +185,33 @@ def test_backtest_run_uses_profile_f() -> None:
     assert api.get("/api/backtesting/runs").json()["data"][0]["profile_id"] == "PROFILE_F_VOLUME"
     assert api.get(f"/api/backtesting/runs/{run['run_id']}").json()["data"]["report"]["summary"]["profile_id"] == "PROFILE_F_VOLUME"
     assert api.get(f"/api/backtesting/runs/{run['run_id']}/report").json()["data"]["summary"]["strategy_funnel"]
+
+
+def test_backtest_run_includes_bullish_trades_not_just_bearish() -> None:
+    """Live monitoring evaluates both directions every poll (live_setup_detection.py
+    runs the bearish AND bullish funnels), but this backtest entry point used to only
+    ever call the bearish funnel - a backtest could never show a single BUY-side
+    trade no matter what data or profile was used. Uses a real month of 1-minute
+    candles (not a tiny synthetic fixture) because the synthetic CSVs used elsewhere
+    in this file have no real swing/expansion/FVG structure for either direction."""
+    api = client()
+    csv_text = (REPO_DATA_DIR / "ADAUSDT-1m-2026-04.csv").read_text(encoding="utf-8")
+    upload = api.post("/api/backtesting/upload-csv", files={"file": ("ADAUSDT-1m-2026-04.csv", csv_text, "text/csv")}).json()["data"]
+
+    run = api.post("/api/backtesting/run", json=_run_payload(upload["upload_id"], symbol="ADAUSDT", profile_id="PROFILE_2")).json()["data"]
+    summary = run["report"]["summary"]
+
+    breakdown = summary["direction_breakdown"]
+    assert breakdown["BEARISH"]["trades"] > 0
+    assert breakdown["BULLISH"]["trades"] > 0, "bullish trades must appear in the backtest report, matching live monitoring"
+    trade_directions = {trade["direction"] for trade in summary["trade_list"]}
+    assert trade_directions == {"BEARISH", "BULLISH"}
+    assert len(summary["trade_list"]) == breakdown["BEARISH"]["trades"] + breakdown["BULLISH"]["trades"]
+    # Combined trade list must be one real chronological account history, not
+    # two directions concatenated out of order.
+    timestamps = [trade["entry_timestamp"] for trade in summary["trade_list"]]
+    assert timestamps == sorted(timestamps)
+    assert summary["wins"] + summary["losses"] <= len(summary["trade_list"])
 
 
 def test_upload_detects_symbols_from_filename_and_symbol_column() -> None:

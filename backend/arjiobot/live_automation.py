@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from arjiobot.exchange.bitget_environment import LIVE_CONFIRMATION_TEXT, TradeMode
+from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONFIRMATION_TEXT, TradeMode
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalStatus
@@ -62,6 +62,7 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
     automation["last_run_at"] = _now()
     automation["last_error"] = "None"
     attempts: list[dict[str, Any]] = []
+    logger.info("Live automation run-once triggered (source=%s)", source)
     try:
         blocked = _preflight_blocker(state)
         if blocked:
@@ -69,6 +70,11 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
             automation["last_blocked_reason"] = blocked
             record = {"source": source, "status": "BLOCKED", "stage": "PREFLIGHT", "reason": blocked, "created_at": _now()}
             _append_attempt(automation, record)
+            # Preflight blockers are almost always "is Bitget actually connected
+            # and armed for live trading" questions (live_trading_enabled, LIVE
+            # mode armed, adapter_mode, exchange environment lock) - log at
+            # warning so this is impossible to miss in the server log.
+            logger.warning("Live automation blocked at preflight (source=%s): %s", source, blocked)
             return record
 
         entry_ready_setups = [
@@ -83,8 +89,17 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
             automation["last_blocked_reason"] = "No ENTRY_READY setup found."
             record = {"source": source, "status": "WAITING", "stage": "SETUP_RADAR", "reason": "No ENTRY_READY setup found.", "created_at": _now()}
             _append_attempt(automation, record)
+            # DEBUG, not INFO: this is the expected outcome on the vast majority
+            # of polling cycles (most cycles find nothing to trade) - logging it
+            # at INFO would drown out the rare cycles that actually matter.
+            logger.debug("Live automation: no ENTRY_READY setup found this cycle (source=%s)", source)
             return record
 
+        logger.info(
+            "Live automation: %d ENTRY_READY setup(s) found this cycle: %s",
+            len(entry_ready_setups),
+            ", ".join(f"{setup.symbol}/{setup.direction.value}/{setup.setup_id}" for setup in entry_ready_setups),
+        )
         for setup in sorted(entry_ready_setups, key=lambda item: item.updated_at):
             try:
                 attempts.append(_process_setup(state, automation, setup, source=source))
@@ -111,6 +126,13 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
         submitted = [attempt for attempt in attempts if attempt.get("status") == "SUBMITTED"]
         automation["last_status"] = "SUBMITTED" if submitted else "BLOCKED"
         automation["last_blocked_reason"] = "None" if submitted else attempts[-1].get("reason", "No order submitted.")
+        logger.info(
+            "Live automation cycle complete (source=%s): %d submitted, %d not submitted. Submitted orders: %s",
+            source,
+            len(submitted),
+            len(attempts) - len(submitted),
+            ", ".join(f"{attempt.get('symbol')}/{attempt.get('bitget_order_id')}" for attempt in submitted) or "none",
+        )
         return {"source": source, "status": automation["last_status"], "attempts": tuple(attempts), "created_at": _now()}
     except Exception as exc:  # Defensive: never kill the monitoring thread.
         automation["last_status"] = "ERROR"
@@ -118,6 +140,7 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
         automation["last_blocked_reason"] = str(exc)
         record = {"source": source, "status": "ERROR", "stage": "AUTOMATION", "reason": str(exc), "created_at": _now()}
         _append_attempt(automation, record)
+        logger.exception("Live automation cycle failed (source=%s)", source)
         return record
 
 
@@ -129,6 +152,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
         "stage": "SIGNAL",
         "created_at": _now(),
     }
+    logger.info("Live automation: processing ENTRY_READY setup %s %s/%s (source=%s)", setup.setup_id, setup.symbol, setup.direction.value, source)
     signal = state.strategy_engine.generate_signal_from_setup(setup)
     state.signals[signal.signal_id] = signal
     attempt["signal_id"] = signal.signal_id
@@ -136,6 +160,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     if signal.status is not SignalStatus.GENERATED:
         attempt.update({"status": "BLOCKED", "reason": f"signal rejected: {signal.rejection_reason.value if signal.rejection_reason else 'UNKNOWN'}"})
         _append_attempt(automation, attempt)
+        logger.warning("Live automation: setup %s blocked at SIGNAL stage: %s", setup.setup_id, attempt["reason"])
         return attempt
 
     attempt["stage"] = "RISK"
@@ -144,6 +169,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     except ValueError as exc:
         attempt.update({"status": "BLOCKED", "reason": str(exc)})
         _append_attempt(automation, attempt)
+        logger.warning("Live automation: setup %s blocked at RISK stage (could not build risk context - check Bitget account/connection): %s", setup.setup_id, exc)
         return attempt
 
     plan = state.risk_engine.create_trade_plan(signal, risk_config, account_snapshot, open_state)
@@ -153,11 +179,13 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     if plan.approval_status is not TradePlanStatus.APPROVED:
         attempt.update({"status": "BLOCKED", "reason": "risk rejected: " + ",".join(reason.value for reason in plan.rejection_reasons)})
         _append_attempt(automation, attempt)
+        logger.warning("Live automation: setup %s / trade plan %s blocked at RISK stage: %s", setup.setup_id, plan.trade_plan_id, attempt["reason"])
         return attempt
 
     if plan.trade_plan_id in set(automation.get("executed_trade_plan_ids", [])):
         attempt.update({"status": "SKIPPED", "reason": "trade plan already executed"})
         _append_attempt(automation, attempt)
+        logger.info("Live automation: setup %s / trade plan %s skipped - already executed", setup.setup_id, plan.trade_plan_id)
         return attempt
 
     attempt["stage"] = "BITGET_DRY_RUN_PREVIEW"
@@ -167,10 +195,18 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     if preview.get("would_place_order") != "YES":
         attempt.update({"status": "BLOCKED", "reason": str(preview.get("blocked_reason") or "dry-run preview rejected")})
         _append_attempt(automation, attempt)
+        logger.warning("Live automation: setup %s / trade plan %s blocked at BITGET_DRY_RUN_PREVIEW stage: %s", setup.setup_id, plan.trade_plan_id, attempt["reason"])
         return attempt
 
     attempt["stage"] = "BITGET_LIVE_ORDER"
-    order = state.bitget_environment.place_order(payload, required_mode=TradeMode.LIVE)
+    logger.info("Live automation: setup %s / trade plan %s passed dry-run preview, submitting live order to Bitget for %s", setup.setup_id, plan.trade_plan_id, plan.symbol)
+    try:
+        order = state.bitget_environment.place_order(payload, required_mode=TradeMode.LIVE)
+    except EnvironmentLockError as exc:
+        attempt.update({"status": "BLOCKED", "reason": f"Bitget order placement failed: {exc}"})
+        _append_attempt(automation, attempt)
+        logger.warning("Live automation: setup %s / trade plan %s order REJECTED by Bitget: %s", setup.setup_id, plan.trade_plan_id, exc)
+        return attempt
     time_exit_plan = _time_exit_management_record(plan, order)
     attempt.update(
         {
@@ -187,6 +223,13 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     state.strategy_engine.mark_signal_status(signal.signal_id, SignalStatus.SENT_TO_EXECUTION, datetime.now(timezone.utc), reason="live automation submitted order")
     state.risk_engine.update_trade_plan_status(plan.trade_plan_id, TradePlanStatus.SENT_TO_EXECUTION, datetime.now(timezone.utc), reason="live automation submitted order")
     _append_attempt(automation, attempt)
+    logger.info(
+        "Live automation: order PLACED on Bitget for setup %s (%s) - bitget_order_id=%s trade_plan_id=%s",
+        setup.setup_id,
+        plan.symbol,
+        attempt["bitget_order_id"],
+        plan.trade_plan_id,
+    )
     return attempt
 
 

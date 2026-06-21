@@ -3,8 +3,10 @@ import { DataTable } from '../tables/DataTable';
 import { StatusBadge } from '../layout/StatusBadge';
 import { DEFAULT_PRODUCTION_PROFILE } from '../../utils/constants';
 
-function statusTone(status?: string): 'ok' | 'warn' | 'danger' | 'neutral' {
-  if (status === 'COMPLETED' || status === 'ENTRY_READY') return 'ok';
+// This table only ever receives INVALIDATED/EXPIRED rows now (SetupRadar.tsx
+// routes COMPLETED/ENTRY_READY to the In Progress table instead), but tone by
+// status rather than hardcoding 'danger' in case EXPIRED rows are added back.
+function statusTone(status?: string): 'warn' | 'danger' | 'neutral' {
   if (status === 'EXPIRED') return 'warn';
   if (status === 'INVALIDATED') return 'danger';
   return 'neutral';
@@ -15,7 +17,7 @@ export function SetupHistoryTable({ setups, onSelect }: { setups: RadarSetup[]; 
   return (
     <DataTable
       rows={sorted}
-      emptyLabel="NO SETUP ATTEMPT HISTORY YET"
+      emptyLabel="NO INVALIDATED SETUPS YET"
       columns={[
         { header: 'Symbol', render: (row) => <button className="text-action font-semibold" onClick={() => onSelect?.(row)}>{row.symbol}</button> },
         { header: 'Direction', render: (row) => row.direction },

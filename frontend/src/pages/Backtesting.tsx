@@ -343,13 +343,14 @@ function BacktestRunDetails({ run }: { run: BacktestRun }) {
   const rawSummary = run.report?.summary ?? {};
   const summary = typeof rawSummary === 'object' && rawSummary !== null ? rawSummary as Record<string, unknown> : { summary: rawSummary };
   const funnel = (summary.strategy_funnel ?? {}) as Record<string, unknown>;
+  const bullishFunnel = (summary.bullish_strategy_funnel ?? {}) as Record<string, unknown>;
   const profileApplied = (summary.profile_applied ?? run.profile_applied ?? {}) as Record<string, unknown>;
   const profileLock = (summary.profile_lock_verification ?? run.profile_lock_verification ?? {}) as Record<string, unknown>;
   const performance = (summary.performance_summary ?? {}) as Record<string, unknown>;
   const trades = ((summary.trade_list ?? run.trades ?? []) as Record<string, unknown>[]);
   const invalidations = (summary.setups_invalidated_with_reason_counts ?? {}) as Record<string, unknown>;
   const warnings = (summary.warnings ?? run.warnings ?? []) as unknown[];
-  const summaryRows = Object.entries(summary).filter(([key]) => key !== 'strategy_funnel');
+  const summaryRows = Object.entries(summary).filter(([key]) => key !== 'strategy_funnel' && key !== 'bullish_strategy_funnel' && key !== 'attempt_traces');
   return (
     <div className="space-y-3 rounded-lg border border-slate-800 bg-panel p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -418,9 +419,15 @@ function BacktestRunDetails({ run }: { run: BacktestRun }) {
           fixed_risk_amount: performance.fixed_risk_amount ?? summary.fixed_risk_amount ?? 'None',
         }} />
         <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
-          <div className="mb-2 text-xs uppercase text-muted">Strategy Funnel</div>
+          <div className="mb-2 text-xs uppercase text-muted">Strategy Funnel (Bearish / Sell)</div>
           <div className="grid gap-2 text-sm">
-            {Object.entries(funnel).map(([key, value]) => <div key={key} className="flex justify-between gap-3"><span className="text-muted">{key}</span><span className="text-slate-100">{String(value)}</span></div>)}
+            {Object.entries(funnel).filter(([, value]) => typeof value !== 'object').map(([key, value]) => <div key={key} className="flex justify-between gap-3"><span className="text-muted">{key}</span><span className="text-slate-100">{String(value)}</span></div>)}
+          </div>
+        </div>
+        <div className="rounded-md border border-slate-800 bg-slate-950 p-3">
+          <div className="mb-2 text-xs uppercase text-muted">Strategy Funnel (Bullish / Buy)</div>
+          <div className="grid gap-2 text-sm">
+            {Object.entries(bullishFunnel).filter(([, value]) => typeof value !== 'object').map(([key, value]) => <div key={key} className="flex justify-between gap-3"><span className="text-muted">{key}</span><span className="text-slate-100">{String(value)}</span></div>)}
           </div>
         </div>
         <KeyValuePanel title="Invalidations" rows={invalidations} />

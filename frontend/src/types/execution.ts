@@ -1,12 +1,21 @@
 export type ExecutionRecord = {
   execution_id: string;
   trade_plan_id: string;
+  signal_id?: string;
+  setup_id?: string;
   symbol: string;
   status: string;
+  is_active?: boolean;
   paper_execution: boolean;
   fill_price?: string;
   filled_size?: string;
   stop_loss_price?: string;
   take_profit_price?: string;
+  exchange_order_id?: string | null;
   rejection_reason?: string | null;
+  created_at?: string;
+  submitted_at?: string | null;
+  filled_at?: string | null;
+  cancelled_at?: string | null;
+  rejected_at?: string | null;
 };

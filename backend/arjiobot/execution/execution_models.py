@@ -186,15 +186,32 @@ def build_protective_order_id(execution_id: str, order_type: OrderType) -> str:
     return f"pxo_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
 
 
+_TERMINAL_EXECUTION_STATUSES = frozenset({ExecutionStatus.CANCELLED, ExecutionStatus.REJECTED, ExecutionStatus.FAILED})
+
+
 def execution_to_record(execution: ExecutionRecord) -> dict[str, Any]:
     return {
         "execution_id": execution.execution_id,
         "trade_plan_id": execution.trade_plan_id,
+        "signal_id": execution.signal_id,
+        "setup_id": execution.setup_id,
         "symbol": execution.symbol,
         "status": execution.status.value,
+        # A trade is "active" once submitted/filled and stays that way until a
+        # terminal status is reached - there is no further fill/close simulation
+        # yet, so FILLED has no separate "closed" state to transition into.
+        "is_active": execution.status not in _TERMINAL_EXECUTION_STATUSES,
         "fill_price": execution.fill_price,
         "filled_size": execution.filled_size,
+        "stop_loss_price": execution.stop_loss_price,
+        "take_profit_price": execution.take_profit_price,
+        "exchange_order_id": execution.exchange_order_id,
         "paper_execution": execution.paper_execution,
         "rejection_reason": execution.rejection_reason.value if execution.rejection_reason else None,
+        "created_at": execution.created_at.isoformat(),
+        "submitted_at": execution.submitted_at.isoformat() if execution.submitted_at else None,
+        "filled_at": execution.filled_at.isoformat() if execution.filled_at else None,
+        "cancelled_at": execution.cancelled_at.isoformat() if execution.cancelled_at else None,
+        "rejected_at": execution.rejected_at.isoformat() if execution.rejected_at else None,
         "metadata": execution.metadata,
     }

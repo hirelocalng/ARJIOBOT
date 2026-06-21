@@ -114,6 +114,62 @@ def run(
         risk_amount_per_trade=fixed_risk_amount,
         max_leverage=max_leverage,
     )
+    # Live monitoring already evaluates both directions independently
+    # (live_setup_detection.py runs _build_strategy_funnel AND
+    # _build_bullish_strategy_funnel every poll), but this backtest entry
+    # point only ever called the bearish builder - bullish (BUY-side) trades
+    # could never appear in a backtest report. Mirror the same per-direction
+    # evaluation here, then merge into one chronological trade list so the
+    # reported wins/losses/equity curve reflect the bot's real combined
+    # behavior across both directions, the same way it actually trades live.
+    bullish_swing_lows = [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW]
+    bullish_funnel = _build_bullish_strategy_funnel(
+        profile=active_profile,
+        timeframe_profile=tf_profile,
+        candidate_16m_swing_lows=bullish_swing_lows,
+        expansions_16m=expansions_main,
+        fvg_16m=fvg_results[tf_profile.main_fvg_timeframe].fvgs,
+        fvg_12m=fvg_results[tf_profile.retrace_fvg_timeframe].fvgs,
+        fvg_8m=fvg_results[tf_profile.internal_fvg_timeframe].fvgs,
+        candles_8m=profiles[tf_profile.retrace_window_timeframe],
+        candles_1m=profiles[1],
+        starting_balance=starting_balance,
+        risk_amount_per_trade=fixed_risk_amount,
+        max_leverage=max_leverage,
+    )
+    starting_balance_decimal = Decimal(str(starting_balance))
+    combined_trade_list = sorted(
+        (*strategy_funnel.get("trade_list", ()), *bullish_funnel.get("trade_list", ())),
+        key=lambda trade: trade["entry_timestamp"],
+    )
+    # Each builder numbers its own trade_ids from trade_0001 independently, so
+    # a bearish and a bullish trade can collide on the same id once merged
+    # (React then warns about duplicate list keys and the "Trade ID" column
+    # stops uniquely identifying a row). Renumber in the final chronological
+    # order so every id in the combined report is unique again.
+    for position, trade in enumerate(combined_trade_list, start=1):
+        trade["trade_id"] = f"trade_{position:04d}"
+    # Each builder already ran _apply_balances/_performance_summary on its own
+    # trade list in isolation (as if it were the only direction trading) -
+    # recompute both over the merged, time-ordered list so balance_after_trade
+    # and every derived metric (win rate, drawdown, equity curve) reflect one
+    # real combined account instead of two independent hypothetical ones.
+    _apply_balances(combined_trade_list, starting_balance_decimal)
+    combined_performance_summary = _performance_summary(
+        trades=combined_trade_list,
+        starting_balance=starting_balance_decimal,
+        risk_amount_per_trade=Decimal(str(fixed_risk_amount)),
+        selected_rr_profile=effective_rr_profile,
+        selected_rr_value=effective_rr_value,
+        signals_generated=int(strategy_funnel.get("signals_generated", 0)) + int(bullish_funnel.get("signals_generated", 0)),
+        risk_rejected_count=int(strategy_funnel.get("risk_rejected_count", 0)) + int(bullish_funnel.get("risk_rejected_count", 0)),
+        risk_rejection_reasons=tuple(strategy_funnel.get("risk_rejection_reasons", ())) + tuple(bullish_funnel.get("risk_rejection_reasons", ())),
+    )
+    combined_attempt_traces = tuple(strategy_funnel.get("attempt_traces", ())) + tuple(bullish_funnel.get("attempt_traces", ()))
+    direction_breakdown = {
+        "BEARISH": {"trades": len(strategy_funnel.get("trade_list", ())), "entry_ready": strategy_funnel.get("entry_ready", 0)},
+        "BULLISH": {"trades": len(bullish_funnel.get("trade_list", ())), "entry_ready": bullish_funnel.get("entry_ready", 0)},
+    }
     entry_ready_setups = ()
     signals = StrategyEngine().process_entry_ready_setups(entry_ready_setups)
     risk_config = RiskConfig(account_equity=Decimal(str(starting_balance)), fixed_risk_amount=fixed_risk_amount, selected_rr_profile=selected_rr_profile, max_leverage=Decimal(str(max_leverage)))
@@ -145,8 +201,8 @@ def run(
     engine = BacktestEngine()
     run_result = engine.run_backtest(config, candles, signals=signals)
     trades = engine._trades[run_result.run_id]
-    funnel_trade_list = strategy_funnel.get("trade_list", ())
-    funnel_performance = strategy_funnel.get("performance_summary", {})
+    funnel_trade_list = combined_trade_list
+    funnel_performance = combined_performance_summary
     simulated_trade_count = len(funnel_trade_list) if isinstance(funnel_trade_list, (list, tuple)) else run_result.total_trades_simulated
     profile_lock_verification = _verify_profile_lock(
         frontend_selected_profile=selected_profile_id,
@@ -159,7 +215,12 @@ def run(
         raise RuntimeError(f"profile lock failed: {profile_lock_verification}")
     strategy_funnel = {
         **strategy_funnel,
-        "trades": simulated_trade_count,
+        "trades": len(strategy_funnel.get("trade_list", ())),
+        "profile_lock_verification": profile_lock_verification,
+    }
+    bullish_funnel = {
+        **bullish_funnel,
+        "trades": len(bullish_funnel.get("trade_list", ())),
         "profile_lock_verification": profile_lock_verification,
     }
     invalidation_counts: dict[str, int] = {}
@@ -194,6 +255,7 @@ def run(
         "three_minute_context_fvgs_found": fvg_counts[3],
         "swing_timeframe_swings_found": swing_results.count,
         "valid_swing_timeframe_swing_highs": len(bearish_swing_highs),
+        "valid_swing_timeframe_swing_lows": len(bullish_swing_lows),
         "main_timeframe_expansions_found": len(expansions_main),
         "main_fvg_timeframe_fvgs_found": fvg_counts[tf_profile.main_fvg_timeframe],
         "strategy_main_fvg_timeframe_fvgs_found": len(strategy_main_fvgs),
@@ -210,7 +272,7 @@ def run(
         "setups_created": run_result.total_setups_detected,
         "setups_invalidated_with_reason_counts": dict(invalidation_counts),
         "pipeline_blocked_stage": pipeline_blocked_stage,
-        "signals_generated": int(strategy_funnel.get("signals_generated", run_result.total_signals_generated)),
+        "signals_generated": int(strategy_funnel.get("signals_generated", 0)) + int(bullish_funnel.get("signals_generated", 0)),
         "risk_trade_plans_created": len(trade_plans),
         "risk_trade_plans_approved": len(approved_trade_plans),
         "paper_executions_created": len(executions),
@@ -238,8 +300,11 @@ def run(
         "largest_loss": str(funnel_performance.get("largest_loss", run_result.metrics.largest_loss if run_result.metrics else "0")) if isinstance(funnel_performance, dict) else (str(run_result.metrics.largest_loss) if run_result.metrics else "0"),
         "known_limitation": "Historical Setup Tracker orchestration is conservative: no ENTRY_READY setup is synthesized from prerequisite counts.",
         "strategy_funnel": strategy_funnel,
-        "trade_list": strategy_funnel.get("trade_list", ()),
-        "performance_summary": strategy_funnel.get("performance_summary", {}),
+        "bullish_strategy_funnel": bullish_funnel,
+        "direction_breakdown": direction_breakdown,
+        "trade_list": combined_trade_list,
+        "performance_summary": combined_performance_summary,
+        "attempt_traces": combined_attempt_traces,
         "profile_validation": _build_validation_report(active_profile),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
