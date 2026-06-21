@@ -711,6 +711,18 @@ def _build_strategy_funnel(
         "performance_summary": performance_summary,
         "trade_accounting_check": performance_summary["trade_accounting_check"],
         "unaccounted_after_retrace": unaccounted_after_retrace,
+        "attempt_traces": _attempt_traces_for_direction(
+            direction="BEARISH",
+            candidate_swings=candidate_16m_swing_highs,
+            swing_by_id=swing_by_id,
+            valid_expansions=valid_expansions,
+            fvg_by_expansion=fvg_by_expansion,
+            fvg_12m=fvg_12m,
+            fvg_8m=fvg_8m,
+            candles_8m=candles_8m,
+            candles_1m=candles_1m,
+            profile=profile,
+        ),
     }
     result = {
         **funnel,
@@ -1034,6 +1046,18 @@ def _build_bullish_strategy_funnel(
         "performance_summary": performance_summary,
         "trade_accounting_check": performance_summary["trade_accounting_check"],
         "unaccounted_after_retrace": unaccounted_after_retrace,
+        "attempt_traces": _attempt_traces_for_direction(
+            direction="BULLISH",
+            candidate_swings=candidate_16m_swing_lows,
+            swing_by_id=swing_by_id,
+            valid_expansions=valid_expansions,
+            fvg_by_expansion=fvg_by_expansion,
+            fvg_12m=fvg_12m,
+            fvg_8m=fvg_8m,
+            candles_8m=candles_8m,
+            candles_1m=candles_1m,
+            profile=profile,
+        ),
     }
     result = {
         **funnel,
@@ -1058,6 +1082,152 @@ def _build_bullish_strategy_funnel(
         ):
             result.pop(key, None)
     return result
+
+
+def _attempt_traces_for_direction(
+    *,
+    direction: str,
+    candidate_swings,
+    swing_by_id: dict[str, Swing],
+    valid_expansions,
+    fvg_by_expansion: dict[str, FairValueGap | None],
+    fvg_12m: tuple[FairValueGap, ...],
+    fvg_8m: tuple[FairValueGap, ...],
+    candles_8m,
+    candles_1m,
+    profile: StrategyProfile,
+) -> tuple[dict[str, object], ...]:
+    """Read-only per-swing attempt trace for Setup Radar, parallel to the funnel above.
+
+    Walks the exact same chain the funnel itself walks (swing -> expansion -> 16M FVG ->
+    12M FVG -> 8M FVG/retrace window -> entry), using the same helper functions, but never
+    mutates trade_list/counters and is built from candidate_swings (every swing, not just
+    ones with a valid expansion) so an attempt is visible from the moment a swing exists.
+    Stage/progress values match the Setup Radar spec: SWING_16M_CONFIRMED=20,
+    EXPANSION_16M_CONFIRMED=35, FVG_16M_CONFIRMED=50, FVG_12M_CONFIRMED=65,
+    FVG_8M_CONFIRMED=80, ENTRY_READY=100.
+    """
+    is_bullish = direction == "BULLISH"
+    valid_expansion_by_swing_id = {expansion.swing_id: expansion for expansion in valid_expansions}
+    traces: list[dict[str, object]] = []
+
+    for swing in candidate_swings:
+        trace: dict[str, object] = {
+            "symbol": swing.symbol,
+            "direction": direction,
+            "swing_16m_id": swing.swing_id,
+            "swing_timestamp": swing.right_candle.timestamp.isoformat(),
+            "swing_price": str(swing.price),
+            "expansion_16m_id": None,
+            "expansion_timestamp": None,
+            "fvg_16m_id": None,
+            "fvg_12m_id": None,
+            "fvg_8m_id": None,
+            "stage": "SWING_16M_CONFIRMED",
+            "progress_percent": 20.0,
+            "invalidation_reason": None,
+            "is_terminal": False,
+            "entry_price": None,
+            "stop_loss": None,
+            "take_profit": None,
+        }
+
+        expansion = valid_expansion_by_swing_id.get(swing.swing_id)
+        if expansion is None:
+            trace["invalidation_reason"] = "EXPANSION_NOT_CONFIRMED"
+            trace["is_terminal"] = True
+            traces.append(trace)
+            continue
+        trace["expansion_16m_id"] = expansion.expansion_id
+        trace["expansion_timestamp"] = expansion.timestamp.isoformat()
+        trace["stage"] = "EXPANSION_16M_CONFIRMED"
+        trace["progress_percent"] = 35.0
+
+        fvg16 = fvg_by_expansion.get(expansion.expansion_id)
+        completion_candle = None if fvg16 is None else (fvg16.fvg_completion_candle_high if is_bullish else fvg16.fvg_completion_candle_low)
+        if fvg16 is None or completion_candle is None:
+            trace["invalidation_reason"] = "FVG_16M_NOT_FOUND"
+            trace["is_terminal"] = True
+            traces.append(trace)
+            continue
+        trace["fvg_16m_id"] = fvg16.fvg_id
+        trace["stage"] = "FVG_16M_CONFIRMED"
+        trace["progress_percent"] = 50.0
+
+        leg_kwargs = (
+            {"swing_low_price": swing.price, "completion_candle_high": completion_candle}
+            if is_bullish
+            else {"swing_high_price": swing.price, "completion_candle_low": completion_candle}
+        )
+        related_12m = _fvgs_inside_leg(fvg_12m, direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs)
+        if not related_12m:
+            trace["invalidation_reason"] = "FVG_12M_NOT_FOUND"
+            trace["is_terminal"] = True
+            traces.append(trace)
+            continue
+        fvg12 = related_12m[0]
+        trace["fvg_12m_id"] = fvg12.fvg_id
+        trace["stage"] = "FVG_12M_CONFIRMED"
+        trace["progress_percent"] = 65.0
+
+        related_8m = _fvgs_inside_leg(fvg_8m, direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs)
+        if not related_8m:
+            trace["invalidation_reason"] = "FVG_8M_NOT_FOUND"
+            trace["is_terminal"] = True
+            traces.append(trace)
+            continue
+        trace["fvg_8m_id"] = related_8m[0].fvg_id
+        trace["stage"] = "FVG_8M_CONFIRMED"
+        trace["progress_percent"] = 80.0
+
+        retrace_window = tuple(candle for candle in candles_8m if candle.timestamp >= fvg16.confirmed_at)[: profile.retrace_window_8m_candles]
+        if len(retrace_window) < profile.retrace_window_8m_candles:
+            # Window has not fully elapsed yet - still open, not a failure.
+            traces.append(trace)
+            continue
+        retrace_candle = _first_1m_retrace_into_12m_fvg_within_8m_window(
+            fvg12=fvg12,
+            candles_1m=candles_1m,
+            fvg16_confirmed_at=fvg16.confirmed_at,
+            retrace_window_8m=retrace_window,
+            direction=direction,
+        )
+        if retrace_candle is None:
+            trace["invalidation_reason"] = "RETRACE_WINDOW_EXPIRED"
+            trace["is_terminal"] = True
+            traces.append(trace)
+            continue
+
+        taps = tuple(
+            candle
+            for candle in candles_1m
+            if candle.timestamp >= retrace_candle.timestamp and candle.high >= fvg12.lower_boundary and candle.low <= fvg12.upper_boundary
+        )
+        if not taps:
+            # Retrace candle confirmed but price has not tapped back into the 12M FVG
+            # yet - still open, more 1M candles may still arrive.
+            traces.append(trace)
+            continue
+        tap = taps[0]
+        closed_through = tap.close < fvg12.lower_boundary if is_bullish else tap.close > fvg12.upper_boundary
+        if closed_through:
+            trace["invalidation_reason"] = "CLOSE_BELOW_12M_FVG" if is_bullish else "CLOSE_ABOVE_12M_FVG"
+            trace["is_terminal"] = True
+            traces.append(trace)
+            continue
+
+        trace["stage"] = "ENTRY_READY"
+        trace["progress_percent"] = 100.0
+        trace["is_terminal"] = True
+        trace["entry_price"] = str(tap.close)
+        trace["stop_loss"] = str(swing.price)
+        if is_bullish:
+            trace["take_profit"] = str(max(fvg16.fvg_completion_candle_high, max(candle.high for candle in retrace_window)))
+        else:
+            trace["take_profit"] = str(min(fvg16.fvg_completion_candle_low, min(candle.low for candle in retrace_window)))
+        traces.append(trace)
+
+    return tuple(traces)
 
 
 def _research_expansions(swings):

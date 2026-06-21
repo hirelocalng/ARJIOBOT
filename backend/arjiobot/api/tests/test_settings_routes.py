@@ -60,6 +60,30 @@ def test_settings_persist_after_state_reload(tmp_path, monkeypatch) -> None:
     assert reloaded["api_base_url"] == "http://127.0.0.1:9000"
 
 
+def test_non_default_timeframe_profiles_survive_a_restart(tmp_path, monkeypatch) -> None:
+    """ALLOWED_TIMEFRAME_PROFILES must mirror every timeframe profile the PATCH
+    route itself accepts (and the frontend dropdown offers) - PROFILE_30_16_8,
+    PROFILE_12_8_4, and PROFILE_8_4_2 used to pass PATCH validation, save to the
+    database, and then get silently reset to DEFAULT_16_12_8 on the very next
+    load_settings() call (simulated here by reset_state(), standing in for a
+    Railway restart/redeploy) because the reload-time allowlist was narrower
+    than what was actually accepted. See dependencies.ALLOWED_TIMEFRAME_PROFILES.
+    """
+    monkeypatch.setattr(dependencies, "SETTINGS_PATH", tmp_path / "runtime_settings.json")
+    api = client()
+
+    for profile_id in ("PROFILE_30_16_8", "PROFILE_12_8_4", "PROFILE_8_4_2"):
+        response = api.patch("/api/settings", json={"default_timeframe_profile": profile_id})
+        assert response.status_code == 200
+        assert response.json()["data"]["default_timeframe_profile"] == profile_id
+
+        reloaded = dependencies.reset_state().settings
+        assert reloaded["default_timeframe_profile"] == profile_id, (
+            f"{profile_id} reverted to a default after a simulated restart - "
+            "reload-time allowlist no longer matches what PATCH accepts"
+        )
+
+
 def test_invalid_settings_options_are_rejected() -> None:
     api = client()
 

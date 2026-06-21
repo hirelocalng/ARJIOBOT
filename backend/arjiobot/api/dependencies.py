@@ -17,6 +17,7 @@ from arjiobot.exchange.bitget_environment import BitgetEnvironmentService, Trade
 from arjiobot.exchange.exchange_models import ExchangeMode
 from arjiobot.execution.execution_service import ExecutionService
 from arjiobot.backtesting.research_profiles import get_strategy_profiles
+from arjiobot.backtesting.timeframe_profiles import get_timeframe_profiles
 from arjiobot.exchange.account_vault import load_vault
 from arjiobot.risk.risk_engine import RiskEngine
 from arjiobot.risk.rr_profiles import SUPPORTED_TP_MODELS
@@ -34,8 +35,13 @@ FROZEN_VISIBLE_PROFILE_ID = "PROFILE_RECOVERED_HIGH_WINRATE"
 FROZEN_VISIBLE_PROFILE_IDS = {"PROFILE_RECOVERED_HIGH_WINRATE", "PROFILE_2"}
 
 # Allowed values for each profile setting (used in load_settings validation).
+# Each set must mirror the full registered set, not a hand-picked subset - a
+# narrower allowlist here than what PATCH /api/settings (and the frontend
+# dropdown) actually accepts causes a silent revert-to-default on the next
+# load_settings() call (e.g. after a Railway restart/redeploy), since a
+# previously-saved, validly-accepted value would no longer pass this check.
 ALLOWED_STRATEGY_PROFILES = {profile.profile_id for profile in get_strategy_profiles()}
-ALLOWED_TIMEFRAME_PROFILES = {"DEFAULT_16_12_8", "PROFILE_15_10_5"}
+ALLOWED_TIMEFRAME_PROFILES = {profile.profile_id for profile in get_timeframe_profiles()}
 ALLOWED_RR_PROFILES = {*SUPPORTED_TP_MODELS, "TIME_BASED_EXIT"}
 ALLOWED_ADAPTER_MODES = {"MOCK", "BITGET_LIVE"}
 

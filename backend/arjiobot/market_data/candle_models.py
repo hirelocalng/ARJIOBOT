@@ -65,6 +65,12 @@ class Timeframe:
     def floor_timestamp(self, timestamp: datetime) -> datetime:
         """Return the aligned bucket start for ``timestamp``."""
         aware_timestamp = ensure_utc(timestamp)
+        if self.minutes == 1:
+            # The 1-minute bucket start is just the timestamp truncated to the
+            # minute - skip the day-boundary/modulo arithmetic below, which is
+            # pure overhead for this case and is on the hot path for every
+            # Candle constructed (CSV loads and every live poll cycle).
+            return aware_timestamp.replace(second=0, microsecond=0)
         day_start = aware_timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
         elapsed_minutes = int((aware_timestamp - day_start).total_seconds() // 60)
         bucket_minute = elapsed_minutes - (elapsed_minutes % self.minutes)
@@ -72,7 +78,10 @@ class Timeframe:
 
     def is_aligned(self, timestamp: datetime) -> bool:
         """Return whether ``timestamp`` is aligned to this timeframe boundary."""
-        return ensure_utc(timestamp) == self.floor_timestamp(timestamp)
+        aware_timestamp = ensure_utc(timestamp)
+        if self.minutes == 1:
+            return aware_timestamp.second == 0 and aware_timestamp.microsecond == 0
+        return aware_timestamp == self.floor_timestamp(aware_timestamp)
 
     def __str__(self) -> str:
         """Return the normalized timeframe label."""

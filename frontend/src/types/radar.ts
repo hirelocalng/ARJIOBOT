@@ -2,9 +2,12 @@ export type RadarSetup = {
   setup_id: string;
   symbol: string;
   direction: string;
+  status?: string;
   strategy_profile?: string;
   profile_variant_name?: string;
   inherited_base_profile?: string;
+  timeframe_profile?: string | null;
+  selected_tp_model?: string | null;
   expansion_min?: string | number;
   expansion_max?: string | number;
   retracement_window?: string | number;
@@ -15,6 +18,13 @@ export type RadarSetup = {
   missing_requirements: string[];
   invalidation_reason: string | null;
   time_remaining: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  swing_16m_id?: string | null;
+  expansion_16m_id?: string | null;
+  fvg_16m_id?: string | null;
+  fvg_12m_id?: string | null;
+  fvg_8m_id?: string | null;
   watched_timeframes?: string[];
   latest_relevant_price?: string;
   stop_reference: string | null;
@@ -30,4 +40,5 @@ export type RadarSetup = {
   entry_ready?: boolean;
   one_trade_per_fvg_status?: string | null;
   rejection_reason?: string | null;
+  source?: string | null;
 };

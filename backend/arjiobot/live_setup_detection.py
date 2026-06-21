@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -21,7 +22,15 @@ from arjiobot.backtesting.research_profiles import get_profile
 from arjiobot.backtesting.timeframe_profiles import get_timeframe_profile
 from arjiobot.fvg.fvg import FVGDetectionEngine
 from arjiobot.market_data.candle_models import Candle, CandleStatus, Timeframe
-from arjiobot.setup_tracker.setup_models import Setup, SetupDirection, SetupState, SetupStatus, build_setup_id
+from arjiobot.setup_tracker.setup_models import (
+    InvalidationReason,
+    Setup,
+    SetupDirection,
+    SetupState,
+    SetupStatus,
+    StateHistoryEntry,
+    build_setup_id,
+)
 from arjiobot.swings.swing_models import SwingType
 from arjiobot.swings.swings import SwingDetectionEngine
 
@@ -30,6 +39,24 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER_PATH = ROOT / "scripts" / "backtest_csv.py"
 _RUNNER: ModuleType | None = None
+
+MAX_TRACKED_SETUP_ATTEMPTS = 100
+
+# Setup Radar attempt stage -> SetupState. A trace reaching "ENTRY_READY" maps to
+# COMPLETED rather than SetupState.ENTRY_READY: the actual automation-triggering
+# ENTRY_READY row is created separately by the existing, untouched
+# _setup_from_trade/_fresh_trade_candidate flow below (which carries the
+# RR/TP-model-aware stop/target the risk engine actually needs). If a trace-derived
+# row also became ENTRY_READY, run_live_automation_once's `current_state is
+# ENTRY_READY` filter could see two rows for the same opportunity and submit twice.
+_ATTEMPT_STAGE_TO_STATE = {
+    "SWING_16M_CONFIRMED": SetupState.SWING_16M_CONFIRMED,
+    "EXPANSION_16M_CONFIRMED": SetupState.EXPANSION_16M_CONFIRMED,
+    "FVG_16M_CONFIRMED": SetupState.FVG_16M_CONFIRMED,
+    "FVG_12M_CONFIRMED": SetupState.FVG_12M_CONFIRMED,
+    "FVG_8M_CONFIRMED": SetupState.FVG_8M_CONFIRMED,
+    "ENTRY_READY": SetupState.COMPLETED,
+}
 
 
 def live_setup_detection_status(state: Any) -> dict[str, Any]:
@@ -52,6 +79,15 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         # PROFILE_2's built-in timeframe_profile_id must not override an operator's
         # explicit choice to run live trading on DEFAULT_16_12_8.
         timeframe_profile = get_timeframe_profile(str(state.settings.get("default_timeframe_profile") or profile.timeframe_profile_id or "DEFAULT_16_12_8"))
+        logger.info(
+            "Live evaluation for %s: strategy_profile=%s timeframe_profile=%s (%s) tp_model=%s%s",
+            symbol,
+            profile.profile_id,
+            timeframe_profile.profile_id,
+            timeframe_profile.label,
+            selected_tp_model,
+            " (structural leg target, not a fixed RR multiple)" if selected_tp_model == "LEG_TARGET_RESEARCH" else "",
+        )
         runner = _runner()
         required_minutes = runner._required_timeframes(timeframe_profile)
         profiles = {minutes: build_timeframe_profile(candles, minutes) for minutes in required_minutes}
@@ -108,6 +144,21 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 continue
             detector_state.setdefault("latest_funnel", {})[direction.lower()] = _compact_funnel(funnel, **compact_kwargs)
             _log_retrace_diagnostics(symbol, funnel, direction=direction)
+
+            try:
+                _apply_attempt_traces(
+                    state,
+                    symbol,
+                    funnel.get("attempt_traces", ()),
+                    profile_id=profile.profile_id,
+                    timeframe_profile_id=timeframe_profile.profile_id,
+                    selected_tp_model=selected_tp_model,
+                    source=source,
+                )
+            except Exception:
+                # Setup Radar visibility must never block the proven entry-ready
+                # trade flow below - that flow is untouched and runs regardless.
+                logger.exception("Failed to apply Setup Radar attempt traces for %s (%s); entry-ready detection continues", symbol, direction)
 
             fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
             if fresh is None:
@@ -224,6 +275,164 @@ def _setup_from_trade(trade: dict[str, object], *, profile_id: str, timeframe_pr
             "source": "LIVE_PROFILE_EVALUATOR",
         },
     )
+
+
+def _apply_attempt_traces(
+    state: Any,
+    symbol: str,
+    traces: object,
+    *,
+    profile_id: str,
+    timeframe_profile_id: str,
+    selected_tp_model: str,
+    source: str,
+) -> None:
+    """Turn every Setup Radar attempt trace into a visible, tracked Setup row.
+
+    Unlike _setup_from_trade (only ever called for a fresh, tradable ENTRY_READY
+    candidate), this runs for every swing candidate the funnel walked this poll -
+    active, invalidated, or completed - so the radar shows attempts in progress,
+    not just trades. Each trace is applied independently so one malformed trace
+    can never block the rest (same isolation pattern used elsewhere in this file).
+    """
+    if not isinstance(traces, (tuple, list)):
+        return
+    for trace in traces:
+        if not isinstance(trace, dict):
+            continue
+        try:
+            _apply_one_attempt_trace(
+                state,
+                trace,
+                profile_id=profile_id,
+                timeframe_profile_id=timeframe_profile_id,
+                selected_tp_model=selected_tp_model,
+                source=source,
+            )
+        except Exception:
+            logger.exception("Failed to apply one Setup Radar attempt trace for %s; continuing with remaining traces", symbol)
+
+
+def _apply_one_attempt_trace(
+    state: Any,
+    trace: dict[str, object],
+    *,
+    profile_id: str,
+    timeframe_profile_id: str,
+    selected_tp_model: str,
+    source: str,
+) -> None:
+    direction = SetupDirection.BEARISH if str(trace.get("direction")).upper() == "BEARISH" else SetupDirection.BULLISH
+    swing_timestamp = datetime.fromisoformat(str(trace["swing_timestamp"]).replace("Z", "+00:00"))
+    swing_id = str(trace["swing_16m_id"])
+    setup_id = build_setup_id(symbol=str(trace["symbol"]), direction=direction, created_at=swing_timestamp, htf_fvg_id=swing_id)
+
+    stage = str(trace.get("stage") or "SWING_16M_CONFIRMED")
+    target_state = _ATTEMPT_STAGE_TO_STATE.get(stage, SetupState.SWING_16M_CONFIRMED)
+    is_invalidated = trace.get("invalidation_reason") is not None and bool(trace.get("is_terminal")) and stage != "ENTRY_READY"
+    if is_invalidated:
+        target_state = SetupState.INVALIDATED
+        target_status = SetupStatus.INVALIDATED
+    elif stage == "ENTRY_READY":
+        target_status = SetupStatus.COMPLETED
+    else:
+        target_status = SetupStatus.ACTIVE
+    now = datetime.now(timezone.utc)
+
+    existing = state.setups.get(setup_id)
+    new_progress = max(existing.progress_percent if existing is not None else 0.0, float(trace.get("progress_percent") or 0.0))
+
+    metadata = dict(existing.metadata) if existing is not None else {}
+    metadata.update(
+        {
+            "strategy_profile": profile_id,
+            "timeframe_profile": timeframe_profile_id,
+            "selected_tp_model": selected_tp_model,
+            "source": source,
+            "swing_price": str(trace.get("swing_price") or ""),
+        }
+    )
+    if trace.get("entry_price"):
+        metadata["entry_signal_price"] = str(trace["entry_price"])
+
+    field_updates: dict[str, object] = {
+        "symbol": str(trace["symbol"]),
+        "direction": direction,
+        "current_state": target_state,
+        "progress_percent": new_progress,
+        "status": target_status,
+        "updated_at": now,
+        "swing_16m_id": swing_id,
+        "expansion_16m_id": trace.get("expansion_16m_id") or (existing.expansion_16m_id if existing else None),
+        "fvg_16m_id": trace.get("fvg_16m_id") or (existing.fvg_16m_id if existing else None),
+        "fvg_12m_id": trace.get("fvg_12m_id") or (existing.fvg_12m_id if existing else None),
+        "fvg_8m_id": trace.get("fvg_8m_id") or (existing.fvg_8m_id if existing else None),
+        "stop_reference_price": trace.get("stop_loss") or (existing.stop_reference_price if existing else None),
+        "final_target_price": trace.get("take_profit") or (existing.final_target_price if existing else None),
+        "metadata": metadata,
+    }
+    if is_invalidated:
+        field_updates["invalidated_at"] = now
+        field_updates["invalidation_reason"] = InvalidationReason(str(trace["invalidation_reason"]))
+
+    if existing is None:
+        setup = Setup(
+            setup_id=setup_id,
+            created_at=swing_timestamp,
+            state_history=(
+                StateHistoryEntry(
+                    from_state=None,
+                    to_state=target_state,
+                    changed_at=now,
+                    reason=f"setup radar: {stage}",
+                    triggering_object_type="Swing",
+                    triggering_object_id=swing_id,
+                ),
+            ),
+            **field_updates,
+        )
+        state.setups[setup_id] = setup
+        state.setup_history[setup_id] = [
+            {
+                "from_state": None,
+                "to_state": target_state.value,
+                "changed_at": now.isoformat(),
+                "reason": f"setup radar: {stage}",
+                "source": source,
+            }
+        ]
+        _evict_oldest_setup_attempts(state)
+        return
+
+    if existing.current_state != target_state:
+        state.setup_history.setdefault(setup_id, []).append(
+            {
+                "from_state": existing.current_state.value,
+                "to_state": target_state.value,
+                "changed_at": now.isoformat(),
+                "reason": f"setup radar: {stage}",
+                "source": source,
+            }
+        )
+    state.setups[setup_id] = replace(existing, **field_updates)
+
+
+def _evict_oldest_setup_attempts(state: Any, *, max_count: int = MAX_TRACKED_SETUP_ATTEMPTS) -> None:
+    """Keep only the latest MAX_TRACKED_SETUP_ATTEMPTS rows, oldest evicted first.
+
+    A setup pending live execution (status ENTRY_READY) is never evicted, so a
+    burst of new attempts can never push out a trade automation hasn't acted on yet.
+    """
+    overflow = len(state.setups) - max_count
+    if overflow <= 0:
+        return
+    evictable = sorted(
+        (setup for setup in state.setups.values() if setup.status is not SetupStatus.ENTRY_READY),
+        key=lambda setup: setup.created_at,
+    )
+    for setup in evictable[:overflow]:
+        state.setups.pop(setup.setup_id, None)
+        state.setup_history.pop(setup.setup_id, None)
 
 
 def _fresh_trade_candidate(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> dict[str, object] | None:

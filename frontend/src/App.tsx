@@ -16,7 +16,7 @@ import { listAccounts } from './api/accounts';
 import { listPairs } from './api/pairs';
 import { getSettings } from './api/settings';
 import { getControlPlane } from './api/controlPlane';
-import { getRadar } from './api/radar';
+import { getRadar, getRadarHistory } from './api/radar';
 import { listSignals } from './api/signals';
 import { listTradePlans } from './api/risk';
 import { listExecutions } from './api/execution';
@@ -51,6 +51,7 @@ export function App() {
   const [pairs, setPairs] = useState<MonitoredPair[]>([]);
   const [settings, setSettings] = useState<BotSettings | null>(null);
   const [setups, setSetups] = useState<RadarSetup[]>([]);
+  const [setupHistory, setSetupHistory] = useState<RadarSetup[]>([]);
   const [signals, setSignals] = useState<TradeSignal[]>([]);
   const [plans, setPlans] = useState<TradePlan[]>([]);
   const [executions, setExecutions] = useState<ExecutionRecord[]>([]);
@@ -70,6 +71,7 @@ export function App() {
         listPairs(),
         getSettings(),
         getRadar(),
+        getRadarHistory(),
         listSignals(),
         listTradePlans(),
         listExecutions(),
@@ -88,11 +90,12 @@ export function App() {
       setPairs(value(2, pairs));
       setSettings(value(3, settings));
       setSetups(value(4, setups));
-      setSignals(value(5, signals));
-      setPlans(value(6, plans));
-      setExecutions(value(7, executions));
-      setRuns(value(8, runs));
-      setControlPlane(value(9, controlPlane));
+      setSetupHistory(value(5, setupHistory));
+      setSignals(value(6, signals));
+      setPlans(value(7, plans));
+      setExecutions(value(8, executions));
+      setRuns(value(9, runs));
+      setControlPlane(value(10, controlPlane));
       setApiError(errors.length ? errors.join(' | ') : null);
     } finally {
       refreshInFlight.current = false;
@@ -136,7 +139,7 @@ export function App() {
     Dashboard: <Dashboard status={status} accounts={accounts} pairs={pairs} setups={setups} signals={signals} plans={plans} executions={executions} runs={runs} apiError={apiError} controlPlane={controlPlane} />,
     'Setup Radar': (
       <>
-        <SetupRadar setups={setups} onSelect={(setup) => setSelectedSetupId(setup.setup_id)} />
+        <SetupRadar setups={setups} history={setupHistory} onSelect={(setup) => setSelectedSetupId(setup.setup_id)} />
         {selectedSetup && <SetupDetails setup={selectedSetup} />}
       </>
     ),

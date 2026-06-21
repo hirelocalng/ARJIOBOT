@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter
 
 from arjiobot.api.dependencies import FROZEN_VISIBLE_PROFILE_IDS, get_state, save_settings
@@ -12,6 +14,8 @@ from arjiobot.backtesting.timeframe_profiles import get_timeframe_profile
 from arjiobot.exchange.account_vault import save_vault
 from arjiobot.exchange.bitget_environment import EnvironmentLockError, TradeMode
 from arjiobot.risk.rr_profiles import resolve_rr_value
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -84,11 +88,34 @@ def update_settings(payload: dict[str, object]):
             raise api_error(400, "DRY_RUN_ENVIRONMENT_LOCK_FAILED", str(exc)) from exc
     if bool(candidate.get("live_trading_enabled")):
         _validate_live_trading_candidate(candidate)
+    _log_profile_selection_changes(state.settings, candidate, payload)
     state.settings.update(candidate)
     if active_account_touched:
         _apply_active_account_id(str(candidate.get("active_account_id") or ""))
     save_settings(state.settings)
     return ok(state.settings)
+
+
+_PROFILE_SELECTION_KEYS = ("active_strategy_profile", "default_timeframe_profile", "selected_rr_profile")
+
+
+def _log_profile_selection_changes(current: dict[str, object], candidate: dict[str, object], payload: dict[str, object]) -> None:
+    """Log every profile/timeframe/TP-model selection change as it's persisted,
+    so a selection that silently failed to take effect is visible in the logs
+    rather than only showing up as "the bot used the wrong setting" later."""
+    for key in _PROFILE_SELECTION_KEYS:
+        if key not in payload:
+            continue
+        old_value = current.get(key)
+        new_value = candidate.get(key)
+        if old_value == new_value:
+            continue
+        if key == "active_strategy_profile":
+            logger.info("Profile %s selected and saved to database", new_value)
+        elif key == "default_timeframe_profile":
+            logger.info("Timeframe profile %s selected and saved to database", new_value)
+        elif key == "selected_rr_profile":
+            logger.info("Using TP/leg-target model: %s (saved to database)", new_value)
 
 
 def _apply_active_account_id(account_id: str) -> None:
