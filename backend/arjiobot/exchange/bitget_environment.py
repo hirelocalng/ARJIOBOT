@@ -722,6 +722,7 @@ class BitgetEnvironmentService:
             "marginCoin": DEFAULT_MARGIN_COIN,
             "size": str(size),
             "side": "buy" if side == "BUY" else "sell",
+            "tradeSide": "open",
             "orderType": str(payload.get("order_type") or "market").lower(),
             "clientOid": client_oid,
         }

@@ -233,6 +233,83 @@ def test_live_automation_executes_only_the_entry_ready_setup_not_in_progress_or_
     assert entry_ready.setup_id in state.completed_setups
 
 
+def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_order() -> None:
+    """End-to-end proof that execution is actually taking trades after this
+    session's freshness-window fix: real candle data, fed through the real
+    detect_live_setups_for_symbol pipeline (not a hand-built setup like
+    make_entry_ready_setup), produces a genuine ENTRY_READY setup that
+    run_live_automation_once then carries all the way to a submitted Bitget
+    order. Before the freshness fix, detect_live_setups_for_symbol never
+    produced a real ENTRY_READY setup from this fixture at all (every
+    qualifying trade was discarded as "stale") - there was nothing for
+    automation to ever act on, regardless of how correctly automation itself
+    behaved."""
+    from pathlib import Path
+
+    from arjiobot.backtesting.historical_replay import load_ohlcv_csv
+    from arjiobot.live_setup_detection import detect_live_setups_for_symbol
+
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["ADAUSDT"] = {"symbol": "ADAUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "0.2444"}
+
+    data_dir = Path(__file__).resolve().parents[4] / "data"
+    candles_1m = load_ohlcv_csv(data_dir / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
+    state.live_candles["ADAUSDT"] = candles_1m[:150]
+
+    detect_live_setups_for_symbol(state, "ADAUSDT")
+    real_trades = [setup for setup in state.setups.values() if setup.current_state is SetupState.ENTRY_READY]
+    assert real_trades, "fixture assumption: this window produces a real entry-ready ADAUSDT trade"
+    setup = real_trades[0]
+
+    def fake_contract(symbol: str, product_type: str = "USDT-FUTURES") -> dict[str, object]:
+        return _contract(symbol)
+
+    def fake_ticker(symbol: str, product_type: str = "USDT-FUTURES") -> dict[str, object]:
+        return {**_ticker(symbol), "last_price": "0.2444", "bid_price": "0.2443", "ask_price": "0.2445", "mark_price": "0.2444"}
+
+    def fake_candles(symbol: str, granularity: str = "1m", limit: int = 100, product_type: str = "USDT-FUTURES") -> dict[str, object]:
+        return _candles(symbol)
+
+    service.fetch_contract_config = fake_contract
+    service.fetch_ticker = fake_ticker
+    service.fetch_candles = fake_candles
+    service._private_request = lambda method, path, **kwargs: {"code": "00000", "msg": "success", "data": {"orderId": "ord_real_detection_1"}}
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "SUBMITTED", f"expected a submitted order, got: {result}"
+    assert len(service.orders) == 1
+    assert service.orders[0]["bitget_order_id"] == "ord_real_detection_1"
+    assert setup.setup_id not in state.setups, "the executed setup must leave the in-progress pool"
+    assert setup.setup_id in state.completed_setups
+
+
 def _contract(symbol: str) -> dict[str, object]:
     return {
         "symbol": symbol,
