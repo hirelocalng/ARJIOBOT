@@ -32,6 +32,22 @@ from arjiobot.strategy.strategy_engine import StrategyEngine
 ROOT = Path(__file__).resolve().parents[2]
 SETTINGS_PATH = ROOT / "data" / "runtime_settings.json"
 PAIRS_PATH = ROOT / "data" / "runtime_pairs.json"
+# Seeded whenever the persisted pairs file is missing, unreadable, or ends
+# up empty - a fresh start, a Railway redeploy with no persistent volume,
+# or a corrupted file must never leave the bot with zero (or just one)
+# monitored pair.
+DEFAULT_MONITORED_PAIRS: tuple[str, ...] = (
+    "BTCUSDT",
+    "ATOMUSDT",
+    "APTUSDT",
+    "SUIUSDT",
+    "EIGENUSDT",
+    "TAOUSDT",
+    "SOLUSDT",
+    "AAVEUSDT",
+    "BCHUSDT",
+    "1INCHUSDT",
+)
 FROZEN_VISIBLE_PROFILE_ID = "PROFILE_RECOVERED_HIGH_WINRATE"
 FROZEN_VISIBLE_PROFILE_IDS = {"PROFILE_RECOVERED_HIGH_WINRATE", "PROFILE_2"}
 
@@ -231,19 +247,23 @@ def bootstrap_live_trading_from_env(state: "ApiState") -> None:
         logger.exception("bootstrap_live_trading_from_env failed unexpectedly; leaving live_trading_enabled=False")
 
 
+def _default_pairs() -> dict[str, dict[str, object]]:
+    return {symbol: {"symbol": symbol, "enabled": True} for symbol in DEFAULT_MONITORED_PAIRS}
+
+
 def load_pairs() -> dict[str, dict[str, object]]:
     if not PAIRS_PATH.exists():
-        return {"BTCUSDT": {"symbol": "BTCUSDT", "enabled": True}}
+        return _default_pairs()
     try:
         saved = json.loads(PAIRS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"BTCUSDT": {"symbol": "BTCUSDT", "enabled": True}}
+        return _default_pairs()
     pairs: dict[str, dict[str, object]] = {}
     for item in saved if isinstance(saved, list) else saved.values():
         symbol = str(item.get("symbol", "")).upper()
         if symbol:
             pairs[symbol] = {"symbol": symbol, "enabled": bool(item.get("enabled", True))}
-    return pairs or {"BTCUSDT": {"symbol": "BTCUSDT", "enabled": True}}
+    return pairs or _default_pairs()
 
 
 def load_live_accounts() -> dict[str, dict[str, object]]:
