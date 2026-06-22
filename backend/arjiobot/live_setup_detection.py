@@ -73,6 +73,31 @@ def live_setup_detection_status(state: Any) -> dict[str, Any]:
     return dict(state.live_setup_detection)
 
 
+def _fvg_engine_for(state: Any, symbol: str, minutes: int) -> FVGDetectionEngine:
+    """One FVGDetectionEngine per (symbol, timeframe), reused across every
+    poll instead of constructed fresh each call.
+
+    detect_fvgs() re-scans the *entire* rolling live candle buffer (up to
+    44,640 1m candles) every poll, with no memory of what it logged 15
+    seconds ago - a fresh engine each call meant every already-known
+    historical FVG got rediscovered and re-logged at INFO level on every
+    single poll, for every monitored pair, which is what was flooding
+    Railway's logs (measured: over 1,600 "FVG detected" lines from a single
+    poll of a single symbol at a realistic full-session buffer size).
+    fvg_id is deterministic (content-derived - see build_fvg_id), so reusing
+    the same engine instance's store across polls lets detect_fvgs() log
+    each genuine FVG exactly once, the first time it is ever seen, while
+    still returning the identical full FVG set every call (the log line is
+    the only thing this changes - see fvg.py's detect_fvgs).
+    """
+    key = f"{symbol.upper()}:{minutes}"
+    engine = state.live_fvg_engines.get(key)
+    if engine is None:
+        engine = FVGDetectionEngine()
+        state.live_fvg_engines[key] = engine
+    return engine
+
+
 def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MONITORING_POLL") -> dict[str, Any]:
     symbol = symbol.upper()
     detector_state = state.live_setup_detection
@@ -109,7 +134,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         bullish_swing_lows = [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW]
         expansions_main = runner._research_expansions(swing_results.all_swings)
         fvg_results = {
-            minutes: FVGDetectionEngine().detect_fvgs(
+            minutes: _fvg_engine_for(state, symbol, minutes).detect_fvgs(
                 profiles[minutes],
                 swings=swing_results.all_swings if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
                 expansions=expansions_main if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),

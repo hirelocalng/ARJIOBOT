@@ -16,6 +16,7 @@ from arjiobot.exchange.bitget_adapter import BitgetExchangeAdapter
 from arjiobot.exchange.bitget_environment import BitgetEnvironmentService, TradeMode
 from arjiobot.exchange.exchange_models import ExchangeMode
 from arjiobot.execution.execution_service import ExecutionService
+from arjiobot.fvg.fvg import FVGDetectionEngine
 from arjiobot.backtesting.research_profiles import get_strategy_profiles
 from arjiobot.backtesting.timeframe_profiles import get_timeframe_profiles
 from arjiobot.exchange.account_vault import load_vault
@@ -307,6 +308,11 @@ class ApiState:
     market_polls: dict[str, dict[str, object]] = field(default_factory=dict)
     live_candles: dict[str, tuple[object, ...]] = field(default_factory=dict)
     live_timeframe_candles: dict[str, dict[int, tuple[object, ...]]] = field(default_factory=dict)
+    # One persistent FVGDetectionEngine per (symbol, timeframe minutes), keyed
+    # "SYMBOL:MINUTES" - reused across every monitoring poll instead of a fresh
+    # engine per call, so each FVG (deterministic fvg_id) is only ever new to
+    # its engine's store once. See live_setup_detection.py's _fvg_engine_for.
+    live_fvg_engines: dict[str, FVGDetectionEngine] = field(default_factory=dict)
     live_setup_detection: dict[str, object] = field(
         default_factory=lambda: {
             "last_run_at": "None",

@@ -133,8 +133,16 @@ class FVGDetectionEngine:
             if fvg is None:
                 rejected_count += 1
                 continue
+            is_new_to_this_engine = self.store.get_fvg_by_id(fvg.fvg_id) is None
             detected.append(self.store.upsert(fvg))
-            logger.info("FVG detected", extra={"fvg_id": fvg.fvg_id, "direction": fvg.direction.value})
+            # fvg_id is deterministic (content-derived - see build_fvg_id), so
+            # rescanning the same historical window on a later call rediscovers
+            # the exact same FVG. Only log the first time this engine's store
+            # has ever seen it - a long-lived caller that rescans a growing
+            # window every poll (live monitoring) would otherwise flood the
+            # log with the same already-known FVGs over and over.
+            if is_new_to_this_engine:
+                logger.info("FVG detected", extra={"fvg_id": fvg.fvg_id, "direction": fvg.direction.value})
         return FVGDetectionResult(
             fvgs=tuple(detected),
             rejected_count=rejected_count,

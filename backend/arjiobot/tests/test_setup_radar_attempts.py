@@ -50,6 +50,7 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
         setup_history={},
         stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},
+        live_fvg_engines={},
     )
 
 
