@@ -13,6 +13,7 @@ from typing import Any
 
 from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONFIRMATION_TEXT, TradeMode
 from arjiobot.live_setup_detection import move_setup_to_completed
+from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalRejectionReason, SignalStatus
@@ -309,6 +310,34 @@ def _effective_max_leverage(state: Any, symbol: str) -> Decimal:
     return _positive_decimal(state.settings.get("max_leverage"), "max leverage")
 
 
+def _real_time_open_positions(state: Any) -> tuple[int, dict[str, Decimal]]:
+    """Query Bitget directly for currently-open positions, replacing the
+    in-memory open_positions counter on BitgetEnvironmentService - that
+    counter only ever increments (on a successful place_order), never
+    decrements when a position closes, and resets to 0 on every process
+    restart, so it could never reflect reality: a restart while a position
+    was open would silently let a new one open right alongside it.
+
+    open_symbol_exposure only needs to be nonzero for a symbol with an open
+    position - has_same_symbol_exposure (risk/exposure.py) only checks > 0 -
+    so a flat sentinel is used per symbol rather than computing a real
+    notional dollar figure from Bitget's raw position fields, which have
+    not been verified against a real authenticated response anywhere in
+    this codebase (see trades.py's own comment on this).
+    """
+    try:
+        record = state.bitget_environment.fetch_positions()
+    except EnvironmentLockError as exc:
+        raise ValueError(f"could not verify currently-open positions before placing a new order: {exc}") from exc
+    positions = record.get("positions") or ()
+    exposure: dict[str, Decimal] = {}
+    for position in positions:
+        position_symbol = str(position.get("symbol", "")).upper()
+        if position_symbol:
+            exposure[position_symbol] = Decimal("1")
+    return len(positions), exposure
+
+
 def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnapshot, OpenRiskState]:
     account_payload = state.bitget_environment.last_account_payload or {}
     connection = state.bitget_environment.last_connection_result or {}
@@ -326,6 +355,7 @@ def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnap
     )
     risk_amount = _positive_decimal(state.settings.get("risk_amount_per_trade"), "risk amount per trade")
     max_leverage = _effective_max_leverage(state, symbol)
+    open_trade_count, open_symbol_exposure = _real_time_open_positions(state)
     config = RiskConfig(
         account_equity=equity,
         fixed_risk_amount=risk_amount,
@@ -335,7 +365,7 @@ def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnap
         max_daily_loss=Decimal(str(state.settings.get("max_daily_loss") or "0")),
     )
     snapshot = AccountSnapshot(account_currency="USDT", account_equity=equity, available_margin=available, captured_at=datetime.now(timezone.utc))
-    open_state = OpenRiskState(open_trade_count=int(state.bitget_environment.open_positions))
+    open_state = OpenRiskState(open_trade_count=open_trade_count, open_symbol_exposure=open_symbol_exposure)
     return config, snapshot, open_state
 
 
@@ -368,8 +398,8 @@ def _order_payload_from_plan(state: Any, plan: Any) -> dict[str, object]:
         "max_daily_loss": str(state.settings.get("max_daily_loss") or "0"),
         "max_trades_per_day": str(state.settings.get("max_open_trades") or "1"),
         "max_open_positions": str(state.settings.get("max_open_trades") or "1"),
-        "fee_rate": "0",
-        "slippage_rate": "0",
+        "fee_rate": str(DEFAULT_FEE_RATE),
+        "slippage_rate": str(DEFAULT_SLIPPAGE_BUFFER_RATE),
         "live_confirmation": LIVE_CONFIRMATION_TEXT,
         "trade_plan_id": plan.trade_plan_id,
         "signal_id": plan.signal_id,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from arjiobot.risk.exposure import exposure_after_trade, has_same_symbol_exposure
-from arjiobot.risk.isolated_margin import calculate_required_margin
+from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE, calculate_required_margin
 from arjiobot.risk.loss_limits import daily_loss_capacity_remaining, weekly_loss_capacity_remaining
 from arjiobot.risk.position_sizing import calculate_position_size, calculate_reward_distance, calculate_risk_distance, calculate_rr_ratio
 from arjiobot.risk.rr_profiles import calculate_fixed_risk_trade_math
@@ -110,6 +110,8 @@ def validate_signal_risk(
             stop_loss=signal.stop_reference_price,
             max_leverage=risk_config.max_leverage,
             available_margin=account_snapshot.available_margin,
+            fee_rate=DEFAULT_FEE_RATE,
+            slippage_rate=DEFAULT_SLIPPAGE_BUFFER_RATE,
         )
     except ValueError as exc:
         if "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN" in str(exc):

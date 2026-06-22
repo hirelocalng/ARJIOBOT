@@ -71,6 +71,114 @@ def test_live_automation_processes_entry_ready_setup_to_bitget_order(monkeypatch
     assert status["latest_attempt"]["stage"] == "BITGET_LIVE_ORDER"
 
 
+def test_real_open_position_for_same_symbol_blocks_a_new_one(monkeypatch) -> None:
+    """The actual fix for "the bot opens multiple live trades simultaneously
+    with no limit": a real, currently-open BTCUSDT position (queried live
+    from Bitget, not the old broken in-memory open_positions counter - which
+    is deliberately left at 0 here, simulating a process restart) must block
+    a new BTCUSDT setup, even with a generous global max_open_trades."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    assert service.open_positions == 0, "simulating a fresh restart - the broken counter has forgotten the real open position"
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+    setup = make_entry_ready_setup(latest_price="90")
+    state.setups[setup.setup_id] = setup
+
+    def routed_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        if path == "/api/v2/mix/position/all-position":
+            return {"code": "00000", "msg": "success", "data": [{"symbol": "BTCUSDT", "holdSide": "long", "total": "1"}]}
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_should_never_be_placed"}}
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+    monkeypatch.setattr(service, "_private_request", routed_private_request)
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "BLOCKED"
+    assert "SAME_SYMBOL_EXPOSURE_BLOCKED" in result["attempts"][0]["reason"]
+    assert service.orders == []
+
+
+def test_max_open_trades_uses_real_position_count_surviving_a_simulated_restart(monkeypatch) -> None:
+    """Mirror of the same-symbol test for the global cap: a real open
+    position on a DIFFERENT symbol must still count toward max_open_trades,
+    even with the broken in-memory counter left at 0 (simulated restart)."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    assert service.open_positions == 0, "simulating a fresh restart - the broken counter has forgotten the real open position"
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 1,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+    setup = make_entry_ready_setup(latest_price="90")
+    state.setups[setup.setup_id] = setup
+
+    def routed_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        if path == "/api/v2/mix/position/all-position":
+            return {"code": "00000", "msg": "success", "data": [{"symbol": "ETHUSDT", "holdSide": "short", "total": "1"}]}
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_should_never_be_placed"}}
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+    monkeypatch.setattr(service, "_private_request", routed_private_request)
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "BLOCKED"
+    assert "MAX_OPEN_TRADES_REACHED" in result["attempts"][0]["reason"]
+    assert service.orders == []
+
+
 def test_per_pair_leverage_overrides_global_max_leverage_end_to_end(monkeypatch) -> None:
     """Proves the full chain, not just the helper in isolation: a pair-
     specific leverage configured on state.monitored_pairs reaches both the

@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 ISOLATED_MARGIN_MODE = "isolated"
 ISOLATED_TRADE_TYPE = "ISOLATED_MARGIN"
 LOSS_TOLERANCE = Decimal("0.00000001")
+DEFAULT_FEE_RATE = Decimal("0.0012")  # 0.06% per side, round-trip (entry + exit)
+DEFAULT_SLIPPAGE_BUFFER_RATE = Decimal("0.002")  # 0.2% buffer for stop-loss market-fill slippage
 
 
 def _without_exponent(value: Decimal) -> Decimal:
@@ -121,6 +123,9 @@ class RequiredMarginPlan:
     notional_position_size: Decimal
     quantity: Decimal
     expected_loss_at_sl: Decimal
+    estimated_fee: Decimal = Decimal("0")
+    estimated_slippage: Decimal = Decimal("0")
+    total_worst_case_loss: Decimal = Decimal("0")
     margin_mode: str = ISOLATED_MARGIN_MODE
     trade_type: str = ISOLATED_TRADE_TYPE
 
@@ -139,23 +144,39 @@ class RequiredMarginPlan:
             "notional_position_size": str(self.notional_position_size),
             "quantity": str(self.quantity),
             "expected_loss_at_sl": str(self.expected_loss_at_sl),
+            "estimated_fee": str(self.estimated_fee),
+            "estimated_slippage": str(self.estimated_slippage),
+            "total_worst_case_loss": str(self.total_worst_case_loss),
         }
 
 
-def calculate_required_margin(*, fixed_sl_loss, entry_price, stop_loss, max_leverage, available_margin) -> RequiredMarginPlan:
-    """Size an isolated-margin position so SL loss equals fixed_sl_loss, then
-    derive the margin required to open it at the pair's max leverage.
+def calculate_required_margin(
+    *,
+    fixed_sl_loss,
+    entry_price,
+    stop_loss,
+    max_leverage,
+    available_margin,
+    fee_rate=DEFAULT_FEE_RATE,
+    slippage_rate=DEFAULT_SLIPPAGE_BUFFER_RATE,
+) -> RequiredMarginPlan:
+    """Size an isolated-margin position so SL loss PLUS round-trip fees and
+    a slippage buffer TOGETHER equal fixed_sl_loss - not just the SL-distance
+    loss alone - then derive the margin required to open it at the pair's
+    max leverage.
 
-    Position size (and therefore the dollar loss at SL) is fixed and
-    independent of leverage/margin. Margin is calculated dynamically as
-    required_notional / max_leverage and compared against available_margin;
-    it is no longer forced to equal the risk amount.
+    Position size (and therefore the real worst-case dollar loss, inclusive
+    of fees/slippage) is fixed and independent of leverage/margin. Margin is
+    calculated dynamically as required_notional / max_leverage and compared
+    against available_margin; it is no longer forced to equal the risk amount.
     """
     entry = to_decimal(entry_price)
     stop = to_decimal(stop_loss)
     fixed_loss = to_decimal(fixed_sl_loss)
     max_lev = to_decimal(max_leverage)
     available = to_decimal(available_margin)
+    fee_rate = to_decimal(fee_rate)
+    slippage_rate = to_decimal(slippage_rate)
     if entry <= Decimal("0"):
         raise ValueError("entry_price must be greater than zero")
     if stop <= Decimal("0"):
@@ -164,15 +185,26 @@ def calculate_required_margin(*, fixed_sl_loss, entry_price, stop_loss, max_leve
         raise ValueError("fixed_sl_loss must be greater than zero")
     if max_lev < Decimal("1"):
         raise ValueError("max_leverage must be at least 1")
+    if fee_rate < Decimal("0") or slippage_rate < Decimal("0"):
+        raise ValueError("fee_rate and slippage_rate must not be negative")
     stop_distance_percent = abs(entry - stop) / entry
     if stop_distance_percent <= Decimal("0"):
         raise ValueError("stop_distance_percent must be greater than zero")
 
-    required_notional = _without_exponent(fixed_loss / stop_distance_percent)
+    # cost_rate folds the round-trip fee and slippage buffer into the same
+    # rate the SL distance already uses, so sizing down for them is just one
+    # extra term - notional, quantity, and margin all shrink together,
+    # rather than computing the SL-only size first and only checking fees
+    # afterward.
+    cost_rate = stop_distance_percent + fee_rate + slippage_rate
+    required_notional = _without_exponent(fixed_loss / cost_rate)
     quantity = _without_exponent(required_notional / entry)
     expected_loss = _without_exponent(abs(entry - stop) * quantity)
-    if abs(expected_loss - fixed_loss) > max(LOSS_TOLERANCE, fixed_loss * Decimal("0.000001")):
-        raise ValueError("expected_loss_at_sl does not match fixed_sl_loss")
+    estimated_fee = _without_exponent(required_notional * fee_rate)
+    estimated_slippage = _without_exponent(required_notional * slippage_rate)
+    total_worst_case_loss = expected_loss + estimated_fee + estimated_slippage
+    if abs(total_worst_case_loss - fixed_loss) > max(LOSS_TOLERANCE, fixed_loss * Decimal("0.000001")):
+        raise ValueError("expected_loss_at_sl (including fees and slippage) does not match fixed_sl_loss")
 
     required_margin = _without_exponent(required_notional / max_lev)
     can_execute = required_margin <= available
@@ -218,4 +250,7 @@ def calculate_required_margin(*, fixed_sl_loss, entry_price, stop_loss, max_leve
         notional_position_size=required_notional,
         quantity=quantity,
         expected_loss_at_sl=expected_loss,
+        estimated_fee=estimated_fee,
+        estimated_slippage=estimated_slippage,
+        total_worst_case_loss=total_worst_case_loss,
     )

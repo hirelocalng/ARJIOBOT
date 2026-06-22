@@ -28,7 +28,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from enum import Enum
 from typing import Any
 
-from arjiobot.risk.isolated_margin import calculate_required_margin
+from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE, calculate_required_margin
 
 logger = logging.getLogger(__name__)
 
@@ -690,6 +690,12 @@ class BitgetEnvironmentService:
             # No live balance known yet for this call site; do not block on margin we cannot verify.
             available_margin_raw = "1000000000"
         available_margin = _positive_decimal(available_margin_raw, "available_margin")
+        fee_rate = Decimal(str(payload.get("fee_rate") or payload.get("fees") or DEFAULT_FEE_RATE))
+        slippage_rate = Decimal(str(payload.get("slippage_rate") or payload.get("slippage") or DEFAULT_SLIPPAGE_BUFFER_RATE))
+        if fee_rate > Decimal("1"):
+            fee_rate = fee_rate / Decimal("100")
+        if slippage_rate > Decimal("1"):
+            slippage_rate = slippage_rate / Decimal("100")
         try:
             sizing = calculate_required_margin(
                 fixed_sl_loss=fixed_risk,
@@ -697,14 +703,19 @@ class BitgetEnvironmentService:
                 stop_loss=stop_loss,
                 max_leverage=effective_max_leverage,
                 available_margin=available_margin,
+                fee_rate=fee_rate,
+                slippage_rate=slippage_rate,
             )
         except ValueError as exc:
             raise EnvironmentLockError(str(exc)) from exc
         size = _round_size(sizing.quantity, contract)
         expected_loss = abs(entry_price - stop_loss) * size
-        if abs(expected_loss - fixed_risk) > max(Decimal("1"), fixed_risk * Decimal("0.03")):
-            raise EnvironmentLockError("RISK_SIZE_ROUNDING_MISMATCH")
         notional = size * entry_price
+        estimated_fee = notional * fee_rate
+        estimated_slippage_buffer = notional * slippage_rate
+        estimated_total_worst_case_loss = expected_loss + estimated_fee + estimated_slippage_buffer
+        if abs(estimated_total_worst_case_loss - fixed_risk) > max(Decimal("1"), fixed_risk * Decimal("0.03")):
+            raise EnvironmentLockError("RISK_SIZE_ROUNDING_MISMATCH")
         target = payload.get("take_profit") or payload.get("take_profit_price")
         target_price = _positive_decimal(target, "take_profit") if target else Decimal("0")
         if target:
@@ -720,15 +731,6 @@ class BitgetEnvironmentService:
                 raise EnvironmentLockError("STALE_SETUP_TP_INVALID: take_profit must be less than the current price for a BEARISH/short order")
         expected_profit = abs(entry_price - target_price) * size if target_price > 0 else Decimal("0")
         time_exit_enabled = bool(payload.get("time_exit_enabled")) and str(payload.get("selected_tp_model", "")).upper() == "TIME_BASED_EXIT"
-        fee_rate = Decimal(str(payload.get("fee_rate") or payload.get("fees") or "0"))
-        slippage_rate = Decimal(str(payload.get("slippage_rate") or payload.get("slippage") or "0"))
-        if fee_rate > Decimal("1"):
-            fee_rate = fee_rate / Decimal("100")
-        if slippage_rate > Decimal("1"):
-            slippage_rate = slippage_rate / Decimal("100")
-        estimated_fee = notional * fee_rate
-        estimated_slippage_buffer = notional * slippage_rate
-        estimated_total_worst_case_loss = expected_loss + estimated_fee + estimated_slippage_buffer
         if estimated_total_worst_case_loss > fixed_risk * Decimal("1.1"):
             raise EnvironmentLockError("ESTIMATED_TOTAL_RISK_EXCEEDS_ALLOWED_TOLERANCE")
         min_trade_num = Decimal(str(contract.get("minTradeNum") or "0"))

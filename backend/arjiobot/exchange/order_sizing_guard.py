@@ -31,12 +31,19 @@ def validate_isolated_order_payload(payload: Mapping[str, object]) -> dict[str, 
     entry_price = _positive_decimal(payload.get("entry_price") or payload.get("entry_reference_price"), "entry_price")
     stop_loss = _positive_decimal(payload.get("stop_loss") or payload.get("stop_loss_price"), "stop_loss")
     try:
+        # This guard predates fee/slippage-aware sizing and is not part of the
+        # live trading path (see bitget_environment.py/live_automation.py for
+        # that) - explicitly zeroed here to keep its existing, narrower
+        # contract (locked quantity matches SL-distance-only sizing) rather
+        # than silently inheriting calculate_required_margin's new defaults.
         sizing = calculate_required_margin(
             fixed_sl_loss=selected_fixed_risk_amount,
             entry_price=entry_price,
             stop_loss=stop_loss,
             max_leverage=max_allowed_leverage,
             available_margin=selected_starting_balance,
+            fee_rate=Decimal("0"),
+            slippage_rate=Decimal("0"),
         )
     except ValueError as exc:
         raise OrderSizingGuardError(str(exc)) from exc

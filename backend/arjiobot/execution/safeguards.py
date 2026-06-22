@@ -51,7 +51,12 @@ def validate_trade_plan_for_execution(trade_plan: TradePlan) -> tuple[ExecutionR
         reasons.append(ExecutionRejectionReason.MISSING_REQUIRED_FIELD)
     if trade_plan.applied_margin_amount <= Decimal("0") or trade_plan.applied_margin_amount != trade_plan.required_margin:
         reasons.append(ExecutionRejectionReason.MISSING_REQUIRED_FIELD)
-    if trade_plan.expected_loss_at_sl <= Decimal("0") or abs(trade_plan.expected_loss_at_sl - trade_plan.risk_amount) > max(Decimal("0.00000001"), trade_plan.risk_amount * Decimal("0.000001")):
+    # expected_loss_at_sl is no longer required to exactly equal risk_amount -
+    # calculate_required_margin (risk/isolated_margin.py) now defaults to
+    # reserving part of risk_amount for real fee/slippage costs, by design,
+    # so expected_loss_at_sl (the SL-distance-only portion) is legitimately
+    # smaller than risk_amount whenever fee_rate/slippage_rate are nonzero.
+    if trade_plan.expected_loss_at_sl <= Decimal("0") or trade_plan.expected_loss_at_sl > trade_plan.risk_amount:
         reasons.append(ExecutionRejectionReason.INVALID_POSITION_SIZE)
     if trade_plan.stop_loss_price is None or trade_plan.entry_reference_price is None or trade_plan.stop_loss_price <= trade_plan.entry_reference_price:
         reasons.append(ExecutionRejectionReason.INVALID_STOP_LOSS)
