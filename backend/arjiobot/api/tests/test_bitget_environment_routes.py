@@ -215,6 +215,47 @@ def test_buy_and_sell_dry_run_payloads_map_to_bitget_sides(monkeypatch) -> None:
     assert sell["sanitized_payload"]["side"] == "sell"
 
 
+def test_stale_bullish_take_profit_below_current_price_is_rejected_before_bitget(monkeypatch) -> None:
+    """Reproduces Bitget error 40830 ("take profit price of the long position
+    should be greater than the current price") - a BULLISH setup whose target
+    the live price has since passed must be blocked here, not sent to Bitget."""
+    api = client()
+    api.post("/api/bitget/credentials", json=_credentials())
+    api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
+    service = _service()
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))  # last_price = 100
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
+    blocked = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(side="BUY", entry="95", stop="93", target="99")).json()["data"]
+    at_current_price = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(side="BUY", entry="95", stop="93", target="100")).json()["data"]
+    still_valid = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(side="BUY", entry="95", stop="93", target="101")).json()["data"]
+
+    assert blocked["would_place_order"] == "NO"
+    assert "STALE_SETUP_TP_INVALID" in blocked["blocked_reason"]
+    assert at_current_price["would_place_order"] == "NO", "strict inequality - equal to current price must also be rejected"
+    assert "STALE_SETUP_TP_INVALID" in at_current_price["blocked_reason"]
+    assert still_valid["would_place_order"] == "YES"
+
+
+def test_stale_bearish_take_profit_above_current_price_is_rejected_before_bitget(monkeypatch) -> None:
+    """Mirror of the BULLISH case for SHORT positions."""
+    api = client()
+    api.post("/api/bitget/credentials", json=_credentials())
+    api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
+    service = _service()
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))  # last_price = 100
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
+    blocked = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(side="SELL", entry="105", stop="107", target="101")).json()["data"]
+    still_valid = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(side="SELL", entry="105", stop="107", target="99")).json()["data"]
+
+    assert blocked["would_place_order"] == "NO"
+    assert "STALE_SETUP_TP_INVALID" in blocked["blocked_reason"]
+    assert still_valid["would_place_order"] == "YES"
+
+
 def test_required_leverage_uses_exchange_cap_not_user_selected_cap(monkeypatch) -> None:
     api = client()
     api.post("/api/bitget/credentials", json=_credentials())

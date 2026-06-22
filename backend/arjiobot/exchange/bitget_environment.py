@@ -695,6 +695,17 @@ class BitgetEnvironmentService:
         notional = size * entry_price
         target = payload.get("take_profit") or payload.get("take_profit_price")
         target_price = _positive_decimal(target, "take_profit") if target else Decimal("0")
+        if target:
+            # Bitget rejects this server-side (error 40830: "take profit price
+            # of the long position should be greater than the current price"),
+            # but by then the order has already been sent - catch it here so a
+            # stale setup (one whose target the live price has since passed)
+            # never reaches Bitget at all.
+            current_price = _positive_decimal(ticker.get("last_price"), "last_price")
+            if side == "BUY" and target_price <= current_price:
+                raise EnvironmentLockError("STALE_SETUP_TP_INVALID: take_profit must be greater than the current price for a BULLISH/long order")
+            if side == "SELL" and target_price >= current_price:
+                raise EnvironmentLockError("STALE_SETUP_TP_INVALID: take_profit must be less than the current price for a BEARISH/short order")
         expected_profit = abs(entry_price - target_price) * size if target_price > 0 else Decimal("0")
         time_exit_enabled = bool(payload.get("time_exit_enabled")) and str(payload.get("selected_tp_model", "")).upper() == "TIME_BASED_EXIT"
         fee_rate = Decimal(str(payload.get("fee_rate") or payload.get("fees") or "0"))
