@@ -53,6 +53,21 @@ class SignalStore:
         signal_id = self._generated_by_setup_id.get(setup_id)
         return self._by_id.get(signal_id) if signal_id else None
 
+    def clear_generated_for_setup_id(self, setup_id: str) -> None:
+        """Remove the "a signal was already generated for this setup" marker.
+
+        Call this when a setup's signal generation succeeded but the setup
+        was then blocked further downstream (risk, dry-run preview, or a
+        real exchange rejection) before any order was actually submitted -
+        without it, every later poll's retry of the same still-ENTRY_READY
+        setup would see this earlier GENERATED signal and reject as
+        DUPLICATE_SIGNAL forever, even after whatever blocked it downstream
+        is fixed. Does not touch _by_id/_latest_by_setup_id - the original
+        signal record is kept for history, only the "do not regenerate"
+        marker is cleared.
+        """
+        self._generated_by_setup_id.pop(setup_id, None)
+
     def get_latest_by_setup_id(self, setup_id: str) -> TradeSignal | None:
         signal_id = self._latest_by_setup_id.get(setup_id)
         return self._by_id.get(signal_id) if signal_id else None
@@ -198,6 +213,13 @@ class StrategyEngine:
             metadata["status_reason"] = reason
         updated = replace(existing, status=status, updated_at=ensure_utc(changed_at), metadata=metadata)
         return self.store.upsert(updated)
+
+    def clear_generated_signal_for_setup(self, setup_id: str) -> None:
+        """See SignalStore.clear_generated_for_setup_id - called by live
+        automation whenever a setup is blocked downstream of signal
+        generation, so the same still-ENTRY_READY setup can be retried on a
+        later poll instead of permanently rejecting as DUPLICATE_SIGNAL."""
+        self.store.clear_generated_for_setup_id(setup_id)
 
     def _require(self, signal_id: str) -> TradeSignal:
         signal = self.store.get(signal_id)

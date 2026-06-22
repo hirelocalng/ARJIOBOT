@@ -137,6 +137,79 @@ def test_live_automation_isolates_one_failing_setup_from_others(monkeypatch) -> 
     assert len(service.orders) == 1
 
 
+def test_setup_blocked_downstream_of_signal_generation_can_be_retried_on_a_later_poll(monkeypatch) -> None:
+    """The DUPLICATE_SIGNAL stuck-forever bug: a setup whose signal generation
+    succeeds but is then blocked further downstream (here, the live Bitget
+    order itself failing) must not be permanently rejected as a duplicate on
+    every later poll once whatever blocked it is fixed. Confirms
+    clear_generated_signal_for_setup actually runs at the point of failure."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+
+    setup = make_entry_ready_setup(symbol="BTCUSDT", suffix="1", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc), latest_price="90")
+    state.setups[setup.setup_id] = setup
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
+    real_place_order = service.place_order
+    call_count = {"n": 0}
+
+    def flaky_place_order(payload, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            from arjiobot.exchange.bitget_environment import EnvironmentLockError
+
+            raise EnvironmentLockError("simulated exchange-side rejection (e.g. the real tradeSide/40774 bug)")
+        return real_place_order(payload, **kwargs)
+
+    monkeypatch.setattr(service, "place_order", flaky_place_order)
+    monkeypatch.setattr(service, "_private_request", lambda method, path, **kwargs: {"code": "00000", "msg": "success", "data": {"orderId": "ord_retry_1"}})
+
+    first = api.post("/api/live-automation/run-once").json()["data"]
+    assert first["attempts"][0]["status"] == "BLOCKED"
+    assert first["attempts"][0]["stage"] == "BITGET_LIVE_ORDER"
+    # The whole point of the fix: the stale "already generated" marker must
+    # be gone immediately after the downstream block, not just eventually.
+    assert state.strategy_engine.store.get_generated_by_setup_id(setup.setup_id) is None
+    assert setup.setup_id in state.setups, "still ENTRY_READY - never marked processed since nothing was submitted"
+
+    second = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert second["status"] == "SUBMITTED"
+    assert second["attempts"][0]["status"] == "SUBMITTED", f"got blocked again instead of retrying cleanly: {second['attempts'][0]}"
+    assert second["attempts"][0].get("reason") not in ("signal rejected: DUPLICATE_SIGNAL",)
+    assert len(service.orders) == 1
+    assert service.orders[0]["bitget_order_id"] == "ord_retry_1"
+
+
 def test_live_automation_blocks_without_entry_ready_setup() -> None:
     api = client()
     state = get_state()

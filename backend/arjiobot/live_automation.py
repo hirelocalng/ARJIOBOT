@@ -15,7 +15,7 @@ from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONF
 from arjiobot.live_setup_detection import move_setup_to_completed
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
-from arjiobot.strategy.strategy_models import SignalAction, SignalStatus
+from arjiobot.strategy.strategy_models import SignalAction, SignalRejectionReason, SignalStatus
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +111,13 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
                 # attempted. Without this, a single bad setup at the front of the
                 # sort order would silently and permanently starve all later ones,
                 # every cycle, forever.
+                # An unexpected exception here can happen after signal generation
+                # already succeeded (e.g. a bug between trade-plan creation and
+                # order submission) - clear the generated-signal marker so this
+                # setup_id is not also permanently stuck rejecting as
+                # DUPLICATE_SIGNAL on every later poll. No-op if no signal was
+                # generated for it yet.
+                state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
                 failed_attempt = {
                     "source": source,
                     "setup_id": setup.setup_id,
@@ -167,6 +174,16 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     attempt["signal_id"] = signal.signal_id
     attempt["signal_status"] = signal.status.value
     if signal.status is not SignalStatus.GENERATED:
+        if signal.rejection_reason is SignalRejectionReason.DUPLICATE_SIGNAL:
+            # Self-healing safety net: this setup is still ENTRY_READY and
+            # reachable here at all only because it was never actually
+            # submitted (processed_setup_ids would have filtered it out
+            # otherwise) - so an earlier poll's signal succeeded but the
+            # setup was then blocked further downstream, leaving a stale
+            # "already generated" marker that would otherwise reject this
+            # exact setup_id forever. Clear it now so the *next* poll gets a
+            # clean signal-generation attempt instead of repeating this.
+            state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": f"signal rejected: {signal.rejection_reason.value if signal.rejection_reason else 'UNKNOWN'}"})
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s blocked at SIGNAL stage: %s", setup.setup_id, attempt["reason"])
@@ -176,6 +193,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     try:
         risk_config, account_snapshot, open_state = _live_risk_context(state)
     except ValueError as exc:
+        state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": str(exc)})
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s blocked at RISK stage (could not build risk context - check Bitget account/connection): %s", setup.setup_id, exc)
@@ -186,12 +204,16 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     attempt["trade_plan_id"] = plan.trade_plan_id
     attempt["trade_plan_status"] = plan.approval_status.value
     if plan.approval_status is not TradePlanStatus.APPROVED:
+        state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": "risk rejected: " + ",".join(reason.value for reason in plan.rejection_reasons)})
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s / trade plan %s blocked at RISK stage: %s", setup.setup_id, plan.trade_plan_id, attempt["reason"])
         return attempt
 
     if plan.trade_plan_id in set(automation.get("executed_trade_plan_ids", [])):
+        # A genuine duplicate, not a stuck state - this trade plan really was
+        # already submitted - so the generated-signal marker must NOT be
+        # cleared here, unlike every other branch above/below.
         attempt.update({"status": "SKIPPED", "reason": "trade plan already executed"})
         _append_attempt(automation, attempt)
         logger.info("Live automation: setup %s / trade plan %s skipped - already executed", setup.setup_id, plan.trade_plan_id)
@@ -202,6 +224,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     preview = state.bitget_environment.dry_run_preview(payload)
     attempt["dry_run_would_place_order"] = preview.get("would_place_order")
     if preview.get("would_place_order") != "YES":
+        state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": str(preview.get("blocked_reason") or "dry-run preview rejected")})
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s / trade plan %s blocked at BITGET_DRY_RUN_PREVIEW stage: %s", setup.setup_id, plan.trade_plan_id, attempt["reason"])
@@ -212,6 +235,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     try:
         order = state.bitget_environment.place_order(payload, required_mode=TradeMode.LIVE)
     except EnvironmentLockError as exc:
+        state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": f"Bitget order placement failed: {exc}"})
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s / trade plan %s order REJECTED by Bitget: %s", setup.setup_id, plan.trade_plan_id, exc)

@@ -546,7 +546,7 @@
     "arjiobot/fvg/fvg_tap_rules.py": "e64b1696e6bce029bde42eb734bf1b625e8a6b4dea1ddd5b2d62027753111d68",
     "arjiobot/risk/rr_profiles.py": "34d53ddce0b0acfb6cd517f8dbb3ae0c9843eb7d84f773c159021c9b7d3d33b2",
     "arjiobot/setup_tracker/setup_invalidation.py": "2b3c5e5d23fa7cb4cfb28fefec96b8dd391340ea60e89fb5fa1552a0b5b7fd2b",
-    "arjiobot/strategy/strategy_engine.py": "6f0738b58c9ae1f7c3e32f88ab4e3f381803788bcc47b26936afb887f604237d",
+    "arjiobot/strategy/strategy_engine.py": "269a960d6d62a511ad45cadb9869a13cb13ea3ca7d6095f0ff41c09bc163faed",
     "arjiobot/swings/swings.py": "503c557275dde09d823fd170b84102bbb2cb7698a1f0985d63e4a2449577c2fe",
     "scripts/backtest_csv.py": "81756cc0f544407bd3aa0afd8ffe87442e011492d508486fd21ed17a8fbd5ab5"
   },
