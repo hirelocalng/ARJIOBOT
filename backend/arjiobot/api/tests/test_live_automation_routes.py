@@ -404,6 +404,98 @@ def test_live_automation_blocks_without_entry_ready_setup() -> None:
     assert state.bitget_environment.orders == []
 
 
+def test_stale_entry_ready_setup_is_expired_not_executed() -> None:
+    """A setup that reached ENTRY_READY more than 24 minutes (2 closed 12M
+    candles) ago and was never submitted - automation paused, Bitget
+    unreachable, restart, etc. - must never be executed: the current market
+    price has very likely moved away from its entry zone. It must be skipped
+    and moved into Setup Radar's invalidated_setups as EXPIRED instead."""
+    from datetime import timedelta
+
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+        }
+    )
+    state.monitoring["active"] = True
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY"}
+
+    stale_setup = make_entry_ready_setup(latest_price="90", completed_at=datetime.now(timezone.utc) - timedelta(minutes=30))
+    state.setups[stale_setup.setup_id] = stale_setup
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert state.bitget_environment.orders == [], "a stale setup must never be executed"
+    assert stale_setup.setup_id not in state.setups, "an expired setup must leave the uncapped in-progress pool"
+    expired = state.invalidated_setups[stale_setup.setup_id]
+    assert expired.current_state is SetupState.EXPIRED
+    assert expired.status is SetupStatus.EXPIRED
+    assert expired.last_valid_stage == "ENTRY_READY"
+    expired_attempts = [attempt for attempt in result["attempts"] if attempt.get("status") == "EXPIRED"]
+    assert expired_attempts, f"expected an EXPIRED attempt record, got: {result}"
+    assert expired_attempts[0]["setup_id"] == stale_setup.setup_id
+    assert expired_attempts[0]["stage"] == "STALENESS_GATE"
+
+
+def test_fresh_entry_ready_setup_within_staleness_window_still_executes(monkeypatch) -> None:
+    """The 24-minute staleness gate must not block a setup that is still
+    well within the window - only setups older than 2 closed 12M candles."""
+    from datetime import timedelta
+
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+
+    setup = make_entry_ready_setup(latest_price="90", completed_at=datetime.now(timezone.utc) - timedelta(minutes=10))
+    state.setups[setup.setup_id] = setup
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+    monkeypatch.setattr(service, "_private_request", lambda method, path, **kwargs: {"code": "00000", "msg": "success", "data": {"orderId": "ord_fresh_1"}})
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "SUBMITTED", f"expected a submitted order, got: {result}"
+    assert setup.setup_id in state.completed_setups
+    assert setup.setup_id not in state.invalidated_setups
+
+
 def test_live_automation_executes_only_the_entry_ready_setup_not_in_progress_or_invalidated(monkeypatch) -> None:
     """Direct proof of the explicit requirement: a real ENTRY_READY setup gets
     executed; an in-progress (ACTIVE) one and an invalidated one - sitting in
@@ -527,6 +619,11 @@ def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_orde
     real_trades = [setup for setup in state.setups.values() if setup.current_state is SetupState.ENTRY_READY]
     assert real_trades, "fixture assumption: this window produces a real entry-ready ADAUSDT trade"
     setup = real_trades[0]
+    # completed_at here is the CSV's historical entry-candle timestamp, not
+    # actually recent - this test is about detection->execution wiring, not
+    # the staleness gate (covered separately), so fast-forward it to now.
+    setup = replace(setup, completed_at=datetime.now(timezone.utc))
+    state.setups[setup.setup_id] = setup
 
     def fake_contract(symbol: str, product_type: str = "USDT-FUTURES") -> dict[str, object]:
         return _contract(symbol)

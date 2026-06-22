@@ -554,6 +554,32 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
 
 
+def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
+    """Move an ENTRY_READY setup that sat too long without being submitted
+    (see _expire_if_stale in live_automation.py) into invalidated_setups as
+    EXPIRED, instead of leaving it in the uncapped pool where a later poll
+    could still submit an order against an entry zone the market has likely
+    moved away from.
+
+    invalidation_reason is intentionally left unset - Setup._validate()
+    forbids a >=100%-progress setup from also carrying an invalidation_reason,
+    and this setup legitimately did reach ENTRY_READY/100% before going
+    stale; current_state/status=EXPIRED is itself the terminal marker.
+    """
+    expired = replace(
+        setup,
+        current_state=SetupState.EXPIRED,
+        status=SetupStatus.EXPIRED,
+        updated_at=expired_at,
+        invalidated_at=expired_at,
+        last_valid_stage="ENTRY_READY",
+    )
+    state.setups.pop(setup.setup_id, None)
+    state.invalidated_setups[setup.setup_id] = expired
+    _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
+    return expired
+
+
 def _evict_oldest(
     store: dict[str, Any],
     setup_history: dict[str, list[dict[str, object]]],

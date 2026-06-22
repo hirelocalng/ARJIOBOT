@@ -19,10 +19,18 @@ def make_entry_ready_setup(
     *,
     symbol: str = "BTCUSDT",
     created_at: datetime | None = None,
+    completed_at: datetime | None = None,
     latest_price: str = "90",
     suffix: str = "1",
 ) -> Setup:
-    """Create a deterministic entry-ready setup for demo/tests."""
+    """Create a deterministic entry-ready setup for demo/tests.
+
+    completed_at defaults to now, not the fixed created_at/updated_at test
+    timestamps - it represents when the setup actually became tradable (see
+    _setup_from_trade), and live_automation.py's staleness gate
+    (_expire_if_stale) rejects/expires anything older than 24 minutes. Pass
+    an explicit completed_at to exercise that gate from a test.
+    """
     timestamp = created_at or datetime(2026, 1, 1, tzinfo=timezone.utc)
     setup_id = build_setup_id(
         symbol=symbol,
@@ -39,6 +47,7 @@ def make_entry_ready_setup(
         status=SetupStatus.ENTRY_READY,
         created_at=timestamp,
         updated_at=timestamp + timedelta(minutes=90),
+        completed_at=completed_at or datetime.now(timezone.utc),
         htf_fvg_id=f"htf_{suffix}",
         swing_16m_id=f"swg16_{suffix}",
         expansion_16m_id=f"exp16_{suffix}",

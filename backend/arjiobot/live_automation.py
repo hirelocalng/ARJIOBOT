@@ -12,13 +12,23 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONFIRMATION_TEXT, TradeMode
-from arjiobot.live_setup_detection import move_setup_to_completed
+from arjiobot.live_setup_detection import expire_stale_setup, move_setup_to_completed
 from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalRejectionReason, SignalStatus
 
 logger = logging.getLogger(__name__)
+
+# A real ENTRY_READY setup's completed_at is the trade's entry-candle
+# timestamp (see _setup_from_trade), not when automation happens to process
+# it - normally near-zero apart (see _seconds_since_detected) since detection
+# and execution run in the same poll cycle, but if automation was paused,
+# Bitget was unreachable, or the process restarted, an ENTRY_READY setup can
+# sit unsubmitted for a long time. The current market price has very likely
+# moved away from its entry zone by then, so it must not be executed late -
+# 2 closed 12M candles (24 minutes) is the staleness limit.
+STALE_ENTRY_READY_MAX_AGE = timedelta(minutes=24)
 
 
 def ensure_live_automation_state(state: Any) -> dict[str, Any]:
@@ -103,6 +113,10 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
             ", ".join(f"{setup.symbol}/{setup.direction.value}/{setup.setup_id}" for setup in entry_ready_setups),
         )
         for setup in sorted(entry_ready_setups, key=lambda item: item.updated_at):
+            expired_attempt = _expire_if_stale(state, automation, setup, source=source)
+            if expired_attempt is not None:
+                attempts.append(expired_attempt)
+                continue
             try:
                 attempts.append(_process_setup(state, automation, setup, source=source))
             except Exception as exc:
@@ -151,6 +165,41 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
         _append_attempt(automation, record)
         logger.exception("Live automation cycle failed (source=%s)", source)
         return record
+
+
+def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, source: str) -> dict[str, Any] | None:
+    """Gate against executing a setup whose entry zone is likely long stale.
+
+    Returns the skipped attempt record (and marks the setup EXPIRED in Setup
+    Radar via expire_stale_setup) if completed_at is missing or older than
+    STALE_ENTRY_READY_MAX_AGE; returns None if the setup is fresh enough to
+    proceed to _process_setup unchanged."""
+    now = datetime.now(timezone.utc)
+    age = (now - setup.completed_at) if setup.completed_at is not None else None
+    if age is not None and age <= STALE_ENTRY_READY_MAX_AGE:
+        return None
+    expire_stale_setup(state, setup, expired_at=now)
+    # Self-healing, same reason as the DUPLICATE_SIGNAL branch in
+    # _process_setup: this setup never reached SUBMITTED, so any earlier
+    # generated-signal marker for it would otherwise persist for no reason.
+    state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
+    reason = (
+        f"setup expired before execution - completed_at is {age} old, exceeds the {STALE_ENTRY_READY_MAX_AGE} staleness limit (2 closed 12M candles)"
+        if age is not None
+        else "setup expired before execution - completed_at missing, cannot verify freshness"
+    )
+    record = {
+        "source": source,
+        "setup_id": setup.setup_id,
+        "symbol": setup.symbol,
+        "stage": "STALENESS_GATE",
+        "status": "EXPIRED",
+        "reason": reason,
+        "created_at": _now(),
+    }
+    logger.warning("Live automation: setup %s skipped and marked EXPIRED (%s)", setup.setup_id, reason)
+    _append_attempt(automation, record)
+    return record
 
 
 def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source: str) -> dict[str, Any]:

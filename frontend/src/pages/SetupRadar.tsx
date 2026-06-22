@@ -6,6 +6,16 @@ import type { RadarSetup } from '../types/radar';
 
 type Tab = 'IN_PROGRESS' | 'COMPLETED' | 'INVALIDATED';
 
+// completed/invalidated are each capped at the latest 100 in their own store
+// (see _evict_oldest in live_setup_detection.py), but completed.length can
+// still exceed 100 since the COMPLETED endpoint also includes uncapped
+// pending-ENTRY_READY setups not yet moved into the capped store - cap the
+// displayed count itself so the subtitle never implies more history is kept
+// than actually is.
+function cappedCountLabel(count: number, label: string): string {
+  return count > 100 ? `100 ${label} (latest 100)` : `${count} ${label}`;
+}
+
 export function SetupRadar({
   inProgress,
   completed,
@@ -30,7 +40,7 @@ export function SetupRadar({
       <div>
         <h1 className="text-xl font-semibold text-ink">Setup Radar</h1>
         <p className="text-sm text-muted">
-          {inProgress.length} in progress · {completed.length} completed · {invalidated.length} invalidated (latest 100)
+          {inProgress.length} in progress · {cappedCountLabel(completed.length, 'completed')} · {cappedCountLabel(invalidated.length, 'invalidated')}
         </p>
       </div>
       <div className="flex gap-2">
