@@ -99,6 +99,7 @@ class Setup:
     updated_at: datetime
     invalidated_at: datetime | None = None
     invalidation_reason: InvalidationReason | None = None
+    last_valid_stage: str | None = None
     completed_at: datetime | None = None
     htf_fvg_id: str | None = None
     swing_16m_id: str | None = None
@@ -202,6 +203,7 @@ def setup_to_record(setup: Setup) -> dict[str, Any]:
         "progress_percent": setup.progress_percent,
         "status": setup.status.value,
         "invalidation_reason": setup.invalidation_reason.value if setup.invalidation_reason else None,
+        "last_valid_stage": setup.last_valid_stage,
         "htf_fvg_id": setup.htf_fvg_id,
         "swing_16m_id": setup.swing_16m_id,
         "expansion_16m_id": setup.expansion_16m_id,

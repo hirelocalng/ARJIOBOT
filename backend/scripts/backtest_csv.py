@@ -1196,6 +1196,7 @@ def _attempt_traces_for_direction(
             "entry_timestamp": None,
             "stop_loss": None,
             "take_profit": None,
+            "retrace_candle_found": False,
         }
 
         expansion = valid_expansion_by_swing_id.get(swing.swing_id)
@@ -1263,6 +1264,7 @@ def _attempt_traces_for_direction(
             trace["is_terminal"] = True
             traces.append(trace)
             continue
+        trace["retrace_candle_found"] = True
 
         taps = tuple(
             candle

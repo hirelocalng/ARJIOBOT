@@ -21,6 +21,12 @@ from arjiobot.exchange.bitget_environment import EnvironmentLockError
 
 router = APIRouter(prefix="/api/trades", tags=["trades"])
 
+# Execution page spec names these exact paths. Same handlers/data as the
+# /api/trades/* routes above (kept as-is since the frontend already calls
+# them) - this is a second router exposing identical responses at the paths
+# the spec asks for, not a duplicate implementation.
+execution_trades_router = APIRouter(prefix="/api/execution", tags=["execution-trades"])
+
 
 def _decimal(value: object, default: str = "0") -> Decimal:
     try:
@@ -70,7 +76,9 @@ def live_trades():
                 "floating_pnl": row.get("unrealizedPL") or row.get("unrealizedPl"),
                 "position_size": row.get("total") or row.get("available"),
                 "opened_time": row.get("cTime") or row.get("ctime"),
+                "opened_at": row.get("cTime") or row.get("ctime"),
                 "bitget_order_id": (order or {}).get("bitget_order_id"),
+                "exchange_order_id": (order or {}).get("bitget_order_id"),
             }
         )
     return ok({"trades": trades, "count": len(trades), "fetched_at": record.get("fetched_at")})
@@ -104,11 +112,29 @@ def closed_trades():
                 "fees": row.get("totalFee") or row.get("openFee"),
                 "close_reason": row.get("closeReason") or row.get("exitReason") or "N/A",
                 "opened_time": row.get("cTime") or row.get("ctime"),
+                "opened_at": row.get("cTime") or row.get("ctime"),
                 "closed_time": row.get("uTime") or row.get("utime"),
+                "closed_at": row.get("uTime") or row.get("utime"),
                 "bitget_order_id": row.get("orderId") or row.get("positionId"),
+                "exchange_order_id": row.get("orderId") or row.get("positionId"),
             }
         )
     return ok({"trades": trades, "count": len(trades), "fetched_at": record.get("fetched_at")})
+
+
+@execution_trades_router.get("/live-trades")
+def execution_live_trades():
+    return live_trades()
+
+
+@execution_trades_router.get("/closed-trades")
+def execution_closed_trades():
+    return closed_trades()
+
+
+@execution_trades_router.get("/pnl")
+def execution_pnl_summary():
+    return pnl_summary()
 
 
 @router.get("/pnl")
@@ -140,8 +166,11 @@ def pnl_summary():
             "loss_count": len(losses),
             "win_ratio": (len(wins) / total_trades) if total_trades else 0.0,
             "win_percentage": (len(wins) / total_trades * 100) if total_trades else 0.0,
+            "win_pct": (len(wins) / total_trades * 100) if total_trades else 0.0,
             "average_win": str(total_profit / len(wins)) if wins else "0",
+            "avg_win": str(total_profit / len(wins)) if wins else "0",
             "average_loss": str(total_loss / len(losses)) if losses else "0",
+            "avg_loss": str(total_loss / len(losses)) if losses else "0",
             "total_trades": total_trades,
             "open_floating_pnl": str(floating),
             "realized_pnl": str(net_profit),

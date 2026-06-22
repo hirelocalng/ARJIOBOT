@@ -21,6 +21,22 @@ export type RadarSetup = {
   created_at?: string | null;
   updated_at?: string | null;
   invalidated_at?: string | null;
+  // Setup Radar spec field names - same data as current_state/progress_percent/
+  // created_at/updated_at above, translated to the spec's stage labels and
+  // 10/25/40/55/70/85/100 scale (see _display_current_stage in radar.py). Use
+  // these for display; current_state/progress_percent remain for sorting/badge
+  // tone logic that was already built around the internal 20/35/50/65/80/100 scale.
+  current_stage?: string;
+  progress_pct?: number;
+  // The last stage successfully reached before invalidation, in the same
+  // spec label set as current_stage (e.g. "16M_FVG_DETECTED") - null/undefined
+  // for setups that were never invalidated.
+  last_valid_stage?: string | null;
+  swing_detected_at?: string | null;
+  last_updated_at?: string | null;
+  execution_id?: string | null;
+  trade_id?: string | null;
+  rr_tp_profile?: string | null;
   // The tap candle's own timestamp - the true moment this setup's chain
   // completed based on price action, not when a later poll happened to
   // evaluate/discover it. Only set once progress reaches 100%.

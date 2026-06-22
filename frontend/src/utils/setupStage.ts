@@ -1,32 +1,29 @@
-// Maps the internal SetupState enum (current_state) to the friendly stage
-// names from the Setup Radar spec. Direction matters for the swing stage:
-// a BEARISH setup is built on a 16M swing high, a BULLISH one on a swing low.
-export function friendlyStageLabel(currentState: string, direction?: string): string {
+// Maps the Setup Radar spec's current_stage/last_valid_stage values (see
+// _display_current_stage in radar.py) to friendly labels. Direction matters
+// for the swing stage: a BEARISH setup is built on a 16M swing high, a
+// BULLISH one on a swing low.
+export function friendlyStageLabel(currentStage: string, direction?: string): string {
   const isBullish = direction === 'BULLISH';
-  switch (currentState) {
-    case 'SWING_16M_CONFIRMED':
+  switch (currentStage) {
+    case '16M_SWING_DETECTED':
       return isBullish ? '16M swing low detected' : '16M swing high detected';
-    case 'EXPANSION_16M_CONFIRMED':
+    case '16M_EXPANSION_DETECTED':
       return '16M expansion detected';
-    case 'FVG_16M_CONFIRMED':
+    case '16M_FVG_DETECTED':
       return '16M FVG detected';
-    case 'FVG_12M_CONFIRMED':
+    case '12M_FVG_DETECTED':
       return '12M FVG detected';
-    case 'FVG_8M_CONFIRMED':
+    case '8M_FVG_DETECTED':
       return '8M FVG detected';
-    case 'WAITING_FOR_12M_RETRACE':
-    case 'ONE_MINUTE_CONFIRMATION_ACTIVE':
-    case 'ONE_MINUTE_SWING_CONFIRMED':
-    case 'ONE_MINUTE_FVG_CONFIRMED':
+    case 'WAITING_RETRACE':
       return 'waiting for retrace';
     case 'ENTRY_READY':
-    case 'COMPLETED':
       return 'entry-ready / 100%';
     case 'INVALIDATED':
       return 'invalidated';
     case 'EXPIRED':
       return 'expired';
     default:
-      return currentState;
+      return currentStage;
   }
 }

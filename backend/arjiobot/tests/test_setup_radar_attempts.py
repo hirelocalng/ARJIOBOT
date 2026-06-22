@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from arjiobot.api.dependencies import get_state
+from arjiobot.api.routes.radar import radar_record
 from arjiobot.api.tests.helpers import client
 from arjiobot.backtesting.historical_replay import load_ohlcv_csv
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig, TradeMode
@@ -602,3 +603,131 @@ def test_locked_tp_model_metadata_matches_what_was_actually_traded_not_a_stale_s
     for real in real_trades:
         assert real.metadata["selected_tp_model"] == "LEG_TARGET_RESEARCH"
         assert real.metadata["applied_tp_model"] == "LEG_TARGET_RESEARCH"
+
+
+# --- Setup Radar rebuild: stage/progress display, last_valid_stage, completed_at ---
+
+
+def test_setup_created_in_progress_on_16m_swing_detection() -> None:
+    """A setup attempt must be created with status IN_PROGRESS (ACTIVE) the
+    moment a 16M swing is detected, visible via the radar_record() API shape
+    at current_stage=16M_SWING_DETECTED / progress_pct=10."""
+    state = _fake_state("ADAUSDT", ())
+    trace = _swing_trace("swing_new_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0)
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    [setup] = state.setups.values()
+    assert setup.status is SetupStatus.ACTIVE
+    record = radar_record(setup)
+    assert record["status"] == "ACTIVE"
+    assert record["current_stage"] == "16M_SWING_DETECTED"
+    assert record["progress_pct"] == 10.0
+
+
+def test_progress_pct_advances_through_every_stage_including_waiting_retrace() -> None:
+    """progress_pct/current_stage must advance through the exact stage->percent
+    mapping: 16M_SWING_DETECTED=10, 16M_EXPANSION_DETECTED=25, 16M_FVG_DETECTED=40,
+    12M_FVG_DETECTED=55, 8M_FVG_DETECTED=70, WAITING_RETRACE=85, ENTRY_READY=100.
+    WAITING_RETRACE has no equivalent internal SetupState - it is the same
+    FVG_8M_CONFIRMED stage with retrace_candle_found=True (see radar.py)."""
+    expectations = (
+        ("SWING_16M_CONFIRMED", 20.0, False, "16M_SWING_DETECTED", 10.0),
+        ("EXPANSION_16M_CONFIRMED", 35.0, False, "16M_EXPANSION_DETECTED", 25.0),
+        ("FVG_16M_CONFIRMED", 50.0, False, "16M_FVG_DETECTED", 40.0),
+        ("FVG_12M_CONFIRMED", 65.0, False, "12M_FVG_DETECTED", 55.0),
+        ("FVG_8M_CONFIRMED", 80.0, False, "8M_FVG_DETECTED", 70.0),
+        ("FVG_8M_CONFIRMED", 80.0, True, "WAITING_RETRACE", 85.0),
+        ("ENTRY_READY", 100.0, True, "ENTRY_READY", 100.0),
+    )
+    for index, (stage, internal_pct, retrace_found, expected_stage, expected_pct) in enumerate(expectations):
+        state = _fake_state("ADAUSDT", ())
+        trace = {**_swing_trace(f"swing_stage_{index}", stage=stage, progress_percent=internal_pct), "retrace_candle_found": retrace_found}
+        if stage == "ENTRY_READY":
+            trace["entry_timestamp"] = "2026-06-16T01:30:00+00:00"
+        _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+        [setup] = _all_tracked(state)
+        record = radar_record(setup)
+        assert record["current_stage"] == expected_stage, f"stage {stage} (retrace_found={retrace_found})"
+        assert record["progress_pct"] == expected_pct, f"stage {stage} (retrace_found={retrace_found})"
+
+
+def test_invalidated_setup_carries_reason_and_last_valid_stage() -> None:
+    """An invalidated setup must record InvalidationReason and the last stage
+    that was actually reached before the failing check - exposed via
+    radar_record() as invalidation_reason/last_valid_stage."""
+    state = _fake_state("ADAUSDT", ())
+    # Reaches FVG_16M_CONFIRMED (40% on the display scale) then fails to find a 12M FVG.
+    trace = _swing_trace("swing_lvs_1", stage="FVG_16M_CONFIRMED", progress_percent=50.0, invalidation_reason="FVG_12M_NOT_FOUND", is_terminal=True)
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    [setup] = state.invalidated_setups.values()
+    assert setup.status is SetupStatus.INVALIDATED
+    assert setup.invalidation_reason is InvalidationReason.FVG_12M_NOT_FOUND
+    assert setup.last_valid_stage == "FVG_16M_CONFIRMED"
+    record = radar_record(setup)
+    assert record["status"] == "INVALIDATED"
+    assert record["invalidation_reason"] == "FVG_12M_NOT_FOUND"
+    assert record["last_valid_stage"] == "16M_FVG_DETECTED"
+    assert record["progress_pct"] == 40.0, "% reached before invalidation must use the last valid stage, not the terminal state"
+
+
+def test_completed_setup_moves_to_completed_with_completed_at_set() -> None:
+    """Once an attempt trace reaches ENTRY_READY/100%, the resulting row must
+    land in completed_setups with status COMPLETED and completed_at set to the
+    real entry-tap timestamp - not left as None."""
+    state = _fake_state("ADAUSDT", ())
+    trace = {
+        **_swing_trace("swing_completedat_1", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),
+        "entry_timestamp": "2026-06-16T03:45:00+00:00",
+    }
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert state.setups == {}
+    [setup] = state.completed_setups.values()
+    assert setup.status is SetupStatus.COMPLETED
+    assert setup.completed_at is not None
+    assert setup.completed_at.isoformat() == "2026-06-16T03:45:00+00:00"
+    record = radar_record(setup)
+    assert record["completed_at"] == "2026-06-16T03:45:00+00:00"
+    assert record["current_stage"] == "ENTRY_READY"
+    assert record["progress_pct"] == 100.0
+
+
+def test_only_entry_ready_setup_allowed_into_execution_flow_not_in_progress_or_invalidated() -> None:
+    """Re-confirms requirement #7/#8 directly against the three stores: an
+    IN_PROGRESS (ACTIVE) setup and an INVALIDATED setup must never be eligible
+    for execution - only a real ENTRY_READY setup (status ENTRY_READY, from
+    the untouched _setup_from_trade trade-detection path) is. This mirrors
+    what test_live_automation_only_acts_on_entry_ready_setups proves through
+    the live HTTP route, asserted here directly against setup.status."""
+    state = _fake_state("ADAUSDT", ())
+    in_progress_trace = _swing_trace("swing_eligact_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0)
+    invalidated_trace = _swing_trace("swing_eliginv_2", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+    _apply_attempt_traces(state, "ADAUSDT", (in_progress_trace, invalidated_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    def executable(setup) -> bool:
+        return setup.status in (SetupStatus.ENTRY_READY, SetupStatus.COMPLETED) and setup.current_state is SetupState.ENTRY_READY
+
+    [active_setup] = state.setups.values()
+    [invalidated_setup] = state.invalidated_setups.values()
+    assert not executable(active_setup), "IN_PROGRESS setups must never be eligible for execution"
+    assert not executable(invalidated_setup), "INVALIDATED setups must never be eligible for execution"
+
+    entry_ready = _setup_from_trade(
+        {
+            "trade_id": "trade_eligibility_1",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": "2026-06-16T01:30:00+00:00",
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_eligibility",
+            "source_16m_swing_id": "swing16_eligibility",
+            "source_16m_fvg_id": "fvg16_eligibility",
+        },
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    assert entry_ready.status is SetupStatus.ENTRY_READY
+    assert executable(entry_ready), "a real ENTRY_READY setup must be eligible for execution"

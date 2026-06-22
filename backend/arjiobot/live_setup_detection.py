@@ -426,6 +426,7 @@ def _apply_one_attempt_trace(
             "selected_tp_model": selected_tp_model,
             "source": source,
             "swing_price": str(trace.get("swing_price") or ""),
+            "retrace_candle_found": "YES" if trace.get("retrace_candle_found") else "NO",
         }
     )
     if trace.get("entry_price"):
@@ -461,6 +462,11 @@ def _apply_one_attempt_trace(
     if is_invalidated:
         field_updates["invalidated_at"] = now
         field_updates["invalidation_reason"] = InvalidationReason(str(trace["invalidation_reason"]))
+        # trace["stage"] is never advanced past the last checkpoint that
+        # actually passed (see _attempt_traces_for_direction) - it is never
+        # reassigned to a failure marker - so it is exactly the last valid
+        # stage reached before this trace's failing check ran.
+        field_updates["last_valid_stage"] = stage
     elif existing is not None and existing.invalidation_reason is not None:
         # A swing whose expansion/FVG check failed on an earlier poll can still
         # resolve favorably on a later one once more candles arrive (e.g. an
@@ -471,6 +477,7 @@ def _apply_one_attempt_trace(
         # also displays an old invalidation reason.
         field_updates["invalidated_at"] = None
         field_updates["invalidation_reason"] = None
+        field_updates["last_valid_stage"] = None
 
     if existing is None:
         setup = Setup(

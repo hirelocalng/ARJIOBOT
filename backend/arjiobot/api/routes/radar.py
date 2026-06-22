@@ -31,6 +31,70 @@ def _stage_status(progress_percent: float, threshold: float) -> str:
     return "CONFIRMED" if progress_percent >= threshold else "WAITING"
 
 
+# Setup Radar spec stage names/percentages, exposed via current_stage/progress_pct
+# below. Internal SetupState/progress_percent stays on its own existing 20/35/
+# 50/65/80/100 scale (used everywhere else - eviction ordering, tests, the
+# is_terminal/invalidation wiring in live_setup_detection.py) so none of that
+# tested machinery has to change; this is a pure display-layer translation.
+_DISPLAY_STAGE_BY_INTERNAL_STATE: dict[str, tuple[str, float]] = {
+    "SWING_16M_CONFIRMED": ("16M_SWING_DETECTED", 10.0),
+    "EXPANSION_16M_CONFIRMED": ("16M_EXPANSION_DETECTED", 25.0),
+    "FVG_16M_CONFIRMED": ("16M_FVG_DETECTED", 40.0),
+    "FVG_12M_CONFIRMED": ("12M_FVG_DETECTED", 55.0),
+    "FVG_8M_CONFIRMED": ("8M_FVG_DETECTED", 70.0),
+    "ENTRY_READY": ("ENTRY_READY", 100.0),
+    "COMPLETED": ("ENTRY_READY", 100.0),
+    "INVALIDATED": ("INVALIDATED", None),
+    "EXPIRED": ("EXPIRED", None),
+}
+
+
+def _is_waiting_retrace(stage_value: str, setup) -> bool:
+    """FVG_8M_CONFIRMED covers both "8M FVG just confirmed" and "retrace candle
+    found, now waiting for the entry tap" today - distinguished only by the
+    retrace_candle_found flag _attempt_traces_for_direction sets on the trace
+    (carried into setup.metadata by _apply_one_attempt_trace)."""
+    return stage_value == "FVG_8M_CONFIRMED" and (setup.metadata or {}).get("retrace_candle_found") == "YES"
+
+
+def _display_current_stage(setup) -> str:
+    """current_stage label from the Setup Radar spec (e.g. "16M_SWING_DETECTED",
+    ..., "WAITING_RETRACE", "ENTRY_READY"). Internal SetupState/progress_percent
+    are left on their own existing 20/35/50/65/80/100 scale (used by eviction
+    ordering, tests, and the invalidation wiring in live_setup_detection.py) -
+    this is a pure display-layer translation, not a rename."""
+    state_value = setup.current_state.value
+    if _is_waiting_retrace(state_value, setup):
+        return "WAITING_RETRACE"
+    stage, _progress = _DISPLAY_STAGE_BY_INTERNAL_STATE.get(state_value, (state_value, None))
+    return stage
+
+
+def _display_progress_pct(setup) -> float:
+    """progress_pct on the spec's 10/25/40/55/70/85/100 scale. For an
+    INVALIDATED/EXPIRED setup this reflects the high-water mark stage reached
+    before failure (last_valid_stage), not the terminal INVALIDATED/EXPIRED
+    state itself, matching the "% reached before invalidation" the Invalidated
+    tab asks for."""
+    state_value = setup.current_state.value
+    if state_value in ("INVALIDATED", "EXPIRED"):
+        state_value = setup.last_valid_stage or "SWING_16M_CONFIRMED"
+    if _is_waiting_retrace(state_value, setup):
+        return 85.0
+    _stage, progress = _DISPLAY_STAGE_BY_INTERNAL_STATE.get(state_value, (state_value, None))
+    return progress if progress is not None else setup.progress_percent
+
+
+def _display_last_valid_stage(setup) -> str | None:
+    last_valid_stage = getattr(setup, "last_valid_stage", None)
+    if not last_valid_stage:
+        return None
+    if _is_waiting_retrace(last_valid_stage, setup):
+        return "WAITING_RETRACE"
+    stage, _progress = _DISPLAY_STAGE_BY_INTERNAL_STATE.get(last_valid_stage, (last_valid_stage, None))
+    return stage
+
+
 def _related_execution(setup) -> dict[str, object] | None:
     """Best-effort link from a COMPLETED/ENTRY_READY setup to the real Bitget
     order live automation submitted for it, if any. live_automation.py's
@@ -69,11 +133,27 @@ def radar_record(setup) -> dict[str, object]:
     # this swing's real trade is queued behind whichever was picked first
     # this poll, not abandoned; it is picked up automatically on a later poll.
     stale_skip = get_state().stale_trade_skips.get(setup.swing_16m_id or "")
+    related_execution = _related_execution(setup)
     return {
         "setup_id": setup.setup_id,
         "symbol": setup.symbol,
         "direction": setup.direction.value,
         "status": setup.status.value,
+        # Setup Radar spec field names (current_stage/progress_pct/
+        # last_valid_stage/swing_detected_at/last_updated_at/execution_id/
+        # trade_id/rr_tp_profile), additive alongside the existing
+        # current_state/progress_percent/created_at/updated_at fields the
+        # frontend already reads - see _display_current_stage's docstring for
+        # why this is a display translation, not a rename of the internal
+        # SetupState scale.
+        "current_stage": _display_current_stage(setup),
+        "progress_pct": _display_progress_pct(setup),
+        "last_valid_stage": _display_last_valid_stage(setup),
+        "swing_detected_at": setup.created_at.isoformat() if getattr(setup, "created_at", None) else None,
+        "last_updated_at": setup.updated_at.isoformat() if getattr(setup, "updated_at", None) else None,
+        "execution_id": (related_execution or {}).get("bitget_order_id"),
+        "trade_id": (related_execution or {}).get("trade_plan_id"),
+        "rr_tp_profile": metadata.get("selected_tp_model"),
         "strategy_profile": active_profile.profile_id,
         "profile_variant_name": active_profile.label,
         "inherited_base_profile": profile_status.get("inherited_base_profile", active_profile.inherited_base_profile),
@@ -115,7 +195,7 @@ def radar_record(setup) -> dict[str, object]:
         "source": metadata.get("source"),
         "stale_skip": stale_skip,
         "swing_price": metadata.get("swing_price") or None,
-        "related_execution": _related_execution(setup),
+        "related_execution": related_execution,
     }
 
 

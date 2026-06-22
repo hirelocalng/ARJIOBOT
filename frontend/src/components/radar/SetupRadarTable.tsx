@@ -14,8 +14,8 @@ export function SetupRadarTable({ setups, onSelect }: { setups: RadarSetup[]; on
       columns={[
         { header: 'Pair', render: (row) => <button className="text-action" onClick={() => onSelect?.(row)}>{row.symbol}</button> },
         { header: 'Direction', render: (row) => row.direction },
-        { header: 'Stage', render: (row) => <StatusBadge label={friendlyStageLabel(row.current_state, row.direction)} tone={row.current_state === 'ENTRY_READY' ? 'ok' : row.progress_percent >= 70 ? 'warn' : 'neutral'} /> },
-        { header: 'Progress', render: (row) => <div className="flex items-center gap-2"><SetupProgressBar value={row.progress_percent} /><span>{row.progress_percent.toFixed(0)}%</span></div> },
+        { header: 'Stage', render: (row) => <StatusBadge label={friendlyStageLabel(row.current_stage ?? row.current_state, row.direction)} tone={row.current_state === 'ENTRY_READY' ? 'ok' : row.progress_percent >= 70 ? 'warn' : 'neutral'} /> },
+        { header: 'Progress', render: (row) => { const pct = row.progress_pct ?? row.progress_percent; return <div className="flex items-center gap-2"><SetupProgressBar value={pct} /><span>{pct.toFixed(0)}%</span></div>; } },
         { header: '16M Swing', render: (row) => row.swing_price ? `${row.direction === 'BULLISH' ? 'Low' : 'High'} @ ${row.swing_price}` : 'WAITING' },
         { header: '16M Expansion', render: (row) => row.expansion_ratio ?? 'WAITING' },
         { header: '16M FVG', render: (row) => row.fvg_16m_status ?? 'WAITING' },

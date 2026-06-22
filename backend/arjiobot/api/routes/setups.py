@@ -14,6 +14,12 @@ from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 
 router = APIRouter(prefix="/api/setups", tags=["setups"])
 
+# Setup Radar page spec names these exact paths. Same handlers/data as the
+# /api/setups/* routes above (kept as-is since the frontend already calls
+# them) - this is a second router exposing identical responses at the paths
+# the spec asks for, not a duplicate implementation.
+setup_radar_router = APIRouter(prefix="/api/setup-radar", tags=["setup-radar"])
+
 
 def _all_setups(state: ApiState):
     """Every tracked setup across all three stores - in-progress (uncapped),
@@ -65,6 +71,21 @@ def completed():
 def invalidated():
     setups = sorted(get_state().invalidated_setups.values(), key=lambda setup: setup.invalidated_at or setup.updated_at, reverse=True)
     return ok(tuple(radar_record(setup) for setup in setups))
+
+
+@setup_radar_router.get("/in-progress")
+def setup_radar_in_progress():
+    return in_progress()
+
+
+@setup_radar_router.get("/invalidated")
+def setup_radar_invalidated():
+    return invalidated()
+
+
+@setup_radar_router.get("/completed")
+def setup_radar_completed():
+    return completed()
 
 
 @router.get("/progress/{percent}")
