@@ -582,3 +582,23 @@ def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing(
         assert matching_completed == [], (
             f"swing {real.swing_16m_id} has both a real trade and a redundant attempt-tracer completed row"
         )
+
+
+def test_locked_tp_model_metadata_matches_what_was_actually_traded_not_a_stale_saved_setting() -> None:
+    """PROFILE_2's tp_model (LEG_TARGET_RESEARCH) always wins over the
+    operator's saved selected_rr_profile setting when actually computing
+    stop/target (scripts/backtest_csv.py hardwires tp_model=profile.tp_model
+    at the real trade-construction call site) - Setup.metadata's
+    selected_tp_model/applied_tp_model must reflect that same reality,
+    not echo back a stale/unrelated saved setting like RR_1_5."""
+    candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
+    state = _fake_state("ADAUSDT", candles_1m[:150])
+    state.settings["selected_rr_profile"] = "RR_1_5"
+
+    detect_live_setups_for_symbol(state, "ADAUSDT")
+
+    real_trades = [setup for setup in state.setups.values() if setup.current_state is SetupState.ENTRY_READY]
+    assert real_trades, "fixture assumption: this window produces a real entry-ready trade"
+    for real in real_trades:
+        assert real.metadata["selected_tp_model"] == "LEG_TARGET_RESEARCH"
+        assert real.metadata["applied_tp_model"] == "LEG_TARGET_RESEARCH"

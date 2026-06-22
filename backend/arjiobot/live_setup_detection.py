@@ -109,7 +109,19 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             return _finish(detector_state, "WAITING", f"not enough live candles for strategy evaluation: {len(candles)}", source=source)
 
         profile = get_profile(str(state.settings.get("active_strategy_profile") or state.settings.get("default_backtesting_profile") or "PROFILE_2"))
-        selected_tp_model = str(state.settings.get("selected_rr_profile") or profile.tp_model).upper()
+        runner = _runner()
+        requested_tp_model = str(state.settings.get("selected_rr_profile") or profile.tp_model).upper()
+        # The exact same protection _build_strategy_funnel/_build_bullish_
+        # strategy_funnel already apply internally to decide what tp_model a
+        # trade is actually built with (backtest_csv.py's
+        # _selected_rr_profile_for_profile - profile.tp_model always wins for
+        # locked models: LEG_TARGET_RESEARCH/RR_1_0/RR_1_0_RESEARCH).
+        # Resolving it here too, before it ever reaches Setup.metadata, means
+        # selected_tp_model/applied_tp_model always matches what was
+        # actually used to compute stop/target, instead of echoing back a
+        # saved setting (e.g. RR_1_5) that the funnel itself was always
+        # going to override anyway.
+        selected_tp_model = runner._selected_rr_profile_for_profile(profile, requested_tp_model)
         # The saved live setting must win over the profile's built-in default - e.g.
         # PROFILE_2's built-in timeframe_profile_id must not override an operator's
         # explicit choice to run live trading on DEFAULT_16_12_8.
@@ -123,7 +135,6 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             selected_tp_model,
             " (structural leg target, not a fixed RR multiple)" if selected_tp_model == "LEG_TARGET_RESEARCH" else "",
         )
-        runner = _runner()
         required_minutes = runner._required_timeframes(timeframe_profile)
         profiles = {minutes: build_timeframe_profile(candles, minutes) for minutes in required_minutes}
         if not profiles.get(timeframe_profile.swing_timeframe) or not profiles.get(1):
@@ -154,7 +165,14 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             starting_balance=state.settings.get("starting_balance") or "1",
             risk_amount_per_trade=state.settings.get("risk_amount_per_trade"),
             max_leverage=state.settings.get("max_leverage"),
-            selected_rr_profile=profile.tp_model if selected_tp_model == "TIME_BASED_EXIT" else str(state.settings.get("selected_rr_profile") or "RR_1_5"),
+            # TIME_BASED_EXIT is an exit *mechanism* (close on a timer,
+            # handled separately via metadata's time_exit_enabled/
+            # time_exit_minutes below), not a tp_model the funnel itself
+            # knows how to size a target with - fall back to the profile's
+            # own tp_model for the underlying stop/target math in that case.
+            # selected_tp_model is already protected the same way the funnel
+            # protects it internally, so no separate re-derivation needed.
+            selected_rr_profile=profile.tp_model if selected_tp_model == "TIME_BASED_EXIT" else selected_tp_model,
         )
         # Sell-side (bearish, swing-high) and buy-side (bullish, swing-low) funnels run
         # side by side through the same shared strategy logic - see scripts/backtest_csv.py
