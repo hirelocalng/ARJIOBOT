@@ -191,7 +191,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
 
     attempt["stage"] = "RISK"
     try:
-        risk_config, account_snapshot, open_state = _live_risk_context(state)
+        risk_config, account_snapshot, open_state = _live_risk_context(state, setup.symbol)
     except ValueError as exc:
         state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": str(exc)})
@@ -288,7 +288,28 @@ def _preflight_blocker(state: Any) -> str | None:
     return None
 
 
-def _live_risk_context(state: Any) -> tuple[RiskConfig, AccountSnapshot, OpenRiskState]:
+def _effective_max_leverage(state: Any, symbol: str) -> Decimal:
+    """Per-pair leverage (state.monitored_pairs[symbol]["leverage"], stored
+    alongside that pair's symbol/enabled config) overrides the global
+    max_leverage setting whenever one is configured for this symbol - this
+    value flows untouched through the existing chain (RiskConfig ->
+    risk_validation.calculate_required_margin -> plan.max_allowed_leverage ->
+    _order_payload_from_plan -> bitget_environment._build_order_plan's
+    effective_max_leverage), so both the margin calculation and the
+    set_leverage call already use whatever this resolves to. Falls back to
+    the global setting for any pair with no specific value set.
+    """
+    pair = state.monitored_pairs.get(symbol.upper()) or {}
+    pair_leverage = pair.get("leverage")
+    if pair_leverage not in (None, "", 0, "0"):
+        try:
+            return _positive_decimal(pair_leverage, f"{symbol} leverage")
+        except ValueError:
+            pass
+    return _positive_decimal(state.settings.get("max_leverage"), "max leverage")
+
+
+def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnapshot, OpenRiskState]:
     account_payload = state.bitget_environment.last_account_payload or {}
     connection = state.bitget_environment.last_connection_result or {}
     equity = _positive_decimal(
@@ -304,7 +325,7 @@ def _live_risk_context(state: Any) -> tuple[RiskConfig, AccountSnapshot, OpenRis
         "available margin",
     )
     risk_amount = _positive_decimal(state.settings.get("risk_amount_per_trade"), "risk amount per trade")
-    max_leverage = _positive_decimal(state.settings.get("max_leverage"), "max leverage")
+    max_leverage = _effective_max_leverage(state, symbol)
     config = RiskConfig(
         account_equity=equity,
         fixed_risk_amount=risk_amount,

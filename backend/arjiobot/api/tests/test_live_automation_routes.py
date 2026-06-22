@@ -71,6 +71,66 @@ def test_live_automation_processes_entry_ready_setup_to_bitget_order(monkeypatch
     assert status["latest_attempt"]["stage"] == "BITGET_LIVE_ORDER"
 
 
+def test_per_pair_leverage_overrides_global_max_leverage_end_to_end(monkeypatch) -> None:
+    """Proves the full chain, not just the helper in isolation: a pair-
+    specific leverage configured on state.monitored_pairs reaches both the
+    margin calculation and the actual set_leverage call sent to Bitget,
+    overriding the global max_leverage setting for that symbol."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "10",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitored_pairs["BTCUSDT"] = {"symbol": "BTCUSDT", "enabled": True, "leverage": 120}
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+    setup = make_entry_ready_setup(latest_price="90")
+    state.setups[setup.setup_id] = setup
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def recording_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        calls.append((path, dict(kwargs.get("body") or {})))
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_per_pair_leverage"}}
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+    monkeypatch.setattr(service, "_private_request", recording_private_request)
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "SUBMITTED"
+    leverage_calls = [body for path, body in calls if path == "/api/v2/mix/account/set-leverage"]
+    assert len(leverage_calls) == 1
+    assert leverage_calls[0]["leverage"] == "120", "must use the pair-specific leverage, not the global max_leverage=100"
+    attempt = result["attempts"][0]
+    assert attempt["status"] == "SUBMITTED"
+    plan = state.trade_plans[attempt["trade_plan_id"]]
+    assert str(plan.max_allowed_leverage) == "120"
+
+
 def test_live_automation_isolates_one_failing_setup_from_others(monkeypatch) -> None:
     """A setup that raises while being processed must not block other, healthy
     ENTRY_READY setups in the same cycle - including ones from the other trade

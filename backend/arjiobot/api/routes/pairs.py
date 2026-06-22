@@ -55,7 +55,12 @@ def _monitoring_status(state, poll: dict[str, object]) -> str:
 def add_pair(payload: dict[str, object]):
     symbol = str(payload["symbol"]).upper()
     state = get_state()
-    state.monitored_pairs[symbol] = {"symbol": symbol, "enabled": bool(payload.get("enabled", True))}
+    existing_leverage = (state.monitored_pairs.get(symbol) or {}).get("leverage")
+    state.monitored_pairs[symbol] = {
+        "symbol": symbol,
+        "enabled": bool(payload.get("enabled", True)),
+        "leverage": payload.get("leverage", existing_leverage),
+    }
     save_pairs(state.monitored_pairs)
     return ok(state.monitored_pairs[symbol])
 
@@ -71,8 +76,10 @@ def remove_pair(symbol: str):
 @router.patch("/{symbol}")
 def update_pair(symbol: str, payload: dict[str, object]):
     state = get_state()
-    pair = state.monitored_pairs.setdefault(symbol.upper(), {"symbol": symbol.upper(), "enabled": True})
+    pair = state.monitored_pairs.setdefault(symbol.upper(), {"symbol": symbol.upper(), "enabled": True, "leverage": None})
     pair["enabled"] = bool(payload.get("enabled", pair["enabled"]))
+    if "leverage" in payload:
+        pair["leverage"] = payload["leverage"]
     save_pairs(state.monitored_pairs)
     return ok(pair)
 
@@ -82,7 +89,8 @@ def import_pairs(payload: dict[str, object]):
     imported = []
     for symbol in payload.get("symbols", []):
         normalized = str(symbol).upper()
-        get_state().monitored_pairs[normalized] = {"symbol": normalized, "enabled": True}
+        existing_leverage = (get_state().monitored_pairs.get(normalized) or {}).get("leverage")
+        get_state().monitored_pairs[normalized] = {"symbol": normalized, "enabled": True, "leverage": existing_leverage}
         imported.append(normalized)
     save_pairs(get_state().monitored_pairs)
     return ok({"imported": imported})

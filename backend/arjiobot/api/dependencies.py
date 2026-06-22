@@ -36,18 +36,18 @@ PAIRS_PATH = ROOT / "data" / "runtime_pairs.json"
 # up empty - a fresh start, a Railway redeploy with no persistent volume,
 # or a corrupted file must never leave the bot with zero (or just one)
 # monitored pair.
-DEFAULT_MONITORED_PAIRS: tuple[str, ...] = (
-    "BTCUSDT",
-    "ATOMUSDT",
-    "APTUSDT",
-    "SUIUSDT",
-    "EIGENUSDT",
-    "TAOUSDT",
-    "SOLUSDT",
-    "AAVEUSDT",
-    "BCHUSDT",
-    "1INCHUSDT",
-)
+DEFAULT_MONITORED_PAIRS: dict[str, int] = {
+    "BTCUSDT": 120,
+    "ATOMUSDT": 75,
+    "APTUSDT": 75,
+    "SUIUSDT": 75,
+    "EIGENUSDT": 75,
+    "TAOUSDT": 50,
+    "SOLUSDT": 80,
+    "AAVEUSDT": 75,
+    "BCHUSDT": 75,
+    "1INCHUSDT": 75,
+}
 FROZEN_VISIBLE_PROFILE_ID = "PROFILE_RECOVERED_HIGH_WINRATE"
 FROZEN_VISIBLE_PROFILE_IDS = {"PROFILE_RECOVERED_HIGH_WINRATE", "PROFILE_2"}
 
@@ -248,7 +248,10 @@ def bootstrap_live_trading_from_env(state: "ApiState") -> None:
 
 
 def _default_pairs() -> dict[str, dict[str, object]]:
-    return {symbol: {"symbol": symbol, "enabled": True} for symbol in DEFAULT_MONITORED_PAIRS}
+    return {
+        symbol: {"symbol": symbol, "enabled": True, "leverage": leverage}
+        for symbol, leverage in DEFAULT_MONITORED_PAIRS.items()
+    }
 
 
 def load_pairs() -> dict[str, dict[str, object]]:
@@ -262,7 +265,10 @@ def load_pairs() -> dict[str, dict[str, object]]:
     for item in saved if isinstance(saved, list) else saved.values():
         symbol = str(item.get("symbol", "")).upper()
         if symbol:
-            pairs[symbol] = {"symbol": symbol, "enabled": bool(item.get("enabled", True))}
+            # leverage is None for any pair with no per-pair value ever saved -
+            # that's the signal live_automation.py's _effective_max_leverage
+            # uses to fall back to the global max_leverage setting.
+            pairs[symbol] = {"symbol": symbol, "enabled": bool(item.get("enabled", True)), "leverage": item.get("leverage")}
     return pairs or _default_pairs()
 
 
