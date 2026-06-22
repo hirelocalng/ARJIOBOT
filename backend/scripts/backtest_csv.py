@@ -1193,6 +1193,7 @@ def _attempt_traces_for_direction(
             "invalidation_reason": None,
             "is_terminal": False,
             "entry_price": None,
+            "entry_timestamp": None,
             "stop_loss": None,
             "take_profit": None,
         }
@@ -1285,6 +1286,7 @@ def _attempt_traces_for_direction(
         trace["progress_percent"] = 100.0
         trace["is_terminal"] = True
         trace["entry_price"] = str(tap.close)
+        trace["entry_timestamp"] = tap.timestamp.isoformat()
         trace["stop_loss"] = str(swing.price)
         if is_bullish:
             trace["take_profit"] = str(max(fvg16.fvg_completion_candle_high, max(candle.high for candle in retrace_window)))

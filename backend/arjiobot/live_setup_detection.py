@@ -413,15 +413,15 @@ def _apply_one_attempt_trace(
     if trace.get("entry_price"):
         metadata["entry_signal_price"] = str(trace["entry_price"])
 
-    # This row's "time completed" is updated_at (now, this poll's eval time)
-    # below, not the tap candle's own chronological timestamp - the funnel
-    # only exposes entry_price/stop_loss/take_profit on an ENTRY_READY trace,
-    # not the tap's own timestamp, so the true price-action completion
-    # moment isn't available here without changing the protected strategy
-    # funnel file (scripts/backtest_csv.py) to add it, which is a separate,
-    # deliberately deferred change pending its own lock-file migration.
-    # _setup_from_trade's real ENTRY_READY setup, by contrast, already sets
-    # completed_at accurately from its own trade dict's entry_timestamp.
+    # The tap candle's own timestamp - the true moment this setup's chain
+    # completed based on price action, not when a later poll happened to
+    # evaluate it. Only set once the trace actually reaches ENTRY_READY.
+    completed_at = existing.completed_at if existing is not None else None
+    if stage == "ENTRY_READY" and trace.get("entry_timestamp"):
+        try:
+            completed_at = datetime.fromisoformat(str(trace["entry_timestamp"]).replace("Z", "+00:00"))
+        except ValueError:
+            pass
 
     field_updates: dict[str, object] = {
         "symbol": str(trace["symbol"]),
@@ -430,6 +430,7 @@ def _apply_one_attempt_trace(
         "progress_percent": new_progress,
         "status": target_status,
         "updated_at": now,
+        "completed_at": completed_at,
         "swing_16m_id": swing_id,
         "expansion_16m_id": trace.get("expansion_16m_id") or (existing.expansion_16m_id if existing else None),
         "fvg_16m_id": trace.get("fvg_16m_id") or (existing.fvg_16m_id if existing else None),
