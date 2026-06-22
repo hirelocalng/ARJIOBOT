@@ -561,6 +561,18 @@ class BitgetEnvironmentService:
             if preview.get("would_place_order") != "YES":
                 raise EnvironmentLockError(str(preview.get("blocked_reason") or "live order preview rejected"))
             order = self._build_order_plan(payload, submit=True)
+            # Bitget computes margin server-side from size/price/leverage at
+            # whatever leverage is currently set on the account for this
+            # symbol - never confirmed to match effective_max_leverage until
+            # now. Setting it here, right before submission, guarantees the
+            # margin Bitget actually reserves matches this order's own
+            # calculation, instead of relying on however the account happens
+            # to be configured. If this call fails, the order is not placed -
+            # caught by this method's existing except block below, same as
+            # any other pre-submission failure.
+            leverage_response = self.set_leverage(order["symbol"], order["effective_max_leverage"])
+            order["leverage_set_to"] = order["effective_max_leverage"]
+            order["leverage_set_response_code"] = str(leverage_response.get("code"))
             response = self._private_request("POST", "/api/v2/mix/order/place-order", body=order["sanitized_payload"])
             order["network_submitted"] = True
             order["bitget_response_code"] = str(response.get("code"))

@@ -331,6 +331,41 @@ def test_live_order_builds_backend_preview_without_manual_preview(monkeypatch) -
     assert service.blocked_orders == []
 
 
+def test_place_order_sets_leverage_on_bitget_before_submitting_the_order() -> None:
+    """Margin is computed server-side by Bitget from whatever leverage is
+    already set on the account for the symbol - this confirms the bot
+    actually tells Bitget to use effective_max_leverage immediately before
+    submitting, rather than relying on however the account happens to be
+    configured, and that it does so BEFORE the order itself goes out."""
+    service = BitgetEnvironmentService()
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.fetch_contract_config = lambda symbol, product_type="USDT-FUTURES": _contract(symbol)
+    service.fetch_ticker = lambda symbol, product_type="USDT-FUTURES": _ticker(symbol)
+    service.fetch_candles = lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol)
+
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def recording_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        calls.append((method, path, dict(kwargs.get("body") or {})))
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_leverage_check"}}
+
+    service._private_request = recording_private_request
+
+    order = service.place_order(_order(), required_mode=TradeMode.LIVE)
+
+    assert [path for _, path, _ in calls] == ["/api/v2/mix/account/set-leverage", "/api/v2/mix/order/place-order"], (
+        "set-leverage must be called once, and before the order itself is placed"
+    )
+    leverage_call = calls[0]
+    assert leverage_call[0] == "POST"
+    assert leverage_call[2]["symbol"] == "BTCUSDT"
+    assert leverage_call[2]["leverage"] == order["effective_max_leverage"] == "100"
+    assert order["leverage_set_to"] == "100"
+    assert order["leverage_set_response_code"] == "00000"
+
+
 def _service() -> BitgetEnvironmentService:
     from arjiobot.api.dependencies import get_state
 
