@@ -149,20 +149,20 @@ def load_setup_history_store(state: Any) -> tuple[int, int]:
 
 
 def clear_setup_history(state: Any) -> tuple[int, int]:
-    """Clear completed_setups/invalidated_setups in memory AND delete the
-    persisted file from disk, simultaneously - the on-demand equivalent of
-    the one-time startup migration below, for an operator to trigger
-    manually (see api/routes/admin.py's POST /api/admin/clear-setup-history)
-    without waiting for a restart. IN PROGRESS (state.setups) is never
-    touched. Returns (completed_count, invalidated_count) cleared."""
+    """Clear completed_setups/invalidated_setups in memory, reset both of
+    those in-memory dicts to empty, AND delete the persisted file from disk -
+    all three in this one synchronous call, so no request in between can ever
+    observe a partially-cleared state. The on-demand equivalent of the
+    one-time startup migration below, for an operator to trigger manually
+    (see api/routes/admin.py's POST /api/admin/clear-setup-history) without
+    waiting for a restart. IN PROGRESS (state.setups) is never touched.
+    Returns (completed_count, invalidated_count) cleared."""
     completed_count = len(state.completed_setups)
     invalidated_count = len(state.invalidated_setups)
-    for setup_id in list(state.completed_setups):
-        state.completed_setups.pop(setup_id, None)
+    for setup_id in (*state.completed_setups, *state.invalidated_setups):
         state.setup_history.pop(setup_id, None)
-    for setup_id in list(state.invalidated_setups):
-        state.invalidated_setups.pop(setup_id, None)
-        state.setup_history.pop(setup_id, None)
+    state.completed_setups.clear()
+    state.invalidated_setups.clear()
     STORE_PATH.unlink(missing_ok=True)
     logger.warning(
         "Manual clear: cleared %d completed setup(s) and %d invalidated setup(s) and deleted %s.",

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { SetupRadarTable } from '../components/radar/SetupRadarTable';
 import { SetupCompletedTable } from '../components/radar/SetupCompletedTable';
 import { SetupHistoryTable } from '../components/radar/SetupHistoryTable';
+import { clearSetupHistory } from '../api/admin';
+import { confirmDangerousAction } from '../utils/safety';
 import type { RadarSetup } from '../types/radar';
 
 type Tab = 'IN_PROGRESS' | 'COMPLETED' | 'INVALIDATED';
@@ -28,6 +30,7 @@ export function SetupRadar({
   onSelect: (setup: RadarSetup) => void;
 }) {
   const [activeTab, setActiveTab] = useState<Tab>('IN_PROGRESS');
+  const [clearingHistory, setClearingHistory] = useState(false);
 
   const tabs: { id: Tab; label: string; count: number }[] = [
     { id: 'IN_PROGRESS', label: 'In Progress', count: inProgress.length },
@@ -35,13 +38,33 @@ export function SetupRadar({
     { id: 'INVALIDATED', label: 'Invalidated', count: invalidated.length }
   ];
 
+  const handleClearHistory = async () => {
+    if (!confirmDangerousAction('Clear all completed/invalidated setup history? This cannot be undone.')) return;
+    setClearingHistory(true);
+    try {
+      await clearSetupHistory();
+      window.location.reload();
+    } finally {
+      setClearingHistory(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      <div>
-        <h1 className="text-xl font-semibold text-ink">Setup Radar</h1>
-        <p className="text-sm text-muted">
-          {inProgress.length} in progress · {cappedCountLabel(completed.length, 'completed')} · {cappedCountLabel(invalidated.length, 'invalidated')}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-ink">Setup Radar</h1>
+          <p className="text-sm text-muted">
+            {inProgress.length} in progress · {cappedCountLabel(completed.length, 'completed')} · {cappedCountLabel(invalidated.length, 'invalidated')}
+          </p>
+        </div>
+        <button
+          className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm font-semibold text-danger disabled:opacity-60"
+          disabled={clearingHistory}
+          onClick={() => void handleClearHistory()}
+        >
+          {clearingHistory ? 'Clearing...' : 'Clear History'}
+        </button>
       </div>
       <div className="flex gap-2">
         {tabs.map((tab) => (
