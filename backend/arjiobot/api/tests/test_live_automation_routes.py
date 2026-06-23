@@ -354,15 +354,26 @@ def test_per_pair_leverage_overrides_global_max_leverage_end_to_end(monkeypatch)
             "active_strategy_profile": "PROFILE_2",
             "selected_rr_profile": "LEG_TARGET_RESEARCH",
             "risk_amount_per_trade": "10",
-            "max_leverage": "100",
+            "max_leverage": "10",
             "max_daily_loss": "500",
             "max_open_trades": 5,
         }
     )
-    state.monitored_pairs["BTCUSDT"] = {"symbol": "BTCUSDT", "enabled": True, "leverage": 120}
+    state.monitored_pairs["BTCUSDT"] = {"symbol": "BTCUSDT", "enabled": True, "leverage": 15}
     state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
     state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
-    setup = make_entry_ready_setup(latest_price="90")
+    # make_entry_ready_setup's default stop_reference_price=120 (33% from
+    # entry=90) is unrealistically wide for a leveraged trade - the MMR-safe
+    # cap (calculate_max_safe_leverage) would clamp leverage to ~57x for any
+    # stop that wide regardless of which leverage setting "wins", masking
+    # this test's actual subject (per-pair vs global leverage selection). A
+    # realistic stop (entry=90/stop=91, ~1.1%) keeps the MMR-safe cap (57x)
+    # and exchange cap (125x) both comfortably above the per-pair leverage
+    # (15x) being tested, so the per-pair value remains the binding
+    # constraint - global=10x/per-pair=15x are deliberately small enough
+    # that fee+slippage on the resulting position never approaches the $10
+    # fixed risk amount either (unlike e.g. 120x would at this entry price).
+    setup = replace(make_entry_ready_setup(latest_price="90"), stop_reference_price=Decimal("91"))
     state.setups[setup.setup_id] = setup
 
     calls: list[tuple[str, dict[str, object]]] = []
@@ -381,11 +392,11 @@ def test_per_pair_leverage_overrides_global_max_leverage_end_to_end(monkeypatch)
     assert result["status"] == "SUBMITTED"
     leverage_calls = [body for path, body in calls if path == "/api/v2/mix/account/set-leverage"]
     assert len(leverage_calls) == 1
-    assert leverage_calls[0]["leverage"] == "120", "must use the pair-specific leverage, not the global max_leverage=100"
+    assert leverage_calls[0]["leverage"] == "15", "must use the pair-specific leverage, not the global max_leverage=10"
     attempt = result["attempts"][0]
     assert attempt["status"] == "SUBMITTED"
     plan = state.trade_plans[attempt["trade_plan_id"]]
-    assert str(plan.max_allowed_leverage) == "120"
+    assert str(plan.max_allowed_leverage) == "15"
 
 
 def test_live_automation_isolates_one_failing_setup_from_others(monkeypatch) -> None:

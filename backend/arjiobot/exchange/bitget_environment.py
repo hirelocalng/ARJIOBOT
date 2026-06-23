@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Any
 
 from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE, calculate_required_margin
+from arjiobot.risk.risk_validation import calculate_max_safe_leverage
 
 logger = logging.getLogger(__name__)
 
@@ -682,7 +683,65 @@ class BitgetEnvironmentService:
         if candles.get("candles_loaded") != "YES":
             raise EnvironmentLockError("live candles are missing")
         exchange_max = _positive_decimal(contract.get("maxLever") or "1", "maxLever")
-        effective_max_leverage = min(max_leverage, exchange_max)
+        configured_leverage = min(max_leverage, exchange_max)
+        target_mmr = Decimal(str(payload.get("target_mmr") or "0.70"))
+        maintenance_margin_rate = Decimal(str(payload.get("maintenance_margin_rate") or "0.004"))
+        close_fee_rate_for_mmr = Decimal(str(payload.get("close_fee_rate") or "0.0003"))
+        # notional/leverage alone can leave margin too small to cover
+        # maintenance margin once price reaches the stop - liquidation could
+        # fire before the bot's own SL does. max_safe_leverage is the
+        # largest leverage at which MMR still stays below target_mmr the
+        # instant SL is hit (see calculate_max_safe_leverage's docstring);
+        # capping effective_max_leverage to it means the margin Bitget
+        # reserves below (and the leverage actually set on the account at
+        # submission time) is always big enough for that buffer.
+        max_safe_leverage = Decimal(
+            calculate_max_safe_leverage(
+                entry_price=entry_price,
+                sl_price=stop_loss,
+                risk_per_trade=fixed_risk,
+                maintenance_margin_rate=maintenance_margin_rate,
+                close_fee_rate=close_fee_rate_for_mmr,
+                target_mmr=target_mmr,
+            )
+        )
+        effective_max_leverage = max(min(configured_leverage, max_safe_leverage), Decimal("1"))
+        if effective_max_leverage < configured_leverage:
+            logger.warning(
+                "[MMR-SAFE] %s leverage reduced %sx -> %sx | entry=%s sl=%s risk=%s | target_mmr=%s max_safe=%sx",
+                symbol,
+                configured_leverage,
+                effective_max_leverage,
+                entry_price,
+                stop_loss,
+                fixed_risk,
+                target_mmr,
+                max_safe_leverage,
+            )
+        # Always printed, every trade (not just when leverage is actually
+        # reduced) - see calculate_max_safe_leverage's docstring for the
+        # formula. Q/N/MM_stop/M_required are recomputed here (not read off
+        # calculate_max_safe_leverage, which only returns the final int) so
+        # every intermediate value is visible in Railway's log stream for
+        # audit purposes.
+        mmr_sl_distance = abs(entry_price - stop_loss)
+        mmr_quantity = fixed_risk / mmr_sl_distance
+        mmr_notional = mmr_quantity * entry_price
+        mmr_at_stop = mmr_quantity * stop_loss * (maintenance_margin_rate + close_fee_rate_for_mmr)
+        mmr_margin_required = fixed_risk + (mmr_at_stop / target_mmr)
+        logger.info(
+            "[MMR-SAFE] %s %s | Q=%s N=%s MM_stop=%s M_required=%s L_max=%sx configured=%sx final=%sx | MMR@stop=%s%% ✓",
+            symbol,
+            "LONG" if side == "BUY" else "SHORT",
+            _format_decimal(mmr_quantity),
+            _format_decimal(mmr_notional),
+            _format_decimal(mmr_at_stop),
+            _format_decimal(mmr_margin_required),
+            _format_leverage(max_safe_leverage),
+            _format_leverage(configured_leverage),
+            _format_leverage(effective_max_leverage),
+            _format_decimal(target_mmr * Decimal("100")),
+        )
         available_margin_raw = payload.get("available_margin") or payload.get("selected_starting_balance")
         if available_margin_raw in (None, ""):
             available_margin_raw = (self.last_account_payload or {}).get("available_margin")
@@ -992,6 +1051,19 @@ def _positive_decimal(value: object, field_name: str) -> Decimal:
     if parsed <= 0:
         raise EnvironmentLockError(f"{field_name} must be greater than zero")
     return parsed
+
+
+def _format_decimal(value: Decimal) -> str:
+    """2dp display for the [MMR-SAFE] audit log - never used for sizing math."""
+    return str(value.quantize(Decimal("0.01")))
+
+
+def _format_leverage(value: Decimal) -> str:
+    """Whole-number display (e.g. "50") for a leverage multiple in the
+    [MMR-SAFE] audit log when it is a whole number, falling back to the
+    exact value for the rare fractional leverage setting."""
+    integral = value.to_integral_value()
+    return str(integral) if value == integral else str(value)
 
 
 def _is_stale(timestamp: str, seconds: int) -> bool:

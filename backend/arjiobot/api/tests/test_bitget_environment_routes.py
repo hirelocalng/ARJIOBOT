@@ -174,14 +174,17 @@ def test_dry_run_preview_builds_payload_without_submission(monkeypatch) -> None:
     assert preview["sanitized_payload"]["side"] == "sell"
     assert preview["selected_fixed_risk_amount"] == "100"
     assert preview["applied_fixed_risk_amount"] == "100"
-    # entry=100/stop=101 means required_leverage (100) exactly equals
-    # max_leverage (100) here, so margin == risk_amount is a property of this
-    # fixture's numbers, not a general rule - see
-    # test_required_margin_decouples_margin_from_risk_amount for a case where
-    # they differ. expected_loss_at_sl_excluding_fees exactly equals the
-    # configured risk amount now - fees/slippage are additional, not carved
-    # out of it (calculate_required_margin).
-    assert preview["applied_margin_amount"] == "100"
+    # entry=100/stop=101/risk=100 would make required_leverage (100) exactly
+    # equal max_leverage (100) under the old notional/leverage-only sizing -
+    # but the MMR-safe cap (calculate_max_safe_leverage) now caps it to 61x
+    # here (default maintenance_margin_rate/close_fee_rate/target_mmr), so
+    # margin is bigger than the bare risk amount, not equal to it.
+    # expected_loss_at_sl_excluding_fees still exactly equals the configured
+    # risk amount - the MMR-safe cap changes leverage/margin, never position
+    # size (calculate_required_margin's quantity is leverage-independent).
+    assert preview["required_leverage"] == "61"
+    assert preview["effective_max_leverage"] == "61"
+    assert Decimal(preview["applied_margin_amount"]) == Decimal("10000") / Decimal("61")
     assert preview["expected_loss_at_sl_excluding_fees"] == "100.000"
     assert preview["risk_within_limit"] == "YES"
 
@@ -199,15 +202,19 @@ def test_selected_fixed_risk_amounts_drive_sizing_without_old_defaults(monkeypat
 
     assert [item["selected_fixed_risk_amount"] for item in previews] == ["10", "25", "100"]
     assert [item["applied_fixed_risk_amount"] for item in previews] == ["10", "25", "100"]
-    # entry=100/stop=101 means required_leverage (100) exactly equals
-    # max_leverage (100) here, so margin == risk_amount is a property of this
-    # fixture's numbers (see test_dry_run_preview_builds_payload_without_submission).
-    # expected_loss_at_sl_excluding_fees/size scale exactly with risk now -
-    # fees/slippage are additional, not carved out of the configured risk.
-    assert [item["applied_margin_amount"] for item in previews] == ["10", "25", "100"]
+    # entry=100/stop=101 caps required_leverage to 61x here (the MMR-safe cap
+    # - see test_dry_run_preview_builds_payload_without_submission), not the
+    # configured 100x, so margin is notional/61, bigger than the bare risk
+    # amount. L_max is independent of risk_per_trade (Q/N/MM_stop all scale
+    # linearly with it, so the ratio does not), which is exactly why
+    # required_leverage stays 61x for every risk amount below.
+    # expected_loss_at_sl_excluding_fees/size still scale exactly with risk -
+    # fees/slippage are additional, and leverage/margin are decoupled from
+    # position size entirely (calculate_required_margin).
+    assert [Decimal(item["applied_margin_amount"]) for item in previews] == [Decimal("1000") / Decimal("61"), Decimal("2500") / Decimal("61"), Decimal("10000") / Decimal("61")]
     assert [item["expected_loss_at_sl_excluding_fees"] for item in previews] == ["10.000", "25.000", "100.000"]
     assert [item["size"] for item in previews] == ["10.000", "25.000", "100.000"]
-    assert all(item["required_leverage"] == "100" for item in previews)
+    assert all(item["required_leverage"] == "61" for item in previews)
 
 
 def test_buy_and_sell_dry_run_payloads_map_to_bitget_sides(monkeypatch) -> None:
@@ -284,11 +291,16 @@ def test_required_leverage_uses_exchange_cap_not_user_selected_cap(monkeypatch) 
     monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
     monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
 
+    # stop=101.2/101 are both close enough to entry that the MMR-safe cap
+    # (54x/61x respectively) stays looser than the exchange cap (50x), so
+    # the exchange cap remains what actually binds in both cases here - see
+    # test_mmr_safe_cap_overrides_exchange_cap_when_tighter for the case
+    # where the MMR-safe cap itself is the tightest of the three.
     # available_margin covers the position at the exchange-capped leverage (50x) for the wider
     # stop (allowed) but not for the tighter stop (blocked), proving the exchange cap (not the
     # user-selected 100x) is what actually drives the required-margin calculation.
-    allowed_payload = {**_order_with(entry="100", stop="102", max_leverage="100"), "selected_starting_balance": "150"}
-    blocked_payload = {**_order_with(entry="100", stop="101", max_leverage="100"), "selected_starting_balance": "150"}
+    allowed_payload = {**_order_with(entry="100", stop="101.2", max_leverage="100"), "selected_starting_balance": "170"}
+    blocked_payload = {**_order_with(entry="100", stop="101", max_leverage="100"), "selected_starting_balance": "170"}
     allowed = api.post("/api/bitget/orders/dry-run-preview", json=allowed_payload).json()["data"]
     blocked = api.post("/api/bitget/orders/dry-run-preview", json=blocked_payload).json()["data"]
 
@@ -297,6 +309,88 @@ def test_required_leverage_uses_exchange_cap_not_user_selected_cap(monkeypatch) 
     assert allowed["effective_max_leverage"] == "50"
     assert blocked["would_place_order"] == "NO"
     assert blocked["blocked_reason"] == "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN"
+
+
+def test_mmr_safe_cap_overrides_exchange_cap_when_tighter(monkeypatch) -> None:
+    """A stop wide enough relative to entry (here 2%) makes the MMR-safe cap
+    itself the tightest of the three (user-selected/exchange/MMR-safe) -
+    even tighter than the exchange's own 50x cap from
+    test_required_leverage_uses_exchange_cap_not_user_selected_cap."""
+    api = client()
+    api.post("/api/bitget/credentials", json=_credentials())
+    api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
+    service = _service()
+
+    def lower_exchange_contract(symbol: str, product_type="USDT-FUTURES"):
+        contract = _contract(symbol)
+        contract["maxLever"] = "50"
+        return contract
+
+    monkeypatch.setattr(service, "fetch_contract_config", lower_exchange_contract)
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
+    payload = {**_order_with(entry="100", stop="102", max_leverage="100"), "selected_starting_balance": "1000"}
+    preview = api.post("/api/bitget/orders/dry-run-preview", json=payload).json()["data"]
+
+    assert preview["would_place_order"] == "YES"
+    assert preview["selected_max_leverage"] == "100"
+    assert preview["exchange_max_leverage"] == "50"
+    assert preview["effective_max_leverage"] == "38", "the MMR-safe cap (38x), tighter than the exchange cap (50x), must be what actually binds"
+
+
+def test_mmr_safe_cap_does_not_reduce_leverage_already_below_it(monkeypatch, caplog) -> None:
+    """Long where the configured leverage is already under L_max: no
+    reduction happens, and the conditional "[MMR-SAFE] ... reduced" warning
+    must not fire - only the always-printed Task 3 audit line should."""
+    import logging
+
+    api = client()
+    api.post("/api/bitget/credentials", json=_credentials())
+    api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
+    service = _service()
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
+    # entry=100/stop=101/default rates -> MMR-safe cap is 61x (see
+    # test_dry_run_preview_builds_payload_without_submission) - 10x configured
+    # leverage is comfortably under that, so it must pass through unchanged.
+    with caplog.at_level(logging.INFO, logger="arjiobot.exchange.bitget_environment"):
+        preview = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(max_leverage="10")).json()["data"]
+
+    assert preview["would_place_order"] == "YES"
+    assert preview["effective_max_leverage"] == "10"
+    assert not any("leverage reduced" in record.message for record in caplog.records), "no reduction occurred, so the reduction warning must not fire"
+    audit_lines = [record.message for record in caplog.records if "[MMR-SAFE]" in record.message and "leverage reduced" not in record.message]
+    assert len(audit_lines) == 1, "the Task 3 audit line must always print, even when leverage was not reduced"
+    assert "configured=10x" in audit_lines[0]
+    assert "final=10x" in audit_lines[0]
+
+
+def test_mmr_safe_audit_log_line_is_always_printed_with_expected_fields(monkeypatch, caplog) -> None:
+    """[MMR-SAFE] <symbol> <LONG|SHORT> | Q=... N=... MM_stop=... M_required=...
+    L_max=...x configured=...x final=...x | MMR@stop=...% - printed for every
+    trade (not just when leverage is reduced), so every trade is auditable in
+    Railway's log stream."""
+    import logging
+
+    api = client()
+    api.post("/api/bitget/credentials", json=_credentials())
+    api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
+    service = _service()
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
+    with caplog.at_level(logging.INFO, logger="arjiobot.exchange.bitget_environment"):
+        api.post("/api/bitget/orders/dry-run-preview", json=_order_with(side="SELL"))
+
+    audit_lines = [record.message for record in caplog.records if record.message.startswith("[MMR-SAFE] BTCUSDT SHORT")]
+    assert len(audit_lines) == 1
+    line = audit_lines[0]
+    for field in ("Q=", "N=", "MM_stop=", "M_required=", "L_max=61x", "configured=100x", "final=61x", "MMR@stop=70.00%"):
+        assert field in line, f"{field!r} missing from audit log line: {line!r}"
 
 
 def test_moderate_fee_slippage_does_not_shrink_position_size(monkeypatch) -> None:
@@ -406,8 +500,12 @@ def test_place_order_sets_leverage_on_bitget_before_submitting_the_order() -> No
     leverage_call = calls[0]
     assert leverage_call[0] == "POST"
     assert leverage_call[2]["symbol"] == "BTCUSDT"
-    assert leverage_call[2]["leverage"] == order["effective_max_leverage"] == "100"
-    assert order["leverage_set_to"] == "100"
+    # _order()'s entry=100/stop=101/risk=100 caps effective_max_leverage to
+    # 61x via the MMR-safe cap (see test_dry_run_preview_builds_payload_without_submission),
+    # not the configured 100x - what matters here is that whatever that
+    # final leverage is, it is what actually gets set on Bitget.
+    assert leverage_call[2]["leverage"] == order["effective_max_leverage"] == "61"
+    assert order["leverage_set_to"] == "61"
     assert order["leverage_set_response_code"] == "00000"
 
 

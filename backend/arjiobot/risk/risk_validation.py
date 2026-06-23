@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+import logging
+from decimal import ROUND_FLOOR, Decimal
 
+from arjiobot.market_data.candle_models import to_decimal
 from arjiobot.risk.exposure import exposure_after_trade, has_same_symbol_exposure
 from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE, calculate_required_margin
 from arjiobot.risk.loss_limits import daily_loss_capacity_remaining, weekly_loss_capacity_remaining
@@ -11,6 +13,71 @@ from arjiobot.risk.position_sizing import calculate_position_size, calculate_rew
 from arjiobot.risk.rr_profiles import calculate_fixed_risk_trade_math
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, RiskRejectionReason
 from arjiobot.strategy.strategy_models import SignalAction, TradeSignal
+
+logger = logging.getLogger(__name__)
+
+
+def calculate_max_safe_leverage(
+    entry_price,
+    sl_price,
+    risk_per_trade,
+    maintenance_margin_rate=0.004,
+    close_fee_rate=0.0003,
+    target_mmr=0.70,
+) -> int:
+    """Maximum leverage at which MMR stays below target_mmr the instant SL is hit.
+
+    Sizing margin as notional/leverage alone can leave maintenance margin
+    already at or past 100% (liquidation) by the time price reaches the stop
+    - liquidation fires before the bot's own SL does. The fix is margin big
+    enough to absorb the configured risk AND keep maintenance margin under
+    target_mmr at the stop price:
+
+        Q = risk_per_trade / abs(entry_price - sl_price)   # position size from risk
+        N = Q * entry_price                                 # notional value
+        k = maintenance_margin_rate + close_fee_rate
+        MM_stop = Q * sl_price * k                          # maintenance margin at stop price
+        M_required = risk_per_trade + (MM_stop / target_mmr)  # minimum margin needed
+        L_max = N / M_required                              # maximum safe leverage
+
+    Works for both long and short - sl_price is always the stop level,
+    abs(entry_price - sl_price) makes the direction irrelevant.
+
+    Returns int (floor), minimum 1. Never raises - any invalid input (zero/
+    negative price, entry == sl_price, etc.) logs a warning and returns 1,
+    the most conservative possible leverage, rather than propagating an
+    exception into the execution path.
+    """
+    try:
+        entry = to_decimal(entry_price)
+        stop = to_decimal(sl_price)
+        risk = to_decimal(risk_per_trade)
+        k = to_decimal(maintenance_margin_rate) + to_decimal(close_fee_rate)
+        target = to_decimal(target_mmr)
+        sl_distance = abs(entry - stop)
+        if entry <= 0 or stop <= 0 or risk <= 0 or target <= 0 or sl_distance <= 0:
+            raise ValueError("entry_price, sl_price, risk_per_trade, target_mmr must be positive and entry_price must differ from sl_price")
+        quantity = risk / sl_distance
+        notional = quantity * entry
+        mm_at_stop = quantity * stop * k
+        margin_required = risk + (mm_at_stop / target)
+        if margin_required <= 0:
+            raise ValueError("margin_required must be positive")
+        max_leverage = (notional / margin_required).to_integral_value(rounding=ROUND_FLOOR)
+        return max(int(max_leverage), 1)
+    except Exception:
+        logger.warning(
+            "calculate_max_safe_leverage failed for entry_price=%s sl_price=%s risk_per_trade=%s "
+            "maintenance_margin_rate=%s close_fee_rate=%s target_mmr=%s - defaulting to 1x (most conservative)",
+            entry_price,
+            sl_price,
+            risk_per_trade,
+            maintenance_margin_rate,
+            close_fee_rate,
+            target_mmr,
+            exc_info=True,
+        )
+        return 1
 
 
 def validate_signal_risk(
