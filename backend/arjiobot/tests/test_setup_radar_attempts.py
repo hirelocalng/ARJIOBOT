@@ -29,6 +29,7 @@ from arjiobot.live_setup_detection import (
     _suppress_redundant_attempt_trace,
     _trade_key,
     detect_live_setups_for_symbol,
+    purge_stale_completed_setups,
 )
 from arjiobot.market_data.candle_models import Candle, Timeframe
 from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
@@ -115,7 +116,7 @@ def test_entry_ready_setup_from_trade_still_reaches_100_percent() -> None:
         "setup_snapshot": {"expansion": {"expansion_id": "exp16_live"}},
     }
 
-    setup = _setup_from_trade(trade, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
+    setup = _setup_from_trade(trade, state=_fake_state("ADAUSDT", ()), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
 
     assert setup.symbol == "ADAUSDT"
     assert setup.progress_percent == 100.0
@@ -175,6 +176,60 @@ def test_completed_history_is_capped_at_100_independently_of_in_progress() -> No
     assert "swing_done_0" not in remaining_ids
 
 
+def test_purge_stale_completed_setups_removes_only_entries_older_than_24_minutes() -> None:
+    """One-time startup purge: completed_setups entries from before the
+    staleness gate existed (e.g. 5 days old) must be removed; anything still
+    within the 24-minute/2-closed-12M-candle window must be kept untouched."""
+    state = _fake_state("ADAUSDT", ())
+    now = datetime(2026, 6, 23, 12, 0, 0, tzinfo=timezone.utc)
+    old_trade = _setup_from_trade(
+        {
+            "trade_id": "trade_old_1",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": (now - timedelta(days=5)).isoformat(),
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_old",
+            "source_16m_swing_id": "swing_old_1",
+            "source_16m_fvg_id": "fvg16_old",
+        },
+        state=state,
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    fresh_trade = _setup_from_trade(
+        {
+            "trade_id": "trade_fresh_1",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": (now - timedelta(minutes=10)).isoformat(),
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_fresh",
+            "source_16m_swing_id": "swing_fresh_1",
+            "source_16m_fvg_id": "fvg16_fresh",
+        },
+        state=state,
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    state.completed_setups[old_trade.setup_id] = old_trade
+    state.completed_setups[fresh_trade.setup_id] = fresh_trade
+    state.setup_history[old_trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
+    state.setup_history[fresh_trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
+
+    removed = purge_stale_completed_setups(state, now=now)
+
+    assert removed == (old_trade.setup_id,)
+    assert old_trade.setup_id not in state.completed_setups
+    assert old_trade.setup_id not in state.setup_history
+    assert fresh_trade.setup_id in state.completed_setups, "a completed setup still within the staleness window must not be purged"
+    assert fresh_trade.setup_id in state.setup_history
+
+
 def test_in_progress_pool_has_no_cap() -> None:
     """IN PROGRESS is explicitly uncapped per the Setup Radar spec - unlike
     invalidated/completed, it must hold every currently-active attempt with
@@ -206,7 +261,7 @@ def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
         "source_16m_swing_id": "swing16_pending",
         "source_16m_fvg_id": "fvg16_pending",
     }
-    pending = _setup_from_trade(pending_trade, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
+    pending = _setup_from_trade(pending_trade, state=state, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
     state.setups[pending.setup_id] = pending
 
     traces = tuple(_swing_trace(f"swing_flood_{i}", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True) for i in range(105))
@@ -389,6 +444,7 @@ def test_stale_skip_is_surfaced_on_the_matching_completed_setup_in_setup_radar()
             "source_16m_swing_id": "swing_completed_1",
             "source_16m_fvg_id": "fvg16_completed",
         },
+        state=state,
         profile_id="PROFILE_2",
         timeframe_profile_id="DEFAULT_16_12_8",
     )
@@ -421,6 +477,7 @@ def test_stale_skip_is_surfaced_on_the_matching_completed_setup_in_setup_radar()
             "source_16m_swing_id": "swing_unrelated",
             "source_16m_fvg_id": "fvg16_unrelated",
         },
+        state=state,
         profile_id="PROFILE_2",
         timeframe_profile_id="DEFAULT_16_12_8",
     )
@@ -555,12 +612,45 @@ def test_suppress_redundant_attempt_trace_never_removes_the_real_trade_row_itsel
         "source_16m_swing_id": "swing_shared_real",
         "source_16m_fvg_id": "fvg16_real",
     }
-    real_setup = _setup_from_trade(trade, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
+    real_setup = _setup_from_trade(trade, state=state, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
     state.completed_setups[real_setup.setup_id] = real_setup
 
     _suppress_redundant_attempt_trace(state, "swing_shared_real")
 
     assert real_setup.setup_id in state.completed_setups
+
+
+def test_real_entry_ready_setup_takes_over_the_attempt_tracers_setup_id() -> None:
+    """The real setup must keep the exact setup_id (and created_at) it was
+    already tracked under in IN_PROGRESS as an attempt-tracer row - a true
+    identity hand-off, not a different id that requires the old row to be
+    separately deleted (_suppress_redundant_attempt_trace is now only a
+    defensive backstop, not how this is normally resolved)."""
+    state = _fake_state("ADAUSDT", ())
+    swing_id = "swing_handoff_1"
+    in_progress_trace = _swing_trace(swing_id, stage="FVG_8M_CONFIRMED", progress_percent=80.0)
+    _apply_attempt_traces(state, "ADAUSDT", (in_progress_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    [tracked] = state.setups.values()
+    assert tracked.current_state is SetupState.FVG_8M_CONFIRMED
+
+    trade = {
+        "trade_id": "trade_handoff_1",
+        "symbol": "ADAUSDT",
+        "direction": "BEARISH",
+        "entry_timestamp": "2026-06-16T01:30:00+00:00",
+        "entry_price": "100",
+        "stop_loss": "120",
+        "take_profit": "80",
+        "source_12m_fvg_id": "fvg12_handoff",
+        "source_16m_swing_id": swing_id,
+        "source_16m_fvg_id": "fvg16_handoff",
+    }
+    real_setup = _setup_from_trade(trade, state=state, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
+
+    assert real_setup.setup_id == tracked.setup_id, "the real setup must keep the same setup_id the swing was tracked under in IN_PROGRESS"
+    assert real_setup.created_at == tracked.created_at, "created_at must still reflect when the setup was first detected, not the entry-tap time"
+    assert real_setup.current_state is SetupState.ENTRY_READY
+    assert real_setup.status is SetupStatus.ENTRY_READY
 
 
 def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing() -> None:
@@ -726,6 +816,7 @@ def test_only_entry_ready_setup_allowed_into_execution_flow_not_in_progress_or_i
             "source_16m_swing_id": "swing16_eligibility",
             "source_16m_fvg_id": "fvg16_eligibility",
         },
+        state=state,
         profile_id="PROFILE_2",
         timeframe_profile_id="DEFAULT_16_12_8",
     )

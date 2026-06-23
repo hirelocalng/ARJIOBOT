@@ -51,7 +51,7 @@ def test_direct_12m_retrace_live_trade_candidate_becomes_valid_signal() -> None:
         "setup_snapshot": {"expansion": {"expansion_id": "exp16_live"}},
     }
 
-    setup = _setup_from_trade(trade, profile_id="PROFILE_2", timeframe_profile_id="PROFILE_15_10_5")
+    setup = _setup_from_trade(trade, state=_fake_state("BTCUSDT", ()), profile_id="PROFILE_2", timeframe_profile_id="PROFILE_15_10_5")
     signal = StrategyEngine().generate_signal_from_setup(setup)
 
     assert setup.metadata["entry_model"] == "DIRECT_12M_RETRACE"

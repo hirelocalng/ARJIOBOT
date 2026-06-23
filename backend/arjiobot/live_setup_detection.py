@@ -42,6 +42,14 @@ _RUNNER: ModuleType | None = None
 
 MAX_TRACKED_SETUP_ATTEMPTS = 100
 
+# Mirrors live_automation.py's STALE_ENTRY_READY_MAX_AGE (2 closed 12M
+# candles) - kept as its own constant here, not imported from
+# live_automation.py, so this one-time purge can never accidentally change
+# what the execution-time staleness gate itself does; it only prunes Setup
+# Radar's COMPLETED display/history store of entries from before that gate
+# existed.
+COMPLETED_SETUP_PURGE_MAX_AGE = timedelta(minutes=24)
+
 # A stale skip whose detection happens within this many seconds of the
 # current monitoring session's started_at is classified as catching up on a
 # backlog from before this session started (a restart/outage), rather than a
@@ -231,23 +239,32 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
 
             setup = _setup_from_trade(
                 fresh,
+                state=state,
                 profile_id=profile.profile_id,
                 timeframe_profile_id=timeframe_profile.profile_id,
                 selected_tp_model=selected_tp_model,
                 time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
             )
-            _suppress_redundant_attempt_trace(state, setup.swing_16m_id)
-            if setup.setup_id not in state.setups:
-                state.setups[setup.setup_id] = setup
-                state.setup_history[setup.setup_id] = [
-                    {
-                        "from_state": None,
-                        "to_state": SetupState.ENTRY_READY.value,
-                        "changed_at": setup.updated_at.isoformat(),
-                        "reason": "live profile evaluator created entry-ready setup",
-                        "source": source,
-                    }
-                ]
+            # setup.setup_id may already be tracked - the attempt-tracer's row
+            # for this exact swing (see _find_tracked_setup_by_swing) - so
+            # remove it from whichever store currently holds it before
+            # inserting the final ENTRY_READY object under that same id. The
+            # real setup takes over its own tracked identity instead of
+            # appearing as a second, separate row next to it.
+            state.setups.pop(setup.setup_id, None)
+            state.invalidated_setups.pop(setup.setup_id, None)
+            state.completed_setups.pop(setup.setup_id, None)
+            _suppress_redundant_attempt_trace(state, setup.swing_16m_id)  # defensive backstop; normally a no-op now
+            state.setups[setup.setup_id] = setup
+            state.setup_history.setdefault(setup.setup_id, []).append(
+                {
+                    "from_state": None,
+                    "to_state": SetupState.ENTRY_READY.value,
+                    "changed_at": setup.updated_at.isoformat(),
+                    "reason": "live profile evaluator created entry-ready setup",
+                    "source": source,
+                }
+            )
             detector_state.setdefault("processed_trade_keys", []).append(_trade_key(fresh))
             del detector_state["processed_trade_keys"][:-200]
             detector_state["created_setup_count"] = int(detector_state.get("created_setup_count") or 0) + 1
@@ -293,15 +310,45 @@ def candles_from_bitget_rows(symbol: str, rows: tuple[tuple[str, ...], ...]) -> 
     return order_historical_candles(candles)
 
 
-def _setup_from_trade(trade: dict[str, object], *, profile_id: str, timeframe_profile_id: str, selected_tp_model: str = "", time_exit_minutes: str = "") -> Setup:
+def _find_tracked_setup_by_swing(state: Any, swing_16m_id: str) -> Any | None:
+    """Look up the attempt-tracer's row for this swing (see
+    _apply_one_attempt_trace), wherever it currently lives, so
+    _setup_from_trade can take over that exact object's setup_id instead of
+    minting a new one - the real setup keeps the same identity it had
+    throughout Setup Radar's IN_PROGRESS tracking, rather than appearing as a
+    separate row that the old/now-backstop _suppress_redundant_attempt_trace
+    had to delete.
+
+    Only ever matches a tracer-sourced row (source != LIVE_PROFILE_EVALUATOR)
+    - a row already belonging to a real trade must never be reused/
+    overwritten here; _fresh_trade_candidate's processed_trade_keys already
+    prevents the same real trade from reaching _setup_from_trade twice.
+    """
+    if not swing_16m_id:
+        return None
+    for store in (state.setups, state.completed_setups, state.invalidated_setups):
+        for setup in store.values():
+            if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
+                return setup
+    return None
+
+
+def _setup_from_trade(trade: dict[str, object], *, state: Any, profile_id: str, timeframe_profile_id: str, selected_tp_model: str = "", time_exit_minutes: str = "") -> Setup:
     entry_time = datetime.fromisoformat(str(trade["entry_timestamp"]).replace("Z", "+00:00"))
     direction = SetupDirection.BEARISH if str(trade.get("direction", "BEARISH")).upper() == "BEARISH" else SetupDirection.BULLISH
-    setup_id = build_setup_id(
-        symbol=str(trade["symbol"]),
-        direction=direction,
-        created_at=entry_time,
-        htf_fvg_id=str(trade.get("source_16m_fvg_id") or trade.get("source_12m_fvg_id") or ""),
-    )
+    swing_16m_id = str(trade.get("source_16m_swing_id") or "")
+    tracked = _find_tracked_setup_by_swing(state, swing_16m_id)
+    if tracked is not None:
+        setup_id = tracked.setup_id
+        created_at = tracked.created_at
+    else:
+        setup_id = build_setup_id(
+            symbol=str(trade["symbol"]),
+            direction=direction,
+            created_at=entry_time,
+            htf_fvg_id=str(trade.get("source_16m_fvg_id") or trade.get("source_12m_fvg_id") or ""),
+        )
+        created_at = entry_time
     snapshot = trade.get("setup_snapshot") if isinstance(trade.get("setup_snapshot"), dict) else {}
     expansion = snapshot.get("expansion") if isinstance(snapshot.get("expansion"), dict) else {}
     return Setup(
@@ -311,11 +358,11 @@ def _setup_from_trade(trade: dict[str, object], *, profile_id: str, timeframe_pr
         current_state=SetupState.ENTRY_READY,
         progress_percent=100.0,
         status=SetupStatus.ENTRY_READY,
-        created_at=entry_time,
+        created_at=created_at,
         updated_at=entry_time,
         completed_at=entry_time,
         htf_fvg_id=str(trade.get("source_16m_fvg_id") or trade.get("source_12m_fvg_id") or ""),
-        swing_16m_id=str(trade.get("source_16m_swing_id") or ""),
+        swing_16m_id=swing_16m_id,
         expansion_16m_id=str(expansion.get("expansion_id") or "verified_by_live_profile_evaluator"),
         fvg_16m_id=str(trade.get("source_16m_fvg_id") or ""),
         fvg_12m_id=str(trade.get("source_12m_fvg_id") or trade.get("12m_fvg_id") or ""),
@@ -337,8 +384,10 @@ def _setup_from_trade(trade: dict[str, object], *, profile_id: str, timeframe_pr
             "live_trade_key": _trade_key(trade),
             "source": "LIVE_PROFILE_EVALUATOR",
             # Wall-clock moment this ENTRY_READY setup was created - NOT
-            # entry_time/created_at above, which is the trade's own entry
-            # candle timestamp. live_automation.py's _process_setup logs the
+            # entry_time/updated_at above (the trade's own entry candle
+            # timestamp), and not created_at above either (the swing's
+            # original detection timestamp when a tracked row exists for it -
+            # see _find_tracked_setup_by_swing). live_automation.py's _process_setup logs the
             # real elapsed time between this and when it starts processing
             # the setup, to make the "detection and execution already run in
             # the same poll cycle" claim verifiable from real logs rather
@@ -552,6 +601,43 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     state.setups.pop(setup.setup_id, None)
     state.completed_setups[setup.setup_id] = setup
     _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
+
+
+def purge_stale_completed_setups(state: Any, *, now: datetime | None = None) -> tuple[str, ...]:
+    """One-time startup purge of completed_setups entries older than
+    COMPLETED_SETUP_PURGE_MAX_AGE (the same 24-minute/2-closed-12M-candle
+    window the execution-time staleness gate in live_automation.py uses).
+
+    completed_setups is Setup Radar's COMPLETED display/history store only -
+    it is never read by run_live_automation_once's ENTRY_READY filter, by
+    _real_time_open_positions (which queries Bitget directly for open
+    position counts), or by the staleness gate itself (_expire_if_stale only
+    ever evaluates state.setups). Purging it changes nothing about which
+    setups are eligible to execute; it only clears old display rows that
+    predate the staleness gate's introduction, so Setup Radar's COMPLETED tab
+    does not keep showing days-old rows indefinitely.
+
+    Returns the setup_ids removed, for logging/verification.
+    """
+    cutoff = (now or datetime.now(timezone.utc)) - COMPLETED_SETUP_PURGE_MAX_AGE
+    stale_ids = tuple(
+        setup_id
+        for setup_id, setup in state.completed_setups.items()
+        if (setup.completed_at or setup.updated_at) < cutoff
+    )
+    for setup_id in stale_ids:
+        state.completed_setups.pop(setup_id, None)
+        state.setup_history.pop(setup_id, None)
+    if stale_ids:
+        logger.warning(
+            "Startup purge: removed %d stale completed setup(s) (older than %s) from Setup Radar's COMPLETED store: %s",
+            len(stale_ids),
+            COMPLETED_SETUP_PURGE_MAX_AGE,
+            ", ".join(stale_ids),
+        )
+    else:
+        logger.info("Startup purge: no completed setups older than %s found - nothing to remove.", COMPLETED_SETUP_PURGE_MAX_AGE)
+    return stale_ids
 
 
 def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:

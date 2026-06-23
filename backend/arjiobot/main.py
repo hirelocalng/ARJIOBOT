@@ -10,6 +10,7 @@ from arjiobot.api.auth import require_dashboard_auth
 from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.api.routes.monitoring import resume_monitoring_if_enabled
+from arjiobot.live_setup_detection import purge_stale_completed_setups
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
 
 
@@ -42,4 +43,9 @@ def create_app() -> FastAPI:
         app.include_router(router)
     bootstrap_live_trading_from_env(get_state())
     resume_monitoring_if_enabled(get_state())
+    # One-time purge of completed_setups entries that predate the
+    # live_automation.py staleness gate - display/history cleanup only, see
+    # purge_stale_completed_setups's docstring for why this cannot affect
+    # which setups are eligible to execute.
+    purge_stale_completed_setups(get_state())
     return app
