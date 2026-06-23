@@ -10,8 +10,11 @@ from arjiobot.api.auth import require_dashboard_auth
 from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.api.routes.monitoring import resume_monitoring_if_enabled
-from arjiobot.live_setup_detection import clear_completed_and_invalidated_setups_on_startup
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
+from arjiobot.setup_tracker.setup_history_store import (
+    load_setup_history_store,
+    run_one_time_completed_invalidated_reset_migration,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -43,10 +46,12 @@ def create_app() -> FastAPI:
         app.include_router(router)
     bootstrap_live_trading_from_env(get_state())
     resume_monitoring_if_enabled(get_state())
-    # One-time startup reset: COMPLETED/INVALIDATED start at 0 on every
-    # deploy/restart and only ever show setups that resolve afterward - see
-    # clear_completed_and_invalidated_setups_on_startup's docstring for why
-    # this cannot affect which setups are eligible to execute (IN PROGRESS,
-    # state.setups, is never touched).
-    clear_completed_and_invalidated_setups_on_startup(get_state())
+    # Exactly once (tracked by a marker file, not repeated on every restart):
+    # wipe any existing completed/invalidated setup history so both tabs
+    # start at 0 on the deploy that introduces this persistence layer. Every
+    # later restart instead loads whatever has genuinely accumulated since
+    # then - see setup_history_store.py's module docstring. IN PROGRESS
+    # (state.setups) is never touched by either step.
+    run_one_time_completed_invalidated_reset_migration(get_state())
+    load_setup_history_store(get_state())
     return app

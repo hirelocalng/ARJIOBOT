@@ -22,6 +22,7 @@ from arjiobot.backtesting.research_profiles import get_profile
 from arjiobot.backtesting.timeframe_profiles import get_timeframe_profile
 from arjiobot.fvg.fvg import FVGDetectionEngine
 from arjiobot.market_data.candle_models import Candle, CandleStatus, Timeframe
+from arjiobot.setup_tracker.setup_history_store import save_setup_history_store
 from arjiobot.setup_tracker.setup_models import (
     InvalidationReason,
     Setup,
@@ -699,9 +700,11 @@ def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status:
     if is_invalidated:
         state.invalidated_setups[setup.setup_id] = setup
         _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
+        save_setup_history_store(state)
     elif target_status is SetupStatus.COMPLETED:
         state.completed_setups[setup.setup_id] = setup
         _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
+        save_setup_history_store(state)
     else:
         state.setups[setup.setup_id] = setup
 
@@ -717,44 +720,7 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     state.setups.pop(setup.setup_id, None)
     state.completed_setups[setup.setup_id] = setup
     _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
-
-
-def clear_completed_and_invalidated_setups_on_startup(state: Any) -> tuple[int, int]:
-    """One-time startup reset: clear completed_setups and invalidated_setups
-    entirely, regardless of age, so Setup Radar's COMPLETED/INVALIDATED tabs
-    start at 0 on every deploy/restart and only ever show setups that
-    resolved after that point - no carried-over history. The 100-cap
-    eviction (_evict_oldest) is unaffected and remains the only thing that
-    removes entries once new ones accumulate past 100 going forward.
-
-    state.setups (IN PROGRESS) is never touched here - it already only ever
-    reflects currently-active setups, with nothing historical to clear.
-
-    completed_setups/invalidated_setups are purely in-memory with no disk
-    persistence, so a freshly started process already has both empty before
-    this ever runs - this function exists to make that guarantee explicit,
-    observable (logged), and correct even if persistence is ever added later.
-
-    Returns (completed_count, invalidated_count) cleared, for logging/
-    verification.
-    """
-    completed_count = len(state.completed_setups)
-    invalidated_count = len(state.invalidated_setups)
-    for setup_id in list(state.completed_setups):
-        state.completed_setups.pop(setup_id, None)
-        state.setup_history.pop(setup_id, None)
-    for setup_id in list(state.invalidated_setups):
-        state.invalidated_setups.pop(setup_id, None)
-        state.setup_history.pop(setup_id, None)
-    if completed_count or invalidated_count:
-        logger.warning(
-            "Startup reset: cleared %d completed setup(s) and %d invalidated setup(s) - COMPLETED/INVALIDATED tabs start at 0 from this deploy forward.",
-            completed_count,
-            invalidated_count,
-        )
-    else:
-        logger.info("Startup reset: completed_setups/invalidated_setups already empty - nothing to clear.")
-    return completed_count, invalidated_count
+    save_setup_history_store(state)
 
 
 def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
@@ -780,6 +746,7 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
     state.setups.pop(setup.setup_id, None)
     state.invalidated_setups[setup.setup_id] = expired
     _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
+    save_setup_history_store(state)
     return expired
 
 
