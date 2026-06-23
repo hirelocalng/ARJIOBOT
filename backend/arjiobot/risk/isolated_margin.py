@@ -160,15 +160,21 @@ def calculate_required_margin(
     fee_rate=DEFAULT_FEE_RATE,
     slippage_rate=DEFAULT_SLIPPAGE_BUFFER_RATE,
 ) -> RequiredMarginPlan:
-    """Size an isolated-margin position so SL loss PLUS round-trip fees and
-    a slippage buffer TOGETHER equal fixed_sl_loss - not just the SL-distance
-    loss alone - then derive the margin required to open it at the pair's
-    max leverage.
+    """Size an isolated-margin position so the SL-DISTANCE dollar loss alone
+    exactly equals fixed_sl_loss - fixed_sl_loss is the dollar loss at the
+    stop loss, never the margin to post and never a budget shared with fees/
+    slippage (those are two completely different things).
 
-    Position size (and therefore the real worst-case dollar loss, inclusive
-    of fees/slippage) is fixed and independent of leverage/margin. Margin is
-    calculated dynamically as required_notional / max_leverage and compared
-    against available_margin; it is no longer forced to equal the risk amount.
+    position_size = fixed_sl_loss / sl_distance   (sl_distance = |entry-stop|)
+    notional_value = position_size * entry_price
+    required_margin = notional_value / max_leverage
+
+    fee_rate/slippage_rate are NOT subtracted from fixed_sl_loss here - they
+    are real additional costs layered on top of the configured SL-distance
+    risk (estimated_fee, estimated_slippage, total_worst_case_loss below),
+    not a second claim on the same dollar budget. Margin is calculated
+    dynamically as required_notional / max_leverage and compared against
+    available_margin; it is not forced to equal the risk amount.
     """
     entry = to_decimal(entry_price)
     stop = to_decimal(stop_loss)
@@ -187,24 +193,19 @@ def calculate_required_margin(
         raise ValueError("max_leverage must be at least 1")
     if fee_rate < Decimal("0") or slippage_rate < Decimal("0"):
         raise ValueError("fee_rate and slippage_rate must not be negative")
-    stop_distance_percent = abs(entry - stop) / entry
-    if stop_distance_percent <= Decimal("0"):
-        raise ValueError("stop_distance_percent must be greater than zero")
+    sl_distance = abs(entry - stop)
+    if sl_distance <= Decimal("0"):
+        raise ValueError("sl_distance must be greater than zero")
+    stop_distance_percent = sl_distance / entry
 
-    # cost_rate folds the round-trip fee and slippage buffer into the same
-    # rate the SL distance already uses, so sizing down for them is just one
-    # extra term - notional, quantity, and margin all shrink together,
-    # rather than computing the SL-only size first and only checking fees
-    # afterward.
-    cost_rate = stop_distance_percent + fee_rate + slippage_rate
-    required_notional = _without_exponent(fixed_loss / cost_rate)
-    quantity = _without_exponent(required_notional / entry)
-    expected_loss = _without_exponent(abs(entry - stop) * quantity)
+    quantity = _without_exponent(fixed_loss / sl_distance)
+    required_notional = _without_exponent(quantity * entry)
+    expected_loss = _without_exponent(sl_distance * quantity)
     estimated_fee = _without_exponent(required_notional * fee_rate)
     estimated_slippage = _without_exponent(required_notional * slippage_rate)
     total_worst_case_loss = expected_loss + estimated_fee + estimated_slippage
-    if abs(total_worst_case_loss - fixed_loss) > max(LOSS_TOLERANCE, fixed_loss * Decimal("0.000001")):
-        raise ValueError("expected_loss_at_sl (including fees and slippage) does not match fixed_sl_loss")
+    if abs(expected_loss - fixed_loss) > max(LOSS_TOLERANCE, fixed_loss * Decimal("0.000001")):
+        raise ValueError("expected_loss_at_sl does not match fixed_sl_loss")
 
     required_margin = _without_exponent(required_notional / max_lev)
     can_execute = required_margin <= available

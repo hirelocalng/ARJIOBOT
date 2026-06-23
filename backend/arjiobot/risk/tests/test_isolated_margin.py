@@ -81,11 +81,14 @@ def test_required_margin_decouples_margin_from_risk_amount() -> None:
     assert plan.margin_amount == Decimal("25")
 
 
-def test_fee_and_slippage_buffer_reduce_position_size_so_total_loss_matches_fixed_risk() -> None:
-    """The actual fix for the $2.35-loss-on-$2-risk bug: with realistic fee
-    and slippage rates, the position is sized down up front so SL-distance
-    loss + fees + slippage TOGETHER equal fixed_sl_loss, not the SL-distance
-    loss alone with fees stacked uncounted on top."""
+def test_fixed_sl_loss_is_the_dollar_loss_at_stop_not_a_budget_shared_with_fees() -> None:
+    """fixed_sl_loss is the dollar loss AT THE STOP LOSS, never the margin to
+    post and never a budget shared with fees/slippage - those are completely
+    different things. expected_loss_at_sl must exactly equal fixed_sl_loss
+    regardless of fee_rate/slippage_rate; fees/slippage are a real,
+    additional cost layered on top (total_worst_case_loss), not carved out
+    of the configured risk amount (which is what previously made a $2 risk
+    setting produce only a ~$1.69 real loss at stop loss)."""
     plan = calculate_required_margin(
         fixed_sl_loss=Decimal("2"),
         entry_price=Decimal("100"),
@@ -96,10 +99,30 @@ def test_fee_and_slippage_buffer_reduce_position_size_so_total_loss_matches_fixe
         slippage_rate=Decimal("0.002"),
     )
 
-    assert plan.expected_loss_at_sl < Decimal("2"), "SL-only loss must be less than the full budget once fees/slippage are reserved"
+    assert plan.expected_loss_at_sl == Decimal("2"), "the SL-distance dollar loss must exactly equal the configured fixed_sl_loss"
     assert plan.estimated_fee > Decimal("0")
     assert plan.estimated_slippage > Decimal("0")
-    assert abs(plan.total_worst_case_loss - Decimal("2")) < Decimal("0.0001"), "total realized loss must still target the configured fixed_risk_amount"
+    assert plan.total_worst_case_loss > Decimal("2"), "fees/slippage are additional on top of the exact SL-distance loss, not absorbed into it"
+
+
+def test_worked_example_2_dollar_risk_at_75x_leverage_produces_500_apt() -> None:
+    """The exact worked example from the bug report: $2 risk, entry 0.6640,
+    stop 0.6680 (short), 75x leverage -> ~500 APT, ~$332 notional, ~$4.43
+    margin, and critically an exact $2.00 loss at stop loss."""
+    plan = calculate_required_margin(
+        fixed_sl_loss=Decimal("2.00"),
+        entry_price=Decimal("0.6640"),
+        stop_loss=Decimal("0.6680"),
+        max_leverage=Decimal("75"),
+        available_margin=Decimal("1000"),
+        fee_rate=Decimal("0.0006"),
+        slippage_rate=Decimal("0.0005"),
+    )
+
+    assert plan.quantity == Decimal("500")
+    assert plan.notional_position_size == Decimal("332.0000")
+    assert abs(plan.margin_amount - Decimal("4.43")) < Decimal("0.01")
+    assert plan.expected_loss_at_sl == Decimal("2.0000"), "a $2 risk setting must produce exactly a $2 loss at stop loss"
 
 
 def test_zero_fee_and_slippage_reproduces_old_sl_only_behavior() -> None:

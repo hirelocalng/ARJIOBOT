@@ -174,12 +174,15 @@ def test_dry_run_preview_builds_payload_without_submission(monkeypatch) -> None:
     assert preview["sanitized_payload"]["side"] == "sell"
     assert preview["selected_fixed_risk_amount"] == "100"
     assert preview["applied_fixed_risk_amount"] == "100"
-    # Smaller than 100 now: position size is reduced up front to reserve
-    # room for the default real fee/slippage rates (DEFAULT_FEE_RATE/
-    # DEFAULT_SLIPPAGE_BUFFER_RATE), so SL-distance loss + fees + slippage
-    # together still total the fixed risk amount, not SL-distance alone.
-    assert preview["applied_margin_amount"] == "75.75757575757575757575757576"
-    assert preview["expected_loss_at_sl_excluding_fees"] == "75.757"
+    # entry=100/stop=101 means required_leverage (100) exactly equals
+    # max_leverage (100) here, so margin == risk_amount is a property of this
+    # fixture's numbers, not a general rule - see
+    # test_required_margin_decouples_margin_from_risk_amount for a case where
+    # they differ. expected_loss_at_sl_excluding_fees exactly equals the
+    # configured risk amount now - fees/slippage are additional, not carved
+    # out of it (calculate_required_margin).
+    assert preview["applied_margin_amount"] == "100"
+    assert preview["expected_loss_at_sl_excluding_fees"] == "100.000"
     assert preview["risk_within_limit"] == "YES"
 
 
@@ -196,16 +199,14 @@ def test_selected_fixed_risk_amounts_drive_sizing_without_old_defaults(monkeypat
 
     assert [item["selected_fixed_risk_amount"] for item in previews] == ["10", "25", "100"]
     assert [item["applied_fixed_risk_amount"] for item in previews] == ["10", "25", "100"]
-    # Each is smaller than its risk amount now (still scales linearly with
-    # it) - sized down to reserve room for the default fee/slippage rates,
-    # same reasoning as test_dry_run_preview_builds_payload_without_submission.
-    assert [item["applied_margin_amount"] for item in previews] == [
-        "7.575757575757575757575757576",
-        "18.93939393939393939393939394",
-        "75.75757575757575757575757576",
-    ]
-    assert [item["expected_loss_at_sl_excluding_fees"] for item in previews] == ["7.575", "18.939", "75.757"]
-    assert [item["size"] for item in previews] == ["7.575", "18.939", "75.757"]
+    # entry=100/stop=101 means required_leverage (100) exactly equals
+    # max_leverage (100) here, so margin == risk_amount is a property of this
+    # fixture's numbers (see test_dry_run_preview_builds_payload_without_submission).
+    # expected_loss_at_sl_excluding_fees/size scale exactly with risk now -
+    # fees/slippage are additional, not carved out of the configured risk.
+    assert [item["applied_margin_amount"] for item in previews] == ["10", "25", "100"]
+    assert [item["expected_loss_at_sl_excluding_fees"] for item in previews] == ["10.000", "25.000", "100.000"]
+    assert [item["size"] for item in previews] == ["10.000", "25.000", "100.000"]
     assert all(item["required_leverage"] == "100" for item in previews)
 
 
@@ -298,13 +299,12 @@ def test_required_leverage_uses_exchange_cap_not_user_selected_cap(monkeypatch) 
     assert blocked["blocked_reason"] == "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN"
 
 
-def test_fee_slippage_buffer_shrinks_size_instead_of_blocking(monkeypatch) -> None:
-    """A high fee_rate/slippage_rate used to inflate estimated_total_worst_
-    case_loss past the SL-only position size and block the trade. Now
-    calculate_required_margin sizes the position down for whatever rate it's
-    given before this check ever runs, so the same high rates that used to
-    block the trade now just produce a smaller, correctly-budgeted one -
-    that's the actual fix for the $2.35-loss-on-$2-risk bug."""
+def test_moderate_fee_slippage_does_not_shrink_position_size(monkeypatch) -> None:
+    """fixed_sl_loss sizes the position from the SL distance alone now -
+    fee_rate/slippage_rate no longer shrink it (that was the bug: a $2 risk
+    setting only producing a real ~$1.69 loss at stop loss). A realistic
+    fee/slippage rate must produce the exact same size as zero fee/slippage,
+    with fees/slippage only adding an informational cost on top."""
     api = client()
     api.post("/api/bitget/credentials", json=_credentials())
     api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
@@ -313,16 +313,37 @@ def test_fee_slippage_buffer_shrinks_size_instead_of_blocking(monkeypatch) -> No
     monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
     monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
 
-    baseline = api.post("/api/bitget/orders/dry-run-preview", json=_order_with(risk="10")).json()["data"]
+    baseline = api.post("/api/bitget/orders/dry-run-preview", json={**_order_with(risk="10"), "fee_rate": "0", "slippage_rate": "0"}).json()["data"]
+    moderate_cost = api.post("/api/bitget/orders/dry-run-preview", json={**_order_with(risk="10"), "fee_rate": "0.001", "slippage_rate": "0.001"}).json()["data"]
+
+    assert moderate_cost["would_place_order"] == "YES"
+    assert moderate_cost["risk_within_limit"] == "YES"
+    assert moderate_cost["size"] == baseline["size"], "fee_rate/slippage_rate must not change position size"
+    assert moderate_cost["applied_margin_amount"] == baseline["applied_margin_amount"]
+    assert moderate_cost["expected_loss_at_sl_excluding_fees"] == "10.000"
+    assert Decimal(moderate_cost["estimated_fee"]) > Decimal("0")
+    assert Decimal(moderate_cost["estimated_slippage_buffer"]) > Decimal("0")
+    assert Decimal(moderate_cost["estimated_total_worst_case_loss"]) > Decimal("10"), "fees/slippage are additional on top of the exact SL-distance loss"
+
+
+def test_extreme_fee_slippage_is_blocked_as_a_sanity_check(monkeypatch) -> None:
+    """An unreasonably large fee_rate/slippage_rate (here 2% each - far above
+    any real exchange's fees) would mean the real cost on top of the
+    configured risk balloons past the risk amount itself - still blocked, as
+    a sanity guard against a misconfigured rate, not by shrinking the
+    position to silently absorb it."""
+    api = client()
+    api.post("/api/bitget/credentials", json=_credentials())
+    api.post("/api/bitget/mode", json={"mode": "DRY_RUN_PREVIEW"})
+    service = _service()
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+
     high_cost = api.post("/api/bitget/orders/dry-run-preview", json={**_order_with(risk="10"), "fee_rate": "0.02", "slippage_rate": "0.02"}).json()["data"]
 
-    assert high_cost["would_place_order"] == "YES"
-    assert high_cost["risk_within_limit"] == "YES"
-    assert Decimal(high_cost["size"]) < Decimal(baseline["size"]), "higher fee/slippage must size the position smaller, not just pass through unchanged"
-    assert high_cost["applied_margin_amount"] == "2"
-    assert high_cost["estimated_fee"] == "4.00000"
-    assert high_cost["estimated_slippage_buffer"] == "4.00000"
-    assert high_cost["estimated_total_worst_case_loss"] == "10.00000"
+    assert high_cost["would_place_order"] == "NO"
+    assert high_cost["blocked_reason"] == "ESTIMATED_FEE_AND_SLIPPAGE_EXCEED_FIXED_RISK_AMOUNT"
 
 
 def test_live_order_blocked_without_recent_dry_run_and_confirmation() -> None:

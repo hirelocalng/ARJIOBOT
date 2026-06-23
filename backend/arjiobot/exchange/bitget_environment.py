@@ -714,7 +714,13 @@ class BitgetEnvironmentService:
         estimated_fee = notional * fee_rate
         estimated_slippage_buffer = notional * slippage_rate
         estimated_total_worst_case_loss = expected_loss + estimated_fee + estimated_slippage_buffer
-        if abs(estimated_total_worst_case_loss - fixed_risk) > max(Decimal("1"), fixed_risk * Decimal("0.03")):
+        # expected_loss (the SL-distance-only loss) is what fixed_risk means -
+        # see calculate_required_margin's docstring - so it, not the total
+        # including fees/slippage, is what must match fixed_risk here.
+        # Exchange lot-size rounding (_round_size always rounds DOWN) can only
+        # ever make the realized size - and therefore expected_loss - smaller
+        # than the theoretical exact sizing, never larger.
+        if abs(expected_loss - fixed_risk) > max(Decimal("1"), fixed_risk * Decimal("0.03")):
             raise EnvironmentLockError("RISK_SIZE_ROUNDING_MISMATCH")
         target = payload.get("take_profit") or payload.get("take_profit_price")
         target_price = _positive_decimal(target, "take_profit") if target else Decimal("0")
@@ -731,8 +737,16 @@ class BitgetEnvironmentService:
                 raise EnvironmentLockError("STALE_SETUP_TP_INVALID: take_profit must be less than the current price for a BEARISH/short order")
         expected_profit = abs(entry_price - target_price) * size if target_price > 0 else Decimal("0")
         time_exit_enabled = bool(payload.get("time_exit_enabled")) and str(payload.get("selected_tp_model", "")).upper() == "TIME_BASED_EXIT"
-        if estimated_total_worst_case_loss > fixed_risk * Decimal("1.1"):
-            raise EnvironmentLockError("ESTIMATED_TOTAL_RISK_EXCEEDS_ALLOWED_TOLERANCE")
+        # Fees/slippage are a real additional cost on top of the configured
+        # SL-distance risk now (not carved out of it - see
+        # calculate_required_margin), so estimated_total_worst_case_loss is
+        # expected to exceed fixed_risk by roughly notional*(fee_rate+
+        # slippage_rate). The remaining real guard here is that fee+slippage
+        # alone do not balloon into an unreasonable multiple of the configured
+        # risk (e.g. a misconfigured fee_rate/slippage_rate input) - capped at
+        # 100% of fixed_risk, well above any realistic fee/slippage rate.
+        if estimated_fee + estimated_slippage_buffer > fixed_risk:
+            raise EnvironmentLockError("ESTIMATED_FEE_AND_SLIPPAGE_EXCEED_FIXED_RISK_AMOUNT")
         min_trade_num = Decimal(str(contract.get("minTradeNum") or "0"))
         min_trade_usdt = Decimal(str(contract.get("minTradeUSDT") or "0"))
         if size < min_trade_num:
@@ -804,7 +818,12 @@ class BitgetEnvironmentService:
             "estimated_fee": str(estimated_fee),
             "estimated_slippage_buffer": str(estimated_slippage_buffer),
             "estimated_total_worst_case_loss": str(estimated_total_worst_case_loss),
-            "risk_within_limit": "YES" if estimated_total_worst_case_loss <= fixed_risk * Decimal("1.1") else "NO",
+            # Mirrors the ESTIMATED_FEE_AND_SLIPPAGE_EXCEED_FIXED_RISK_AMOUNT
+            # guard above - expected_loss already exactly equals fixed_risk by
+            # construction, so the only way this trade's real risk profile can
+            # still go wrong is fee+slippage ballooning past the configured
+            # risk amount.
+            "risk_within_limit": "YES" if estimated_fee + estimated_slippage_buffer <= fixed_risk else "NO",
             "risk_lock_status": "PASSED",
             "exchange_lock_status": "PASSED",
             "profile_lock_status": "PASSED",
