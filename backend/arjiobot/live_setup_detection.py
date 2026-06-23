@@ -366,6 +366,22 @@ def _setup_from_trade(trade: dict[str, object], *, state: Any, profile_id: str, 
         created_at = entry_time
     snapshot = trade.get("setup_snapshot") if isinstance(trade.get("setup_snapshot"), dict) else {}
     expansion = snapshot.get("expansion") if isinstance(snapshot.get("expansion"), dict) else {}
+    htf_fvg_id = str(trade.get("source_16m_fvg_id") or trade.get("source_12m_fvg_id") or "")
+    fvg_16m_id = str(trade.get("source_16m_fvg_id") or "")
+    fvg_12m_id = str(trade.get("source_12m_fvg_id") or trade.get("12m_fvg_id") or "")
+    # The one place an FVG actually becomes a real setup's anchor - everything
+    # detect_fvgs() finds is internal engine noise (logged at DEBUG, see
+    # fvg.py), this is the moment any of it is promoted to INFO, because this
+    # is the only FVG activity that should be visible in Railway's log
+    # stream without hundreds of irrelevant detections drowning it out.
+    logger.info(
+        "FVG anchor selected for setup %s %s/%s - 16M FVG=%s 12M FVG=%s",
+        setup_id,
+        str(trade["symbol"]),
+        direction.value,
+        fvg_16m_id,
+        fvg_12m_id,
+    )
     return Setup(
         setup_id=setup_id,
         symbol=str(trade["symbol"]),
@@ -376,13 +392,13 @@ def _setup_from_trade(trade: dict[str, object], *, state: Any, profile_id: str, 
         created_at=created_at,
         updated_at=entry_time,
         completed_at=entry_time,
-        htf_fvg_id=str(trade.get("source_16m_fvg_id") or trade.get("source_12m_fvg_id") or ""),
+        htf_fvg_id=htf_fvg_id,
         swing_16m_id=swing_16m_id,
         expansion_16m_id=str(expansion.get("expansion_id") or "verified_by_live_profile_evaluator"),
-        fvg_16m_id=str(trade.get("source_16m_fvg_id") or ""),
-        fvg_12m_id=str(trade.get("source_12m_fvg_id") or trade.get("12m_fvg_id") or ""),
+        fvg_16m_id=fvg_16m_id,
+        fvg_12m_id=fvg_12m_id,
         fvg_8m_id="verified_by_live_profile_evaluator",
-        entry_fvg_id=str(trade.get("source_12m_fvg_id") or trade.get("12m_fvg_id") or ""),
+        entry_fvg_id=fvg_12m_id,
         stop_reference_price=Decimal(str(trade["stop_loss"])),
         final_target_price=Decimal(str(trade["take_profit"])),
         metadata={

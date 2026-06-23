@@ -141,8 +141,15 @@ class FVGDetectionEngine:
             # has ever seen it - a long-lived caller that rescans a growing
             # window every poll (live monitoring) would otherwise flood the
             # log with the same already-known FVGs over and over.
+            # DEBUG, not INFO: detection itself is internal engine noise that
+            # fires hundreds of times per session (a single poll with a
+            # backlog of new candles can discover dozens of FVGs in one
+            # detect_fvgs() call, all within the same log timestamp) - this
+            # is exactly what was flooding Railway's log rate limit. INFO is
+            # reserved for the moment an FVG is actually selected as a real
+            # setup's anchor (see live_setup_detection.py's _setup_from_trade).
             if is_new_to_this_engine:
-                logger.info("FVG detected", extra={"fvg_id": fvg.fvg_id, "direction": fvg.direction.value})
+                logger.debug("FVG detected", extra={"fvg_id": fvg.fvg_id, "direction": fvg.direction.value})
         return FVGDetectionResult(
             fvgs=tuple(detected),
             rejected_count=rejected_count,

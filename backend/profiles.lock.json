@@ -542,7 +542,7 @@
   "protected_source_hashes": {
     "arjiobot/backtesting/research_profiles.py": "54080ea8dbe8d40cf5c05db1b24647d1e936d05adbd339d1070533fdde1bd135",
     "arjiobot/backtesting/timeframe_profiles.py": "e15f3884c559a5cbdf6c4a8dfb5a38aec60a430befb36dca547c4ef34090d03e",
-    "arjiobot/fvg/fvg.py": "5da55d860dedbe8ddbd01cd8e59d906658c868ce9aec4030b9d7fbb7ff70f1cc",
+    "arjiobot/fvg/fvg.py": "5cf9a8f221f5daa01d65593de16cb8d20d2f179124148b78c65329bc49c3927a",
     "arjiobot/fvg/fvg_tap_rules.py": "e64b1696e6bce029bde42eb734bf1b625e8a6b4dea1ddd5b2d62027753111d68",
     "arjiobot/risk/rr_profiles.py": "34d53ddce0b0acfb6cd517f8dbb3ae0c9843eb7d84f773c159021c9b7d3d33b2",
     "arjiobot/setup_tracker/setup_invalidation.py": "2b3c5e5d23fa7cb4cfb28fefec96b8dd391340ea60e89fb5fa1552a0b5b7fd2b",
