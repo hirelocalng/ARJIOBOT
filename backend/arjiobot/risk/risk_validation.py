@@ -119,6 +119,19 @@ def validate_signal_risk(
         else:
             reasons.append(RiskRejectionReason.FIXED_RISK_VALIDATION_FAILED)
         isolated = None
+    # isolated.quantity/notional_position_size (when available) is the single
+    # source of truth the min/max-size and exposure checks below validate
+    # against, since it is also what actually gets traded - risk_engine.py
+    # builds the trade plan from `isolated`, not from the separate `position`
+    # calculation. calculate_position_size is kept only as a fallback for
+    # when calculate_required_margin itself failed (e.g. insufficient
+    # margin), so these checks still have a reasonable number to evaluate
+    # even though the trade is already rejected via
+    # INSUFFICIENT_AVAILABLE_MARGIN. Before this, the two were two
+    # independent implementations of the same math that happened to agree
+    # numerically but had no shared source of truth.
+    applied_position_size = isolated.quantity if isolated is not None else position.position_size
+    applied_notional_value = isolated.notional_position_size if isolated is not None else position.notional_value
     if isolated is not None:
         metrics["position_size"] = isolated.quantity
         metrics["notional_value"] = isolated.notional_position_size
@@ -155,13 +168,13 @@ def validate_signal_risk(
         reasons.append(RiskRejectionReason.DAILY_LOSS_LIMIT_REACHED)
     if risk_config.risk_amount_per_trade > weekly_remaining:
         reasons.append(RiskRejectionReason.WEEKLY_LOSS_LIMIT_REACHED)
-    if position.position_size < risk_config.min_position_size:
+    if applied_position_size < risk_config.min_position_size:
         reasons.append(RiskRejectionReason.POSITION_SIZE_TOO_SMALL)
-    if position.position_size > risk_config.max_position_size:
+    if applied_position_size > risk_config.max_position_size:
         reasons.append(RiskRejectionReason.POSITION_SIZE_TOO_LARGE)
     if not risk_config.allow_multiple_positions_same_symbol and has_same_symbol_exposure(symbol=signal.symbol, open_symbol_exposure=open_risk_state.open_symbol_exposure):
         reasons.append(RiskRejectionReason.SAME_SYMBOL_EXPOSURE_BLOCKED)
-    exposure_after = exposure_after_trade(symbol=signal.symbol, open_symbol_exposure=open_risk_state.open_symbol_exposure, notional_value=position.notional_value)
+    exposure_after = exposure_after_trade(symbol=signal.symbol, open_symbol_exposure=open_risk_state.open_symbol_exposure, notional_value=applied_notional_value)
     metrics["exposure_after_trade"] = exposure_after
     if exposure_after > risk_config.max_symbol_exposure:
         reasons.append(RiskRejectionReason.SYMBOL_EXPOSURE_LIMIT_REACHED)

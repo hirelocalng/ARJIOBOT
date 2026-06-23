@@ -359,6 +359,9 @@ def _effective_max_leverage(state: Any, symbol: str) -> Decimal:
     return _positive_decimal(state.settings.get("max_leverage"), "max leverage")
 
 
+_UNPARSEABLE_POSITION_EXPOSURE = Decimal("999999999999")  # see _position_notional
+
+
 def _real_time_open_positions(state: Any) -> tuple[int, dict[str, Decimal]]:
     """Query Bitget directly for currently-open positions, replacing the
     in-memory open_positions counter on BitgetEnvironmentService - that
@@ -367,12 +370,13 @@ def _real_time_open_positions(state: Any) -> tuple[int, dict[str, Decimal]]:
     restart, so it could never reflect reality: a restart while a position
     was open would silently let a new one open right alongside it.
 
-    open_symbol_exposure only needs to be nonzero for a symbol with an open
-    position - has_same_symbol_exposure (risk/exposure.py) only checks > 0 -
-    so a flat sentinel is used per symbol rather than computing a real
-    notional dollar figure from Bitget's raw position fields, which have
-    not been verified against a real authenticated response anywhere in
-    this codebase (see trades.py's own comment on this).
+    open_symbol_exposure is each symbol's real notional value (position size
+    * mark price), not a flat sentinel - so max_symbol_exposure
+    (risk_validation.py) is an enforceable cap once
+    allow_multiple_positions_same_symbol is enabled, not a no-op (a flat "1"
+    per symbol previously made an existing $5,000 position read as "$1" of
+    exposure). has_same_symbol_exposure (risk/exposure.py) only checks > 0,
+    which a real notional value still satisfies.
     """
     try:
         record = state.bitget_environment.fetch_positions()
@@ -382,9 +386,79 @@ def _real_time_open_positions(state: Any) -> tuple[int, dict[str, Decimal]]:
     exposure: dict[str, Decimal] = {}
     for position in positions:
         position_symbol = str(position.get("symbol", "")).upper()
-        if position_symbol:
-            exposure[position_symbol] = Decimal("1")
+        if not position_symbol:
+            continue
+        exposure[position_symbol] = exposure.get(position_symbol, Decimal("0")) + _position_notional(position)
     return len(positions), exposure
+
+
+def _position_notional(position: dict[str, object]) -> Decimal:
+    """Real notional value of an open position from Bitget's raw position
+    fields (same field names trades.py's live trades tab already reads).
+    Bitget's exact field names have not been verified against a real
+    authenticated response anywhere in this codebase - if notional cannot be
+    parsed, the position is treated as fully exposed (a large sentinel)
+    rather than understated, so max_symbol_exposure fails toward blocking an
+    additional trade, never toward silently allowing one."""
+    size = _decimal_or_none(position.get("total") or position.get("available"))
+    mark_price = _decimal_or_none(position.get("markPrice"))
+    if size is not None and mark_price is not None and size > 0 and mark_price > 0:
+        return size * mark_price
+    return _UNPARSEABLE_POSITION_EXPOSURE
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
+
+
+def _realized_pnl_since(state: Any, *, since: datetime) -> Decimal:
+    """Sum of real, realized PnL (from Bitget's closed-position history) for
+    positions closed at or after `since` - the same data trades.py's PnL tab
+    already sums (netProfit/pnl), just windowed by close time here for the
+    daily/weekly loss-limit checks. Returns Decimal("0") if history cannot be
+    fetched (e.g. credentials not yet connected) rather than blocking risk
+    assessment entirely on a transient/missing connection - the existing
+    open-trade-count/margin checks already require a live connection to
+    proceed this far, so a real account context normally already exists."""
+    try:
+        record = state.bitget_environment.fetch_position_history()
+    except EnvironmentLockError:
+        return Decimal("0")
+    total = Decimal("0")
+    for row in record.get("closed_positions", ()):
+        closed_at = _parse_bitget_close_time(row.get("uTime") or row.get("utime"))
+        if closed_at is None or closed_at < since:
+            continue
+        pnl = _decimal_or_none(row.get("netProfit") or row.get("pnl"))
+        if pnl is not None:
+            total += pnl
+    return total
+
+
+def _parse_bitget_close_time(value: object) -> datetime | None:
+    """Same convention as live_setup_detection.py's _parse_bitget_timestamp:
+    Bitget returns epoch milliseconds as a numeric string for most
+    timestamp fields, with an ISO-string fallback."""
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        numeric = int(str(value))
+    except ValueError:
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    try:
+        if numeric > 10_000_000_000:
+            return datetime.fromtimestamp(numeric / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnapshot, OpenRiskState]:
@@ -405,6 +479,15 @@ def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnap
     risk_amount = _positive_decimal(state.settings.get("risk_amount_per_trade"), "risk amount per trade")
     max_leverage = _effective_max_leverage(state, symbol)
     open_trade_count, open_symbol_exposure = _real_time_open_positions(state)
+    now = datetime.now(timezone.utc)
+    # Real realized PnL from Bitget's closed-position history (same data
+    # trades.py's PnL tab already sums), windowed to the last 24h/7d - without
+    # this, daily_loss_capacity_remaining/weekly_loss_capacity_remaining
+    # (loss_limits.py) always computed against zero realized loss, so
+    # DAILY_LOSS_LIMIT_REACHED/WEEKLY_LOSS_LIMIT_REACHED could never fire
+    # from real trading activity, no matter how much had actually been lost.
+    current_daily_pnl = _realized_pnl_since(state, since=now - timedelta(hours=24))
+    current_weekly_pnl = _realized_pnl_since(state, since=now - timedelta(days=7))
     config = RiskConfig(
         account_equity=equity,
         fixed_risk_amount=risk_amount,
@@ -412,9 +495,18 @@ def _live_risk_context(state: Any, symbol: str) -> tuple[RiskConfig, AccountSnap
         max_leverage=max_leverage,
         max_open_trades=int(str(state.settings.get("max_open_trades") or "1")),
         max_daily_loss=Decimal(str(state.settings.get("max_daily_loss") or "0")),
+        # max_weekly_loss was never read from settings before this fix - it
+        # silently used RiskConfig's class default (1500) regardless of what
+        # was configured.
+        max_weekly_loss=Decimal(str(state.settings.get("max_weekly_loss") or "0")),
     )
-    snapshot = AccountSnapshot(account_currency="USDT", account_equity=equity, available_margin=available, captured_at=datetime.now(timezone.utc))
-    open_state = OpenRiskState(open_trade_count=open_trade_count, open_symbol_exposure=open_symbol_exposure)
+    snapshot = AccountSnapshot(account_currency="USDT", account_equity=equity, available_margin=available, captured_at=now)
+    open_state = OpenRiskState(
+        open_trade_count=open_trade_count,
+        open_symbol_exposure=open_symbol_exposure,
+        current_daily_pnl=current_daily_pnl,
+        current_weekly_pnl=current_weekly_pnl,
+    )
     return config, snapshot, open_state
 
 

@@ -2,15 +2,51 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dataclasses import replace
+
+from decimal import Decimal
 
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.tests.helpers import client
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig, TradeMode
+from arjiobot.live_automation import _position_notional, _real_time_open_positions
 from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
 from arjiobot.strategy.demo_strategy import make_entry_ready_setup
+
+
+def test_position_notional_computes_real_dollar_value_not_a_flat_sentinel() -> None:
+    """The actual fix for max_symbol_exposure being meaningless: an existing
+    $5,000 position must read as $5,000 of exposure, not a flat "1"."""
+    assert _position_notional({"symbol": "BTCUSDT", "total": "50", "markPrice": "100"}) == Decimal("5000")
+
+
+def test_position_notional_falls_back_to_a_large_sentinel_when_unparseable() -> None:
+    """If Bitget's position fields cannot be parsed, exposure must fail
+    toward blocking an additional trade (a large sentinel), never toward
+    understating real exposure to something tiny like "1"."""
+    assert _position_notional({"symbol": "BTCUSDT"}) > Decimal("1000000000")
+    assert _position_notional({"symbol": "BTCUSDT", "total": "not-a-number", "markPrice": "100"}) > Decimal("1000000000")
+
+
+def test_real_time_open_positions_sums_real_notional_per_symbol() -> None:
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(
+        bitget_environment=SimpleNamespace(
+            fetch_positions=lambda: {
+                "positions": (
+                    {"symbol": "BTCUSDT", "total": "1", "markPrice": "90000"},
+                    {"symbol": "ETHUSDT", "total": "10", "markPrice": "3000"},
+                )
+            }
+        )
+    )
+    count, exposure = _real_time_open_positions(state)
+    assert count == 2
+    assert exposure["BTCUSDT"] == Decimal("90000")
+    assert exposure["ETHUSDT"] == Decimal("30000")
 
 
 def test_live_automation_processes_entry_ready_setup_to_bitget_order(monkeypatch) -> None:
@@ -124,6 +160,119 @@ def test_real_open_position_for_same_symbol_blocks_a_new_one(monkeypatch) -> Non
     assert result["status"] == "BLOCKED"
     assert "SAME_SYMBOL_EXPOSURE_BLOCKED" in result["attempts"][0]["reason"]
     assert service.orders == []
+
+
+def test_daily_loss_limit_blocks_a_new_trade_once_real_losses_consumed_the_cap(monkeypatch) -> None:
+    """The actual fix for daily/weekly loss limits being non-functional:
+    _live_risk_context now sums real realized PnL from Bitget's closed-
+    position history (last 24h) instead of always treating current_daily_pnl
+    as 0. A $460 real loss today against a $500 daily cap leaves only $40 of
+    capacity - not enough for a $100 risk-per-trade setup, so it must block."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "100",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_weekly_loss": "1500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+    setup = make_entry_ready_setup(latest_price="90")
+    state.setups[setup.setup_id] = setup
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    def routed_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        if path == "/api/v2/mix/position/all-position":
+            return {"code": "00000", "msg": "success", "data": []}
+        if path == "/api/v2/mix/position/history-position":
+            return {"code": "00000", "msg": "success", "data": {"list": [{"symbol": "BTCUSDT", "netProfit": "-460", "uTime": str(now_ms)}]}}
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_should_never_be_placed"}}
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+    monkeypatch.setattr(service, "_private_request", routed_private_request)
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "BLOCKED"
+    assert "DAILY_LOSS_LIMIT_REACHED" in result["attempts"][0]["reason"]
+    assert service.orders == []
+
+
+def test_old_realized_losses_outside_the_24_hour_window_do_not_count(monkeypatch) -> None:
+    """A loss closed more than 24 hours ago must not count against today's
+    daily loss cap - only real-time realized PnL within the rolling window
+    reduces capacity."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1000",
+        "available_margin": "1000",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1000", "available_margin": "1000", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            "risk_amount_per_trade": "100",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_weekly_loss": "1500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+    setup = make_entry_ready_setup(latest_price="90")
+    state.setups[setup.setup_id] = setup
+    old_ms = int((datetime.now(timezone.utc) - timedelta(days=2)).timestamp() * 1000)
+
+    def routed_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        if path == "/api/v2/mix/position/all-position":
+            return {"code": "00000", "msg": "success", "data": []}
+        if path == "/api/v2/mix/position/history-position":
+            return {"code": "00000", "msg": "success", "data": {"list": [{"symbol": "BTCUSDT", "netProfit": "-460", "uTime": str(old_ms)}]}}
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_old_loss_does_not_block"}}
+
+    monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
+    monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
+    monkeypatch.setattr(service, "fetch_candles", lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol))
+    monkeypatch.setattr(service, "_private_request", routed_private_request)
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "SUBMITTED"
+    assert service.orders[0]["bitget_order_id"] == "ord_old_loss_does_not_block"
 
 
 def test_max_open_trades_uses_real_position_count_surviving_a_simulated_restart(monkeypatch) -> None:
