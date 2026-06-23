@@ -724,6 +724,65 @@ def test_live_automation_executes_only_the_entry_ready_setup_not_in_progress_or_
     # The executed setup left the in-progress pool for completed_setups.
     assert entry_ready.setup_id not in state.setups
     assert entry_ready.setup_id in state.completed_setups
+    # FIX 3: a confirmed live trade is tagged trade_opened, the one
+    # execution_status that should_leave_in_progress treats as terminal.
+    assert state.completed_setups[entry_ready.setup_id].execution_status == "trade_opened"
+
+
+def test_risk_rejected_entry_ready_setup_moves_to_completed_with_rejected_status() -> None:
+    """FIX 3, the explicit scenario: execution rejected (here, risk-blocked
+    on insufficient available margin) must move the setup to COMPLETED
+    tagged execution_status='no_margin', leaving IN PROGRESS rather than
+    sitting there retried forever - see should_leave_in_progress and
+    live_automation.py's _resolve_rejected_setup."""
+    api = client()
+    state = get_state()
+    service = state.bitget_environment
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.last_connection_result = {
+        "connection_status": "PASSED",
+        "available_balance": "1",
+        "available_margin": "1",
+        "last_successful_verification_time": "2026-06-16T00:00:00+00:00",
+    }
+    service.last_account_payload = {"total_equity": "1", "available_margin": "1", "margin_mode": "isolated"}
+    state.settings.update(
+        {
+            "adapter_mode": "BITGET_LIVE",
+            "live_trading_enabled": True,
+            "trading_mode": "LIVE",
+            "active_strategy_profile": "PROFILE_2",
+            "selected_rr_profile": "LEG_TARGET_RESEARCH",
+            # A $10,000 risk on a $1 available margin guarantees
+            # BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN at the RISK stage, before
+            # any Bitget call is ever attempted - no exchange mocks needed.
+            "risk_amount_per_trade": "10000",
+            "max_leverage": "100",
+            "max_daily_loss": "500",
+            "max_open_trades": 5,
+        }
+    )
+    state.monitoring.update({"active": True, "session_id": "test", "source": "LIVE_MARKET_DATA"})
+    state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY", "last_live_price": "90"}
+    setup = make_entry_ready_setup(latest_price="90")
+    state.setups[setup.setup_id] = setup
+    service._private_request = lambda method, path, **kwargs: {"code": "00000", "msg": "success", "data": []}
+
+    result = api.post("/api/live-automation/run-once").json()["data"]
+
+    assert result["status"] == "BLOCKED"
+    assert "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN" in result["attempts"][0]["reason"]
+    assert service.orders == []
+    assert setup.setup_id not in state.setups, "a risk-rejected setup must leave IN PROGRESS, not be retried forever"
+    assert setup.setup_id in state.completed_setups
+    assert state.completed_setups[setup.setup_id].execution_status == "no_margin"
+
+    in_progress_ids = {row["setup_id"] for row in api.get("/api/setups/in-progress").json()["data"]}
+    completed_rows = {row["setup_id"]: row for row in api.get("/api/setups/completed").json()["data"]}
+    assert setup.setup_id not in in_progress_ids
+    assert completed_rows[setup.setup_id]["execution_status"] == "no_margin"
 
 
 def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_order() -> None:

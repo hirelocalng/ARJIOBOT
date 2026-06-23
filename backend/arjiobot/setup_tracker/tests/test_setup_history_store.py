@@ -9,9 +9,11 @@ production.
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from arjiobot.live_setup_detection import _setup_from_trade
+from arjiobot.live_setup_detection import _setup_from_trade, move_setup_to_completed
 from arjiobot.setup_tracker import setup_history_store
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 
@@ -213,3 +215,126 @@ def test_load_with_corrupt_file_does_not_raise(monkeypatch, tmp_path) -> None:
     counts = setup_history_store.load_setup_history_store(state)
 
     assert counts == (0, 0)
+
+
+# --- FIX 1: clear -> next poll cycle must not resurrect a cleared setup ----
+
+
+def test_clear_then_the_next_poll_cycle_does_not_resurrect_a_cleared_setup(monkeypatch, tmp_path) -> None:
+    """The actual reported bug: the live detection funnel re-scans its entire
+    rolling candle buffer every poll, so it re-derives the exact same
+    COMPLETED/INVALIDATED row (build_setup_id is deterministic) for a swing
+    still in that buffer on every later poll, regardless of an operator
+    having cleared history in between. history_cleared_at (set atomically
+    with the wipe by clear_setup_history) must block any setup whose own
+    completed_at predates it from ever being re-written."""
+    _redirect_paths(monkeypatch, tmp_path)
+    state = _fake_state()
+    completed_at = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    trade = _make_completed_trade(state, suffix="resurrect1", entry_timestamp=completed_at)
+    state.completed_setups[trade.setup_id] = trade
+    state.setup_history[trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
+
+    completed_count, _ = setup_history_store.clear_setup_history(state)
+
+    assert completed_count == 1
+    assert state.completed_setups == {}
+    assert state.history_cleared_at is not None
+
+    # Simulate the next poll cycle re-deriving the exact same setup as
+    # COMPLETED again - same setup_id, same completed_at, exactly as
+    # live_setup_detection.py's rolling-buffer re-evaluation would.
+    move_setup_to_completed(state, trade)
+
+    assert trade.setup_id not in state.completed_setups, "a setup that completed before the last clear must never be resurrected"
+    assert trade.setup_id not in state.setup_history
+
+
+def test_a_setup_completed_after_the_clear_is_written_normally(monkeypatch, tmp_path) -> None:
+    """history_cleared_at must only block setups that predate it - a genuine
+    new completion afterward must be written exactly as if no clear had ever
+    happened."""
+    _redirect_paths(monkeypatch, tmp_path)
+    state = _fake_state()
+    setup_history_store.clear_setup_history(state)
+    assert state.history_cleared_at is not None
+
+    new_completed_at = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+    trade = _make_completed_trade(state, suffix="after_clear1", entry_timestamp=new_completed_at)
+
+    move_setup_to_completed(state, trade)
+
+    assert trade.setup_id in state.completed_setups
+
+
+# --- FIX 2: 1-hour age filter + 100-entry cap, at load/write/API-response -
+
+
+def test_load_filters_out_entries_older_than_one_hour(monkeypatch, tmp_path) -> None:
+    """A persisted entry older than 1 hour must never be loaded into memory -
+    even though save_setup_history_store also filters at write time, nothing
+    re-triggers that filter as wall-clock time alone pushes an entry past the
+    1-hour line between writes, so load must filter independently too."""
+    _redirect_paths(monkeypatch, tmp_path)
+    state = _fake_state()
+    fresh = _make_completed_trade(state, suffix="fresh1", entry_timestamp=datetime.now(timezone.utc).isoformat())
+    stale = _make_completed_trade(state, suffix="stale1", entry_timestamp=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat())
+    # Written directly to the file, bypassing save_setup_history_store's own
+    # filtering entirely, so this proves the LOAD path filters on its own
+    # merits - not merely inheriting an already-filtered file.
+    setup_history_store.STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "completed_setups": {setup.setup_id: setup_history_store._setup_to_json(setup) for setup in (fresh, stale)},
+        "invalidated_setups": {},
+        "setup_history": {},
+    }
+    setup_history_store.STORE_PATH.write_text(json.dumps(payload), encoding="utf-8")
+
+    reloaded_state = _fake_state()
+    completed_count, invalidated_count = setup_history_store.load_setup_history_store(reloaded_state)
+
+    assert (completed_count, invalidated_count) == (1, 0)
+    assert fresh.setup_id in reloaded_state.completed_setups
+    assert stale.setup_id not in reloaded_state.completed_setups
+    assert stale.setup_id not in reloaded_state.setup_history
+
+
+def test_write_120_fresh_entries_keeps_only_the_latest_100(monkeypatch, tmp_path) -> None:
+    """Why the count could show more than 100 if the cap were only ever
+    applied at write time and never re-checked at load: a persisted file can
+    accumulate past the cap (an old bug, a manual edit, ...) and a restart
+    would otherwise load every one of them. Cap must hold at write time AND
+    survive a load - both ends of a save/load round trip with 120 fresh
+    (well within the 1-hour window) entries must agree on exactly 100."""
+    _redirect_paths(monkeypatch, tmp_path)
+    state = _fake_state()
+    base = datetime.now(timezone.utc)
+    trades = [_make_completed_trade(state, suffix=f"flood{i}", entry_timestamp=(base - timedelta(seconds=200 - i)).isoformat()) for i in range(120)]
+    for trade in trades:
+        state.completed_setups[trade.setup_id] = trade
+
+    setup_history_store.save_setup_history_store(state)
+
+    reloaded_state = _fake_state()
+    completed_count, _ = setup_history_store.load_setup_history_store(reloaded_state)
+
+    assert completed_count == 100
+    # trades[0] is the oldest (base - 200s), trades[119] the newest (base - 81s).
+    assert trades[0].setup_id not in reloaded_state.completed_setups, "oldest of the 120 must be evicted by the cap"
+    assert trades[119].setup_id in reloaded_state.completed_setups, "newest of the 120 must survive"
+
+
+def test_filter_and_cap_history_applies_age_before_cap() -> None:
+    """Direct unit test of the shared helper: a fresh entry within the
+    1-hour window must survive even when more than 100 stale ones exist
+    (age filtering must not be skipped just because the cap alone would also
+    have removed entries) - and the cap is enforced on what remains."""
+    state = _fake_state()
+    now = datetime.now(timezone.utc)
+    stale_trades = [_make_completed_trade(state, suffix=f"old{i}", entry_timestamp=(now - timedelta(hours=2, seconds=i)).isoformat()) for i in range(105)]
+    fresh_trade = _make_completed_trade(state, suffix="new1", entry_timestamp=now.isoformat())
+    setups = {trade.setup_id: trade for trade in (*stale_trades, fresh_trade)}
+
+    result = setup_history_store.filter_and_cap_history(setups, now=now)
+
+    assert result == {fresh_trade.setup_id: fresh_trade}

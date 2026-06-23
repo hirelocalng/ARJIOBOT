@@ -7,6 +7,7 @@ guard. It does not weaken strategy, risk, profile, or exchange locks.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONFIRMATION_TEXT, TradeMode
 from arjiobot.live_setup_detection import expire_stale_setup, move_setup_to_completed
 from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE
-from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, TradePlanStatus
+from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, RiskRejectionReason, TradePlanStatus
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalRejectionReason, SignalStatus
 
@@ -202,6 +203,21 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     return record
 
 
+def _resolve_rejected_setup(state: Any, setup: Any, *, execution_status: str, reason: str) -> None:
+    """Move a real ENTRY_READY setup out of IN PROGRESS the moment execution
+    explicitly rejects it (signal-level or risk-level - see
+    should_leave_in_progress's TERMINAL_EXECUTION_STATES), tagging it so Setup
+    Radar's COMPLETED tab shows *why* rather than presenting it as a
+    successful trade. Deliberately NOT used for BITGET_DRY_RUN_PREVIEW/
+    BITGET_LIVE_ORDER blocks - those represent the live exchange call itself
+    failing, which can be transient (network, momentary exchange-side
+    rejection), so that setup must keep retrying on a later poll exactly as
+    before (see test_setup_blocked_downstream_of_signal_generation_can_be_retried_on_a_later_poll)."""
+    resolved = replace(setup, execution_status=execution_status, updated_at=datetime.now(timezone.utc))
+    move_setup_to_completed(state, resolved)
+    logger.warning("[EXECUTION] %s REJECTED - reason: %s | setup stays in history as completed/rejected", setup.setup_id, reason)
+
+
 def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source: str) -> dict[str, Any]:
     attempt: dict[str, Any] = {
         "source": source,
@@ -224,17 +240,27 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     attempt["signal_id"] = signal.signal_id
     attempt["signal_status"] = signal.status.value
     if signal.status is not SignalStatus.GENERATED:
-        if signal.rejection_reason is SignalRejectionReason.DUPLICATE_SIGNAL:
-            # Self-healing safety net: this setup is still ENTRY_READY and
-            # reachable here at all only because it was never actually
-            # submitted (processed_setup_ids would have filtered it out
-            # otherwise) - so an earlier poll's signal succeeded but the
-            # setup was then blocked further downstream, leaving a stale
-            # "already generated" marker that would otherwise reject this
-            # exact setup_id forever. Clear it now so the *next* poll gets a
-            # clean signal-generation attempt instead of repeating this.
-            state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": f"signal rejected: {signal.rejection_reason.value if signal.rejection_reason else 'UNKNOWN'}"})
+        if signal.rejection_reason is SignalRejectionReason.DUPLICATE_SIGNAL:
+            # Self-healing safety net, NOT a terminal rejection: this setup is
+            # still ENTRY_READY and reachable here at all only because it was
+            # never actually submitted (processed_setup_ids would have
+            # filtered it out otherwise) - so an earlier poll's signal
+            # succeeded but the setup was then blocked further downstream,
+            # leaving a stale "already generated" marker that would
+            # otherwise reject this exact setup_id forever. Clear it now so
+            # the *next* poll gets a clean signal-generation attempt instead
+            # of repeating this - the setup must stay in state.setups for
+            # that retry to even be possible.
+            state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
+        else:
+            # Every other SignalRejectionReason is structural to this exact
+            # setup's own fields (direction, stop/target relationship, a
+            # missing required field, ...) - retrying the identical setup on
+            # a later poll can never resolve it differently, so it leaves
+            # IN PROGRESS now instead of sitting there until the 24-minute
+            # staleness gate eventually catches it.
+            _resolve_rejected_setup(state, setup, execution_status="rejected", reason=attempt["reason"])
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s blocked at SIGNAL stage: %s", setup.setup_id, attempt["reason"])
         return attempt
@@ -256,6 +282,12 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     if plan.approval_status is not TradePlanStatus.APPROVED:
         state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
         attempt.update({"status": "BLOCKED", "reason": "risk rejected: " + ",".join(reason.value for reason in plan.rejection_reasons)})
+        # INSUFFICIENT_AVAILABLE_MARGIN gets its own execution_status
+        # (no_margin) rather than the generic risk_blocked, so Setup Radar's
+        # COMPLETED tab can distinguish "blocked on account margin" from
+        # every other risk rejection at a glance.
+        execution_status = "no_margin" if RiskRejectionReason.INSUFFICIENT_AVAILABLE_MARGIN in plan.rejection_reasons else "risk_blocked"
+        _resolve_rejected_setup(state, setup, execution_status=execution_status, reason=attempt["reason"])
         _append_attempt(automation, attempt)
         logger.warning("Live automation: setup %s / trade plan %s blocked at RISK stage: %s", setup.setup_id, plan.trade_plan_id, attempt["reason"])
         return attempt
@@ -310,7 +342,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     # (capped at 100) so it shows up in Setup Radar's COMPLETED history with
     # this attempt's bitget_order_id/trade_plan_id (see radar.py's
     # _related_execution), and stops being listed as "in progress".
-    move_setup_to_completed(state, setup)
+    move_setup_to_completed(state, replace(setup, execution_status="trade_opened", updated_at=datetime.now(timezone.utc)))
     _append_attempt(automation, attempt)
     logger.info(
         "Live automation: order PLACED on Bitget for setup %s (%s) - bitget_order_id=%s trade_plan_id=%s",

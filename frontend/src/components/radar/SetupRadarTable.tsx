@@ -5,6 +5,16 @@ import { SetupProgressBar } from './SetupProgressBar';
 import { DEFAULT_PRODUCTION_PROFILE } from '../../utils/constants';
 import { friendlyStageLabel } from '../../utils/setupStage';
 
+// A real ENTRY_READY setup (_setup_from_trade) stays here, not in Completed,
+// for as long as live_automation hasn't yet confirmed a trade opened or
+// explicitly rejected it - "Pending execution" is not a terminal state (see
+// should_leave_in_progress, setup_tracker/setup_models.py), so it must keep
+// showing its 100% progress bar in IN PROGRESS instead of disappearing.
+function executionBadge(row: RadarSetup): { label: string; tone: 'ok' | 'warn' | 'neutral' } | null {
+  if (row.status !== 'ENTRY_READY') return null;
+  return { label: 'Pending execution', tone: 'ok' };
+}
+
 export function SetupRadarTable({ setups, onSelect }: { setups: RadarSetup[]; onSelect?: (setup: RadarSetup) => void }) {
   const sorted = [...setups].sort((a, b) => b.progress_percent - a.progress_percent);
   return (
@@ -15,6 +25,7 @@ export function SetupRadarTable({ setups, onSelect }: { setups: RadarSetup[]; on
         { header: 'Pair', render: (row) => <button className="text-action" onClick={() => onSelect?.(row)}>{row.symbol}</button> },
         { header: 'Direction', render: (row) => row.direction },
         { header: 'Stage', render: (row) => <StatusBadge label={friendlyStageLabel(row.current_stage ?? row.current_state, row.direction)} tone={row.current_state === 'ENTRY_READY' ? 'ok' : row.progress_percent >= 70 ? 'warn' : 'neutral'} /> },
+        { header: 'Execution', render: (row) => { const badge = executionBadge(row); return badge ? <StatusBadge label={badge.label} tone={badge.tone} /> : '-'; } },
         { header: 'Progress', render: (row) => { const pct = row.progress_pct ?? row.progress_percent; return <div className="flex items-center gap-2"><SetupProgressBar value={pct} /><span>{pct.toFixed(0)}%</span></div>; } },
         { header: '16M Swing', render: (row) => row.swing_price ? `${row.direction === 'BULLISH' ? 'Low' : 'High'} @ ${row.swing_price}` : 'WAITING' },
         { header: '16M Expansion', render: (row) => row.expansion_ratio ?? 'WAITING' },

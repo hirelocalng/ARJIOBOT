@@ -118,6 +118,13 @@ class Setup:
     time_remaining: str | None = None
     state_history: tuple[StateHistoryEntry, ...] = ()
     watched_timeframes: tuple[str, ...] = ("30M", "1H", "16M", "12M", "8M", "1M")
+    # None while a real ENTRY_READY setup (_setup_from_trade) is still sitting
+    # in IN PROGRESS awaiting live_automation's verdict ("pending execution") -
+    # set to one of TERMINAL_EXECUTION_STATES the moment that verdict is in
+    # (see live_automation.py's _process_setup and should_leave_in_progress
+    # below). Never set for an attempt-tracer diagnostic row (no real
+    # execution is ever attempted for those).
+    execution_status: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -172,6 +179,23 @@ class SetupRadarItem:
 def clamp_progress(value: float) -> float:
     """Clamp progress to 0.0 through 100.0."""
     return max(0.0, min(100.0, float(value)))
+
+
+# "Pending execution" (execution_status is None) is deliberately NOT in this
+# set - it must never make a setup leave IN PROGRESS on its own. A setup
+# leaves IN PROGRESS only once one of these is reached: a confirmed live
+# trade (trade_opened), an explicit execution-side rejection (rejected/
+# risk_blocked/no_margin), or it became invalidated/expired through the
+# existing, separate invalidation/staleness paths.
+TERMINAL_EXECUTION_STATES = frozenset({"trade_opened", "rejected", "risk_blocked", "no_margin", "invalidated", "expired"})
+
+
+def should_leave_in_progress(setup: Setup) -> bool:
+    """Whether `setup` is done being tracked in IN PROGRESS (state.setups) -
+    True once execution_status reaches one of TERMINAL_EXECUTION_STATES,
+    False while it is still None ("pending execution", 100% complete but
+    execution has not yet confirmed or rejected it)."""
+    return setup.execution_status in TERMINAL_EXECUTION_STATES
 
 
 def build_setup_id(

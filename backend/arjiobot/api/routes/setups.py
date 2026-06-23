@@ -10,6 +10,7 @@ from arjiobot.api.dependencies import ApiState, get_state
 from arjiobot.api.errors import api_error
 from arjiobot.api.routes.radar import radar_record
 from arjiobot.api.schemas.common import ok
+from arjiobot.setup_tracker.setup_history_store import filter_and_cap_history
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 
 router = APIRouter(prefix="/api/setups", tags=["setups"])
@@ -23,10 +24,14 @@ setup_radar_router = APIRouter(prefix="/api/setup-radar", tags=["setup-radar"])
 
 def _all_setups(state: ApiState):
     """Every tracked setup across all three stores - in-progress (uncapped),
-    invalidated (capped at 100), completed (capped at 100). See
-    live_setup_detection.py's _store_setup/move_setup_to_completed for how a
-    setup ends up in exactly one of these at any given time."""
-    return chain(state.setups.values(), state.invalidated_setups.values(), state.completed_setups.values())
+    invalidated (age-filtered + capped at 100), completed (age-filtered +
+    capped at 100). See live_setup_detection.py's _store_setup/
+    move_setup_to_completed for how a setup ends up in exactly one of these
+    at any given time. filter_and_cap_history is read-only (returns a new
+    dict, never mutates state.invalidated_setups/completed_setups
+    themselves) - applied here defensively, since wall-clock time alone can
+    push a setup past the 1-hour age limit between writes."""
+    return chain(state.setups.values(), filter_and_cap_history(state.invalidated_setups).values(), filter_and_cap_history(state.completed_setups).values())
 
 
 @router.get("")
@@ -41,12 +46,17 @@ def entry_ready():
 
 @router.get("/in-progress")
 def in_progress():
-    """Active attempts, every one of them - not deduplicated per symbol, since
-    a pair can legitimately have more than one concurrent attempt (e.g. a
-    bearish and a bullish swing forming at once). Not capped - state.setups
-    only ever holds in-progress/pending-execution setups now."""
+    """Active attempts AND real ENTRY_READY setups still awaiting execution's
+    verdict ("pending execution", see should_leave_in_progress) - not
+    deduplicated per symbol, since a pair can legitimately have more than one
+    concurrent attempt (e.g. a bearish and a bullish swing forming at once).
+    Not capped - state.setups only ever holds in-progress/pending-execution
+    setups now. A pending ENTRY_READY setup must stay visible here, not jump
+    to COMPLETED, until live_automation confirms a trade opened or explicitly
+    rejects it (or the staleness gate expires it) - see live_automation.py's
+    _process_setup/_resolve_rejected_setup."""
     setups = sorted(
-        (setup for setup in get_state().setups.values() if setup.status is SetupStatus.ACTIVE),
+        (setup for setup in get_state().setups.values() if setup.status in (SetupStatus.ACTIVE, SetupStatus.ENTRY_READY)),
         key=lambda setup: setup.progress_percent,
         reverse=True,
     )
@@ -55,21 +65,25 @@ def in_progress():
 
 @router.get("/completed")
 def completed():
-    """COMPLETED (attempt-tracker's own "reached 100%" marker) and
-    ENTRY_READY (the real tradable setup, still pending submission - see
-    _setup_from_trade) both represent "finished successfully", so both
-    belong here. Once an ENTRY_READY setup is actually submitted,
-    move_setup_to_completed moves it into completed_setups too, so this
-    union never double-counts or drops it."""
-    state = get_state()
-    pending_entry_ready = (setup for setup in state.setups.values() if setup.status is SetupStatus.ENTRY_READY)
-    setups = sorted(chain(pending_entry_ready, state.completed_setups.values()), key=lambda setup: setup.completed_at or setup.updated_at, reverse=True)
+    """Only setups execution has actually resolved - a real ENTRY_READY setup
+    still pending submission belongs in IN PROGRESS (see in_progress() above),
+    not here, until move_setup_to_completed actually moves it (a confirmed
+    trade or an explicit rejection - see live_automation.py's _process_setup).
+    The attempt-tracker's own "reached 100%" diagnostic marker lands directly
+    in completed_setups already (see _store_setup), so it needs no separate
+    union with state.setups here.
+
+    filter_and_cap_history (age + 100-cap) is applied here too, not just at
+    load/write time - wall-clock time passing alone can push a setup past
+    the 1-hour age limit between writes, with nothing to re-trigger
+    filtering until the next one."""
+    setups = sorted(filter_and_cap_history(get_state().completed_setups).values(), key=lambda setup: setup.completed_at or setup.updated_at, reverse=True)
     return ok(tuple(radar_record(setup) for setup in setups))
 
 
 @router.get("/invalidated")
 def invalidated():
-    setups = sorted(get_state().invalidated_setups.values(), key=lambda setup: setup.invalidated_at or setup.updated_at, reverse=True)
+    setups = sorted(filter_and_cap_history(get_state().invalidated_setups).values(), key=lambda setup: setup.invalidated_at or setup.updated_at, reverse=True)
     return ok(tuple(radar_record(setup) for setup in setups))
 
 

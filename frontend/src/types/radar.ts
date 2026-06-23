@@ -60,6 +60,11 @@ export type RadarSetup = {
   first_candle_entered_12m_fvg?: boolean | null;
   entry_candle_boundary_respected?: boolean | null;
   entry_ready?: boolean;
+  // null while a real ENTRY_READY setup is still "pending execution" in
+  // IN PROGRESS - one of 'trade_opened' | 'rejected' | 'risk_blocked' |
+  // 'no_margin' | 'invalidated' | 'expired' once execution has resolved it
+  // either way.
+  execution_status?: string | null;
   one_trade_per_fvg_status?: string | null;
   rejection_reason?: string | null;
   source?: string | null;

@@ -54,6 +54,12 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
         current_state=SetupState.COMPLETED,
         status=SetupStatus.COMPLETED,
         progress_percent=100.0,
+        # completed_at must be recent - completed_setups/invalidated_setups
+        # are filtered by a 1-hour age rule (filter_and_cap_history) on every
+        # API response, unlike state.setups (IN PROGRESS), which is never
+        # age-filtered. created_at/updated_at's fixed 2026-01-01 default from
+        # _make_setup would otherwise make this row vanish from /completed.
+        completed_at=datetime.now(timezone.utc),
     )
     invalidated = _make_setup(
         setup_id="set_invalidated",
@@ -61,12 +67,16 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
         current_state=SetupState.INVALIDATED,
         status=SetupStatus.INVALIDATED,
         progress_percent=65.0,
-        invalidated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        invalidated_at=datetime.now(timezone.utc),
         invalidation_reason=InvalidationReason.RETRACE_WINDOW_EXPIRED,
     )
     # Mirrors how _store_setup/move_setup_to_completed actually route a real
     # setup: ACTIVE and pending ENTRY_READY stay in the uncapped in-progress
     # pool, COMPLETED and INVALIDATED live in their own capped-at-100 stores.
+    # entry_ready is "pending execution" - still in state.setups because
+    # live_automation has not yet resolved it (no execution_status set) - so
+    # it belongs in IN PROGRESS, not COMPLETED, until it actually does (see
+    # should_leave_in_progress / live_automation.py's _process_setup).
     state.setups[active.setup_id] = active
     state.setups[entry_ready.setup_id] = entry_ready
     state.completed_setups[completed.setup_id] = completed
@@ -76,8 +86,8 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
     completed_rows = api.get("/api/setups/completed").json()["data"]
     invalidated_rows = api.get("/api/setups/invalidated").json()["data"]
 
-    assert [row["setup_id"] for row in in_progress] == ["set_active"]
-    assert {row["setup_id"] for row in completed_rows} == {"set_entry_ready", "set_completed"}
+    assert {row["setup_id"] for row in in_progress} == {"set_active", "set_entry_ready"}
+    assert [row["setup_id"] for row in completed_rows] == ["set_completed"]
     assert [row["setup_id"] for row in invalidated_rows] == ["set_invalidated"]
     # No setup appears in more than one tab, and none shows 100% + a reason.
     for row in completed_rows:
@@ -85,6 +95,33 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
     for row in invalidated_rows:
         assert row["progress_percent"] < 100.0
         assert row["invalidation_reason"] is not None
+
+
+def test_pending_execution_setup_at_100_percent_stays_in_in_progress() -> None:
+    """FIX 3, the explicit scenario: a real ENTRY_READY setup at 100%
+    progress with no execution_status yet ("pending execution" - execution
+    has not confirmed or rejected it) must stay in the IN PROGRESS list, with
+    its execution_status null (the frontend shows the "Pending execution"
+    badge for exactly this), and must not appear in COMPLETED."""
+    api = client()
+    state = get_state()
+
+    pending = _make_setup(
+        setup_id="set_pending_exec",
+        symbol="BTCUSDT",
+        current_state=SetupState.ENTRY_READY,
+        status=SetupStatus.ENTRY_READY,
+        progress_percent=100.0,
+    )
+    state.setups[pending.setup_id] = pending
+
+    in_progress = api.get("/api/setups/in-progress").json()["data"]
+    completed_rows = api.get("/api/setups/completed").json()["data"]
+
+    assert [row["setup_id"] for row in in_progress] == ["set_pending_exec"]
+    assert in_progress[0]["progress_percent"] == 100.0
+    assert in_progress[0]["execution_status"] is None
+    assert completed_rows == []
 
 
 def test_per_stage_columns_stay_in_sync_with_progress_and_state() -> None:

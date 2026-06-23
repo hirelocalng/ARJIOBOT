@@ -592,6 +592,7 @@ def _apply_one_attempt_trace(
         # reassigned to a failure marker - so it is exactly the last valid
         # stage reached before this trace's failing check ran.
         field_updates["last_valid_stage"] = stage
+        field_updates["execution_status"] = "invalidated"
     elif existing is not None and existing.invalidation_reason is not None:
         # A swing whose expansion/FVG check failed on an earlier poll can still
         # resolve favorably on a later one once more candles arrive (e.g. an
@@ -603,6 +604,7 @@ def _apply_one_attempt_trace(
         field_updates["invalidated_at"] = None
         field_updates["invalidation_reason"] = None
         field_updates["last_valid_stage"] = None
+        field_updates["execution_status"] = None
 
     if existing is None:
         # A setup that resolves immediately on the very first poll it is
@@ -686,6 +688,27 @@ def _apply_one_attempt_trace(
     _store_setup(state, replace(existing, **field_updates), is_invalidated=is_invalidated, target_status=target_status)
 
 
+def _predates_last_clear(state: Any, setup: Any) -> bool:
+    """True if this setup's own resolution timestamp is at or before the last
+    manual history clear (see setup_history_store.clear_setup_history) - it
+    existed before that clear and must never be (re-)written into
+    completed_setups/invalidated_setups, even though the live detection
+    funnel keeps re-deriving a COMPLETED/INVALIDATED row for this exact swing
+    every later poll for as long as it stays in the rolling candle buffer.
+    Without this, the next poll cycle after a manual clear silently
+    re-hydrates exactly what an operator just cleared.
+
+    getattr (not state.history_cleared_at directly) because several tests
+    drive this code with a lightweight SimpleNamespace state that has no such
+    attribute at all - that must mean "no clear has ever happened", not raise.
+    """
+    cleared_at = getattr(state, "history_cleared_at", None)
+    if cleared_at is None:
+        return False
+    timestamp = setup.completed_at or setup.invalidated_at
+    return timestamp is not None and timestamp <= cleared_at
+
+
 def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status: SetupStatus) -> None:
     """Route a setup to the one store matching its current status, removing
     it from the other two first - a setup that resolves (invalidated or
@@ -697,6 +720,10 @@ def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status:
     state.setups.pop(setup.setup_id, None)
     state.invalidated_setups.pop(setup.setup_id, None)
     state.completed_setups.pop(setup.setup_id, None)
+    if is_invalidated or target_status is SetupStatus.COMPLETED:
+        if _predates_last_clear(state, setup):
+            state.setup_history.pop(setup.setup_id, None)
+            return
     if is_invalidated:
         state.invalidated_setups[setup.setup_id] = setup
         _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
@@ -718,6 +745,9 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     same way an attempt-trace COMPLETED row does.
     """
     state.setups.pop(setup.setup_id, None)
+    if _predates_last_clear(state, setup):
+        state.setup_history.pop(setup.setup_id, None)
+        return
     state.completed_setups[setup.setup_id] = setup
     _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
     save_setup_history_store(state)
@@ -742,8 +772,12 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
         updated_at=expired_at,
         invalidated_at=expired_at,
         last_valid_stage="ENTRY_READY",
+        execution_status="expired",
     )
     state.setups.pop(setup.setup_id, None)
+    if _predates_last_clear(state, expired):
+        state.setup_history.pop(setup.setup_id, None)
+        return expired
     state.invalidated_setups[setup.setup_id] = expired
     _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
     save_setup_history_store(state)

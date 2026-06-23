@@ -4,9 +4,15 @@ import { StatusBadge } from '../layout/StatusBadge';
 import { DEFAULT_PRODUCTION_PROFILE } from '../../utils/constants';
 import { compactId } from '../../utils/formatters';
 
-// ENTRY_READY is the real, live-tradable setup automation will act on
-// (_setup_from_trade); COMPLETED is the attempt-tracker's own "this swing's
-// chain finished successfully" marker (_apply_one_attempt_trace) - a
+// A real ENTRY_READY setup only ever reaches this table once live_automation
+// has actually resolved it - execution_status is 'trade_opened' (a confirmed
+// live trade) or 'rejected'/'risk_blocked'/'no_margin' (explicitly rejected) -
+// see should_leave_in_progress (setup_tracker/setup_models.py) and
+// live_automation.py's _process_setup/_resolve_rejected_setup. It is never
+// 'Pending execution' here anymore - that stays in the In Progress table
+// (SetupRadarTable.tsx) until execution resolves it.
+// COMPLETED (attempt-tracker's own "this swing's chain finished successfully"
+// marker, _apply_one_attempt_trace) never sets execution_status at all - a
 // separate row for the same kind of event. Once a real ENTRY_READY setup is
 // tracked for a swing, the backend removes that swing's COMPLETED row
 // (_suppress_redundant_attempt_trace), so in steady state only one of the
@@ -15,16 +21,20 @@ import { compactId } from '../../utils/formatters';
 // it now only means "more than one swing resolved in the same poll, this
 // one is queued and will be picked up automatically on a later poll" (see
 // _stale_trade_candidates). It is a backlog-size signal, not a dead end.
+const REJECTED_EXECUTION_STATUSES = new Set(['rejected', 'risk_blocked', 'no_margin']);
+
 function executionStatus(row: RadarSetup): string {
+  if (row.execution_status === 'trade_opened') return 'Executed';
+  if (row.execution_status && REJECTED_EXECUTION_STATUSES.has(row.execution_status)) return `Rejected (${row.execution_status})`;
   if (row.related_execution) return 'Executed';
-  if (row.status === 'ENTRY_READY') return 'Pending execution';
   if (row.stale_skip) return 'Queued (backlog)';
   return 'Structural match';
 }
 
-function executionTone(row: RadarSetup): 'ok' | 'warn' | 'neutral' {
+function executionTone(row: RadarSetup): 'ok' | 'warn' | 'danger' | 'neutral' {
+  if (row.execution_status === 'trade_opened') return 'ok';
+  if (row.execution_status && REJECTED_EXECUTION_STATUSES.has(row.execution_status)) return 'danger';
   if (row.related_execution) return 'ok';
-  if (row.status === 'ENTRY_READY') return 'ok';
   if (row.stale_skip) return 'neutral';
   return 'neutral';
 }

@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.schemas.common import ok
 from arjiobot.backtesting.research_profiles import DEFAULT_PROFILE_ID, get_profile
+from arjiobot.setup_tracker.setup_history_store import filter_and_cap_history
 
 router = APIRouter(prefix="/api/radar", tags=["radar"])
 
@@ -190,6 +191,12 @@ def radar_record(setup) -> dict[str, object]:
         "first_candle_entered_12m_fvg": profile_status.get("first_candle_entered_12m_fvg", setup.progress_percent >= _FVG_8M_STAGE_THRESHOLD),
         "entry_candle_boundary_respected": profile_status.get("entry_candle_boundary_respected", setup.progress_percent >= _ENTRY_STAGE_THRESHOLD),
         "entry_ready": setup.current_state.value == "ENTRY_READY",
+        # None while a real ENTRY_READY setup is still "pending execution" in
+        # IN PROGRESS - one of TERMINAL_EXECUTION_STATES (trade_opened/
+        # rejected/risk_blocked/no_margin/invalidated/expired) once
+        # execution has resolved it either way (see should_leave_in_progress,
+        # setup_tracker/setup_models.py).
+        "execution_status": getattr(setup, "execution_status", None),
         "one_trade_per_fvg_status": profile_status.get("one_trade_per_fvg_status", "ENFORCED"),
         "rejection_reason": profile_status.get("rejection_reason") or (setup.invalidation_reason.value if setup.invalidation_reason else None),
         "source": metadata.get("source"),
@@ -201,8 +208,11 @@ def radar_record(setup) -> dict[str, object]:
 
 def _all_setups(state) -> tuple:
     """Every tracked setup across all three stores - in-progress (uncapped),
-    invalidated (capped at 100), completed (capped at 100)."""
-    return (*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values())
+    invalidated (age-filtered + capped at 100), completed (age-filtered +
+    capped at 100). filter_and_cap_history is read-only - applied here
+    defensively, since wall-clock time alone can push a setup past the
+    1-hour age limit between writes."""
+    return (*state.setups.values(), *filter_and_cap_history(state.invalidated_setups).values(), *filter_and_cap_history(state.completed_setups).values())
 
 
 @router.get("")

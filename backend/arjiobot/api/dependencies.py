@@ -319,6 +319,15 @@ class ApiState:
     # completed/invalidated history out, and vice versa.
     invalidated_setups: dict[str, object] = field(default_factory=dict)
     completed_setups: dict[str, object] = field(default_factory=dict)
+    # Set by setup_tracker.setup_history_store.clear_setup_history, in the same
+    # call that wipes completed_setups/invalidated_setups - never after. A
+    # setup whose completed_at/invalidated_at is at or before this instant
+    # must never be (re-)written into either store, even though the live
+    # detection funnel keeps re-deriving COMPLETED/INVALIDATED rows for
+    # swings still sitting in its rolling candle buffer on every later poll
+    # (see _predates_last_clear in live_setup_detection.py). None means no
+    # manual clear has happened yet this process lifetime.
+    history_cleared_at: datetime | None = None
     setup_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     # Keyed by swing_16m_id so Setup Radar can correlate a COMPLETED attempt
     # row to the matching real trade candidate that the shared strategy
