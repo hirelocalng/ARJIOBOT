@@ -653,6 +653,70 @@ def test_real_entry_ready_setup_takes_over_the_attempt_tracers_setup_id() -> Non
     assert real_setup.status is SetupStatus.ENTRY_READY
 
 
+def test_attempt_tracer_setup_completing_on_first_poll_is_recorded_in_in_progress_first() -> None:
+    """The fix for setups skipping IN PROGRESS entirely: a swing whose very
+    first observed trace already reaches ENTRY_READY/COMPLETED must still be
+    recorded in IN PROGRESS (state.setup_history) before the terminal
+    COMPLETED entry - never go straight from never-seen to COMPLETED."""
+    state = _fake_state("ADAUSDT", ())
+    trace = {**_swing_trace("swing_instant_complete_1", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    [setup] = state.completed_setups.values()
+    assert setup.status is SetupStatus.COMPLETED
+    assert setup.setup_id not in state.setups, "it must have moved on to completed_setups, not stayed in IN PROGRESS"
+    history = state.setup_history[setup.setup_id]
+    assert len(history) == 2, f"expected an IN PROGRESS entry before the terminal COMPLETED entry, got: {history}"
+    assert history[0]["reason"] == "recorded in IN PROGRESS before resolving in the same poll"
+    assert history[0]["to_state"] == SetupState.FVG_8M_CONFIRMED.value
+    assert history[1]["to_state"] == SetupState.COMPLETED.value
+
+
+def test_attempt_tracer_setup_invalidating_on_first_poll_is_recorded_in_in_progress_first() -> None:
+    """Mirror of the COMPLETED case: a swing that invalidates on the very
+    first poll it is ever observed on must still be recorded in IN PROGRESS
+    (at the last valid stage it actually reached) before the terminal
+    INVALIDATED entry."""
+    state = _fake_state("ADAUSDT", ())
+    trace = _swing_trace("swing_instant_invalid_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    [setup] = state.invalidated_setups.values()
+    assert setup.status is SetupStatus.INVALIDATED
+    assert setup.setup_id not in state.setups, "it must have moved on to invalidated_setups, not stayed in IN PROGRESS"
+    history = state.setup_history[setup.setup_id]
+    assert len(history) == 2, f"expected an IN PROGRESS entry before the terminal INVALIDATED entry, got: {history}"
+    assert history[0]["reason"] == "recorded in IN PROGRESS before resolving in the same poll"
+    assert history[0]["to_state"] == SetupState.SWING_16M_CONFIRMED.value
+    assert history[1]["to_state"] == SetupState.INVALIDATED.value
+
+
+def test_real_trade_on_first_poll_is_recorded_in_in_progress_before_entry_ready() -> None:
+    """Mirror of the attempt-tracer fix for the _setup_from_trade path: a
+    swing whose very first poll already produces a real, tradable
+    ENTRY_READY trade must still be recorded in IN PROGRESS before
+    ENTRY_READY - not go straight from never-seen to ENTRY_READY with no IN
+    PROGRESS history at all. The attempt-tracer (which runs first each poll)
+    and _setup_from_trade share this swing's setup_id (see
+    _find_tracked_setup_by_swing), so the full real chain is IN PROGRESS ->
+    COMPLETED (attempt-tracer's own terminal marker) -> ENTRY_READY (the
+    real trade taking over that same id) - all under one setup_id, with the
+    IN PROGRESS entry always first."""
+    candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
+    state = _fake_state("ADAUSDT", candles_1m[:150])
+
+    detect_live_setups_for_symbol(state, "ADAUSDT")
+
+    real_trades = [setup for setup in state.setups.values() if setup.current_state is SetupState.ENTRY_READY]
+    assert real_trades, "fixture assumption: this window produces a real entry-ready trade"
+    for real in real_trades:
+        history = state.setup_history[real.setup_id]
+        assert len(history) >= 2, f"setup {real.setup_id} must have an IN PROGRESS entry recorded before ENTRY_READY, got: {history}"
+        assert history[0]["reason"] == "recorded in IN PROGRESS before resolving in the same poll"
+        assert history[0]["to_state"] not in (SetupState.ENTRY_READY.value, SetupState.COMPLETED.value, SetupState.INVALIDATED.value)
+        assert history[-1]["to_state"] == SetupState.ENTRY_READY.value
+
+
 def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing() -> None:
     """End-to-end proof against real strategy data: the swing behind the real
     ENTRY_READY trade this window produces must not also still have its own

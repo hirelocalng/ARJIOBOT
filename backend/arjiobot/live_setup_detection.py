@@ -245,6 +245,28 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 selected_tp_model=selected_tp_model,
                 time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
             )
+            # A swing whose very first poll ever observed already produces a
+            # real, tradable ENTRY_READY trade (no earlier attempt-tracer
+            # history for it yet) must still be recorded in IN PROGRESS
+            # before this real setup is stored - otherwise it would go
+            # straight from never-seen to ENTRY_READY/COMPLETED without ever
+            # appearing in IN PROGRESS history.
+            _record_in_progress_before_terminal_move(
+                state,
+                setup_id=setup.setup_id,
+                symbol=setup.symbol,
+                direction=setup.direction,
+                created_at=setup.created_at,
+                current_state=SetupState.FVG_8M_CONFIRMED,
+                progress_percent=80.0,
+                swing_16m_id=setup.swing_16m_id,
+                expansion_16m_id=setup.expansion_16m_id,
+                fvg_16m_id=setup.fvg_16m_id,
+                fvg_12m_id=setup.fvg_12m_id,
+                metadata=setup.metadata,
+                now=setup.updated_at,
+                source=source,
+            )
             # setup.setup_id may already be tracked - the attempt-tracer's row
             # for this exact swing (see _find_tracked_setup_by_swing) - so
             # remove it from whichever store currently holds it before
@@ -433,6 +455,66 @@ def _apply_attempt_traces(
             logger.exception("Failed to apply one Setup Radar attempt trace for %s; continuing with remaining traces", symbol)
 
 
+def _record_in_progress_before_terminal_move(
+    state: Any,
+    *,
+    setup_id: str,
+    symbol: str,
+    direction: SetupDirection,
+    created_at: datetime,
+    current_state: SetupState,
+    progress_percent: float,
+    swing_16m_id: str | None = None,
+    expansion_16m_id: str | None = None,
+    fvg_16m_id: str | None = None,
+    fvg_12m_id: str | None = None,
+    fvg_8m_id: str | None = None,
+    metadata: dict[str, str],
+    now: datetime,
+    source: str,
+) -> None:
+    """Guarantee a setup is recorded in IN PROGRESS (state.setups,
+    state.setup_history) at its current stage before it is ever moved to
+    COMPLETED or INVALIDATED - even one that resolves to ENTRY_READY or
+    invalidates on the very first poll it is ever observed on, which would
+    otherwise go straight into completed_setups/invalidated_setups without
+    ever appearing in IN PROGRESS history at all.
+
+    Only does real work for a setup_id with no history yet - a setup that
+    has already been through at least one earlier poll has necessarily
+    already passed through here (or through the normal existing-setup path
+    in _apply_one_attempt_trace), so this is a no-op for it.
+    """
+    if setup_id in state.setup_history:
+        return
+    snapshot = Setup(
+        setup_id=setup_id,
+        symbol=symbol,
+        direction=direction,
+        current_state=current_state,
+        progress_percent=progress_percent,
+        status=SetupStatus.ACTIVE,
+        created_at=created_at,
+        updated_at=now,
+        swing_16m_id=swing_16m_id,
+        expansion_16m_id=expansion_16m_id,
+        fvg_16m_id=fvg_16m_id,
+        fvg_12m_id=fvg_12m_id,
+        fvg_8m_id=fvg_8m_id,
+        metadata=dict(metadata),
+    )
+    state.setups[setup_id] = snapshot
+    state.setup_history[setup_id] = [
+        {
+            "from_state": None,
+            "to_state": current_state.value,
+            "changed_at": now.isoformat(),
+            "reason": "recorded in IN PROGRESS before resolving in the same poll",
+            "source": source,
+        }
+    ]
+
+
 def _apply_one_attempt_trace(
     state: Any,
     trace: dict[str, object],
@@ -448,7 +530,8 @@ def _apply_one_attempt_trace(
     setup_id = build_setup_id(symbol=str(trace["symbol"]), direction=direction, created_at=swing_timestamp, htf_fvg_id=swing_id)
 
     stage = str(trace.get("stage") or "SWING_16M_CONFIRMED")
-    target_state = _ATTEMPT_STAGE_TO_STATE.get(stage, SetupState.SWING_16M_CONFIRMED)
+    mapped_state_for_stage = _ATTEMPT_STAGE_TO_STATE.get(stage, SetupState.SWING_16M_CONFIRMED)
+    target_state = mapped_state_for_stage
     is_invalidated = trace.get("invalidation_reason") is not None and bool(trace.get("is_terminal")) and stage != "ENTRY_READY"
     if is_invalidated:
         target_state = SetupState.INVALIDATED
@@ -529,6 +612,47 @@ def _apply_one_attempt_trace(
         field_updates["last_valid_stage"] = None
 
     if existing is None:
+        # A setup that resolves immediately on the very first poll it is
+        # ever observed on (terminal already on first sight) must still be
+        # recorded in IN PROGRESS before moving on - otherwise it would go
+        # straight into invalidated_setups/completed_setups and never once
+        # appear in IN PROGRESS history.
+        if is_invalidated:
+            _record_in_progress_before_terminal_move(
+                state,
+                setup_id=setup_id,
+                symbol=str(trace["symbol"]),
+                direction=direction,
+                created_at=swing_timestamp,
+                current_state=mapped_state_for_stage,
+                progress_percent=new_progress,
+                swing_16m_id=swing_id,
+                expansion_16m_id=field_updates.get("expansion_16m_id"),
+                fvg_16m_id=field_updates.get("fvg_16m_id"),
+                fvg_12m_id=field_updates.get("fvg_12m_id"),
+                fvg_8m_id=field_updates.get("fvg_8m_id"),
+                metadata=metadata,
+                now=now,
+                source=source,
+            )
+        elif target_status is SetupStatus.COMPLETED:
+            _record_in_progress_before_terminal_move(
+                state,
+                setup_id=setup_id,
+                symbol=str(trace["symbol"]),
+                direction=direction,
+                created_at=swing_timestamp,
+                current_state=SetupState.FVG_8M_CONFIRMED,
+                progress_percent=80.0,
+                swing_16m_id=swing_id,
+                expansion_16m_id=field_updates.get("expansion_16m_id"),
+                fvg_16m_id=field_updates.get("fvg_16m_id"),
+                fvg_12m_id=field_updates.get("fvg_12m_id"),
+                fvg_8m_id=field_updates.get("fvg_8m_id"),
+                metadata=metadata,
+                now=now,
+                source=source,
+            )
         setup = Setup(
             setup_id=setup_id,
             created_at=swing_timestamp,
@@ -544,7 +668,7 @@ def _apply_one_attempt_trace(
             ),
             **field_updates,
         )
-        state.setup_history[setup_id] = [
+        state.setup_history.setdefault(setup_id, []).append(
             {
                 "from_state": None,
                 "to_state": target_state.value,
@@ -552,7 +676,7 @@ def _apply_one_attempt_trace(
                 "reason": f"setup radar: {stage}",
                 "source": source,
             }
-        ]
+        )
         _store_setup(state, setup, is_invalidated=is_invalidated, target_status=target_status)
         return
 
