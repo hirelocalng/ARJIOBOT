@@ -36,11 +36,11 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 STORE_PATH = DATA_DIR / "setup_history_store.json"
-# Tracks whether the one-time reset migration has already run - a marker
-# file, not a repeated-on-every-startup wipe, so genuine history accumulated
-# after the migration survives every later restart instead of being wiped
-# again each time.
-MIGRATION_MARKER_PATH = DATA_DIR / ".setup_history_reset_migrated"
+# Tracks whether the one-time history-clear migration has already run - a
+# marker file, not a repeated-on-every-startup wipe, so genuine history
+# accumulated after the migration survives every later restart instead of
+# being wiped again each time.
+HISTORY_CLEARED_MARKER_PATH = DATA_DIR / ".history_cleared"
 
 _DATETIME_FIELDS = ("created_at", "updated_at", "invalidated_at", "completed_at")
 
@@ -148,19 +148,45 @@ def load_setup_history_store(state: Any) -> tuple[int, int]:
     return completed_count, invalidated_count
 
 
-def run_one_time_completed_invalidated_reset_migration(state: Any) -> bool:
-    """Exactly once - tracked by MIGRATION_MARKER_PATH, never by a repeated
-    startup wipe - delete any existing persisted completed/invalidated setup
-    history. This is the literal "delete all existing completed and
-    invalidated setup records right now" migration: it runs on whichever
-    deploy first ships this persistence layer, then never runs again, so
-    genuine history accumulated after that point survives every later
-    restart instead of being wiped again each time.
+def clear_setup_history(state: Any) -> tuple[int, int]:
+    """Clear completed_setups/invalidated_setups in memory AND delete the
+    persisted file from disk, simultaneously - the on-demand equivalent of
+    the one-time startup migration below, for an operator to trigger
+    manually (see api/routes/admin.py's POST /api/admin/clear-setup-history)
+    without waiting for a restart. IN PROGRESS (state.setups) is never
+    touched. Returns (completed_count, invalidated_count) cleared."""
+    completed_count = len(state.completed_setups)
+    invalidated_count = len(state.invalidated_setups)
+    for setup_id in list(state.completed_setups):
+        state.completed_setups.pop(setup_id, None)
+        state.setup_history.pop(setup_id, None)
+    for setup_id in list(state.invalidated_setups):
+        state.invalidated_setups.pop(setup_id, None)
+        state.setup_history.pop(setup_id, None)
+    STORE_PATH.unlink(missing_ok=True)
+    logger.warning(
+        "Manual clear: cleared %d completed setup(s) and %d invalidated setup(s) and deleted %s.",
+        completed_count,
+        invalidated_count,
+        STORE_PATH,
+    )
+    return completed_count, invalidated_count
+
+
+def run_one_time_history_clear_migration(state: Any) -> bool:
+    """Exactly once - tracked by HISTORY_CLEARED_MARKER_PATH, never by a
+    repeated startup wipe - clear completed_setups/invalidated_setups in
+    memory and save that now-empty state to disk, OVERWRITING whatever was
+    already in setup_history_store.json (including a file that predates
+    this migration entirely, e.g. one left over from before the marker
+    existed). This is what guarantees the wipe happens on the next deploy
+    regardless of what is already on disk - then it never runs again, so
+    genuine history recorded after this point survives every later restart.
 
     Returns whether the wipe actually ran (False on every call after the
     first, once the marker file exists).
     """
-    if MIGRATION_MARKER_PATH.exists():
+    if HISTORY_CLEARED_MARKER_PATH.exists():
         return False
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     completed_count = len(state.completed_setups)
@@ -171,11 +197,15 @@ def run_one_time_completed_invalidated_reset_migration(state: Any) -> bool:
     for setup_id in list(state.invalidated_setups):
         state.invalidated_setups.pop(setup_id, None)
         state.setup_history.pop(setup_id, None)
-    STORE_PATH.unlink(missing_ok=True)
-    MIGRATION_MARKER_PATH.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    # Overwrites any pre-existing setup_history_store.json with the now-empty
+    # state, rather than relying on the file not existing - this is what
+    # makes the migration correct even when an old file with stale entries
+    # is already sitting on disk before this code ever runs.
+    save_setup_history_store(state)
+    HISTORY_CLEARED_MARKER_PATH.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
     logger.warning(
-        "One-time migration: cleared %d completed setup(s) and %d invalidated setup(s) and deleted %s - "
-        "COMPLETED/INVALIDATED tabs start at 0 from this deploy forward; this migration will not run again.",
+        "One-time migration: cleared %d completed setup(s) and %d invalidated setup(s) and saved the empty state "
+        "to %s - COMPLETED/INVALIDATED tabs start at 0 from this deploy forward; this migration will not run again.",
         completed_count,
         invalidated_count,
         STORE_PATH,

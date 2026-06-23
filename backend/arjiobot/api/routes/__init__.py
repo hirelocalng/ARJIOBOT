@@ -1,10 +1,11 @@
 """API route registration."""
 
-from arjiobot.api.routes import account_status, accounts, auth, backtesting, bitget, control_plane, execution, health, live_automation, live_trading, mobile, monitoring, pairs, radar, reports, risk, settings, setups, signals, system, trades
+from arjiobot.api.routes import account_status, accounts, admin, auth, backtesting, bitget, control_plane, execution, health, live_automation, live_trading, mobile, monitoring, pairs, radar, reports, risk, settings, setups, signals, system, trades
 
 ROUTERS = (
     auth.router,
     health.router,
+    admin.router,
     account_status.router,
     accounts.router,
     bitget.router,

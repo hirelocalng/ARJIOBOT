@@ -184,7 +184,7 @@ def test_completed_and_invalidated_mutations_persist_to_disk_in_progress_does_no
     from arjiobot.setup_tracker import setup_history_store
 
     monkeypatch.setattr(setup_history_store, "STORE_PATH", tmp_path / "setup_history_store.json")
-    monkeypatch.setattr(setup_history_store, "MIGRATION_MARKER_PATH", tmp_path / ".setup_history_reset_migrated")
+    monkeypatch.setattr(setup_history_store, "HISTORY_CLEARED_MARKER_PATH", tmp_path / ".history_cleared")
     state = _fake_state("ADAUSDT", ())
 
     invalidated_trace = _swing_trace("swing_inv_persist_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
