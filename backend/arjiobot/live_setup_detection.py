@@ -42,14 +42,6 @@ _RUNNER: ModuleType | None = None
 
 MAX_TRACKED_SETUP_ATTEMPTS = 100
 
-# Mirrors live_automation.py's STALE_ENTRY_READY_MAX_AGE (2 closed 12M
-# candles) - kept as its own constant here, not imported from
-# live_automation.py, so this one-time purge can never accidentally change
-# what the execution-time staleness gate itself does; it only prunes Setup
-# Radar's COMPLETED display/history store of entries from before that gate
-# existed.
-COMPLETED_SETUP_PURGE_MAX_AGE = timedelta(minutes=24)
-
 # A stale skip whose detection happens within this many seconds of the
 # current monitoring session's started_at is classified as catching up on a
 # backlog from before this session started (a restart/outage), rather than a
@@ -727,41 +719,42 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
 
 
-def purge_stale_completed_setups(state: Any, *, now: datetime | None = None) -> tuple[str, ...]:
-    """One-time startup purge of completed_setups entries older than
-    COMPLETED_SETUP_PURGE_MAX_AGE (the same 24-minute/2-closed-12M-candle
-    window the execution-time staleness gate in live_automation.py uses).
+def clear_completed_and_invalidated_setups_on_startup(state: Any) -> tuple[int, int]:
+    """One-time startup reset: clear completed_setups and invalidated_setups
+    entirely, regardless of age, so Setup Radar's COMPLETED/INVALIDATED tabs
+    start at 0 on every deploy/restart and only ever show setups that
+    resolved after that point - no carried-over history. The 100-cap
+    eviction (_evict_oldest) is unaffected and remains the only thing that
+    removes entries once new ones accumulate past 100 going forward.
 
-    completed_setups is Setup Radar's COMPLETED display/history store only -
-    it is never read by run_live_automation_once's ENTRY_READY filter, by
-    _real_time_open_positions (which queries Bitget directly for open
-    position counts), or by the staleness gate itself (_expire_if_stale only
-    ever evaluates state.setups). Purging it changes nothing about which
-    setups are eligible to execute; it only clears old display rows that
-    predate the staleness gate's introduction, so Setup Radar's COMPLETED tab
-    does not keep showing days-old rows indefinitely.
+    state.setups (IN PROGRESS) is never touched here - it already only ever
+    reflects currently-active setups, with nothing historical to clear.
 
-    Returns the setup_ids removed, for logging/verification.
+    completed_setups/invalidated_setups are purely in-memory with no disk
+    persistence, so a freshly started process already has both empty before
+    this ever runs - this function exists to make that guarantee explicit,
+    observable (logged), and correct even if persistence is ever added later.
+
+    Returns (completed_count, invalidated_count) cleared, for logging/
+    verification.
     """
-    cutoff = (now or datetime.now(timezone.utc)) - COMPLETED_SETUP_PURGE_MAX_AGE
-    stale_ids = tuple(
-        setup_id
-        for setup_id, setup in state.completed_setups.items()
-        if (setup.completed_at or setup.updated_at) < cutoff
-    )
-    for setup_id in stale_ids:
+    completed_count = len(state.completed_setups)
+    invalidated_count = len(state.invalidated_setups)
+    for setup_id in list(state.completed_setups):
         state.completed_setups.pop(setup_id, None)
         state.setup_history.pop(setup_id, None)
-    if stale_ids:
+    for setup_id in list(state.invalidated_setups):
+        state.invalidated_setups.pop(setup_id, None)
+        state.setup_history.pop(setup_id, None)
+    if completed_count or invalidated_count:
         logger.warning(
-            "Startup purge: removed %d stale completed setup(s) (older than %s) from Setup Radar's COMPLETED store: %s",
-            len(stale_ids),
-            COMPLETED_SETUP_PURGE_MAX_AGE,
-            ", ".join(stale_ids),
+            "Startup reset: cleared %d completed setup(s) and %d invalidated setup(s) - COMPLETED/INVALIDATED tabs start at 0 from this deploy forward.",
+            completed_count,
+            invalidated_count,
         )
     else:
-        logger.info("Startup purge: no completed setups older than %s found - nothing to remove.", COMPLETED_SETUP_PURGE_MAX_AGE)
-    return stale_ids
+        logger.info("Startup reset: completed_setups/invalidated_setups already empty - nothing to clear.")
+    return completed_count, invalidated_count
 
 
 def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:

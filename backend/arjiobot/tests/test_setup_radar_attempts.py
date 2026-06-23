@@ -28,8 +28,8 @@ from arjiobot.live_setup_detection import (
     _stale_trade_candidates,
     _suppress_redundant_attempt_trace,
     _trade_key,
+    clear_completed_and_invalidated_setups_on_startup,
     detect_live_setups_for_symbol,
-    purge_stale_completed_setups,
 )
 from arjiobot.market_data.candle_models import Candle, Timeframe
 from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
@@ -176,29 +176,15 @@ def test_completed_history_is_capped_at_100_independently_of_in_progress() -> No
     assert "swing_done_0" not in remaining_ids
 
 
-def test_purge_stale_completed_setups_removes_only_entries_older_than_24_minutes() -> None:
-    """One-time startup purge: completed_setups entries from before the
-    staleness gate existed (e.g. 5 days old) must be removed; anything still
-    within the 24-minute/2-closed-12M-candle window must be kept untouched."""
+def test_clear_completed_and_invalidated_setups_on_startup_wipes_both_regardless_of_age() -> None:
+    """One-time startup reset: every completed_setups/invalidated_setups
+    entry is cleared regardless of age - a setup completed 10 minutes ago
+    must be wiped exactly the same as one from 5 days ago. COMPLETED/
+    INVALIDATED tabs start at 0 on this deploy; only setups that resolve
+    afterward should ever appear. IN PROGRESS (state.setups) must be left
+    completely untouched - it already only reflects currently-active setups."""
     state = _fake_state("ADAUSDT", ())
     now = datetime(2026, 6, 23, 12, 0, 0, tzinfo=timezone.utc)
-    old_trade = _setup_from_trade(
-        {
-            "trade_id": "trade_old_1",
-            "symbol": "ADAUSDT",
-            "direction": "BEARISH",
-            "entry_timestamp": (now - timedelta(days=5)).isoformat(),
-            "entry_price": "100",
-            "stop_loss": "120",
-            "take_profit": "80",
-            "source_12m_fvg_id": "fvg12_old",
-            "source_16m_swing_id": "swing_old_1",
-            "source_16m_fvg_id": "fvg16_old",
-        },
-        state=state,
-        profile_id="PROFILE_2",
-        timeframe_profile_id="DEFAULT_16_12_8",
-    )
     fresh_trade = _setup_from_trade(
         {
             "trade_id": "trade_fresh_1",
@@ -216,18 +202,27 @@ def test_purge_stale_completed_setups_removes_only_entries_older_than_24_minutes
         profile_id="PROFILE_2",
         timeframe_profile_id="DEFAULT_16_12_8",
     )
-    state.completed_setups[old_trade.setup_id] = old_trade
     state.completed_setups[fresh_trade.setup_id] = fresh_trade
-    state.setup_history[old_trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
     state.setup_history[fresh_trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
 
-    removed = purge_stale_completed_setups(state, now=now)
+    invalidated_trace = _swing_trace("swing_inv_startup_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+    _apply_attempt_traces(state, "ADAUSDT", (invalidated_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    [invalidated_setup] = state.invalidated_setups.values()
 
-    assert removed == (old_trade.setup_id,)
-    assert old_trade.setup_id not in state.completed_setups
-    assert old_trade.setup_id not in state.setup_history
-    assert fresh_trade.setup_id in state.completed_setups, "a completed setup still within the staleness window must not be purged"
-    assert fresh_trade.setup_id in state.setup_history
+    in_progress_trace = _swing_trace("swing_active_startup_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0)
+    _apply_attempt_traces(state, "ADAUSDT", (in_progress_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    [active_setup] = [s for s in state.setups.values() if s.swing_16m_id == "swing_active_startup_1"]
+
+    completed_count, invalidated_count = clear_completed_and_invalidated_setups_on_startup(state)
+
+    assert completed_count == 1
+    assert invalidated_count == 1
+    assert state.completed_setups == {}
+    assert state.invalidated_setups == {}
+    assert fresh_trade.setup_id not in state.setup_history
+    assert invalidated_setup.setup_id not in state.setup_history
+    assert active_setup.setup_id in state.setups, "IN PROGRESS must never be touched by the startup reset"
+    assert active_setup.setup_id in state.setup_history
 
 
 def test_in_progress_pool_has_no_cap() -> None:
