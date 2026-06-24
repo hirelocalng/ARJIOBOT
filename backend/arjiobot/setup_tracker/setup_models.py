@@ -206,13 +206,30 @@ def clamp_progress(value: float) -> float:
     return max(0.0, min(100.0, float(value)))
 
 
+# Minimum IN PROGRESS dwell time: every non-execution exit from IN PROGRESS
+# (attempt-tracer strategy failure or structural-match-only -> INVALIDATED in
+# live_setup_detection.py's _apply_one_attempt_trace; the staleness gate ->
+# INVALIDATED in live_automation.py's _expire_if_stale) must wait at least
+# this long, measured from the setup's own created_at, before it actually
+# moves - so the frontend (which polls every few seconds) gets a real chance
+# to display it in IN PROGRESS first, instead of a setup being created and
+# resolved within the same poll cycle and never visibly appearing at all.
+# Must be greater than the frontend's own poll interval (5s - see
+# frontend/src/App.tsx's setInterval). Does NOT apply to a hard execution
+# decision (trade_opened/rejected/risk_blocked/no_margin) - those bypass
+# dwell entirely and resolve immediately, exactly as before this existed.
+# Shared by live_setup_detection.py and live_automation.py - defined once
+# here, both import it, rather than duplicating the same constant in each.
+MIN_DWELL_SECONDS = 15
+
 # "Pending execution" (execution_status is None) is deliberately NOT in this
 # set - it must never make a setup leave IN PROGRESS on its own. A setup
 # leaves IN PROGRESS only once one of these is reached: a confirmed live
 # trade (trade_opened), an explicit execution-side rejection (rejected/
-# risk_blocked/no_margin), or it became invalidated/expired through the
-# existing, separate invalidation/staleness paths.
-TERMINAL_EXECUTION_STATES = frozenset({"trade_opened", "rejected", "risk_blocked", "no_margin", "invalidated", "expired"})
+# risk_blocked/no_margin), it became invalidated/expired through the
+# existing, separate invalidation/staleness paths, or execution never
+# responded at all within EXECUTION_TIMEOUT_SECONDS (live_automation.py).
+TERMINAL_EXECUTION_STATES = frozenset({"trade_opened", "rejected", "risk_blocked", "no_margin", "invalidated", "expired", "execution_timeout"})
 
 
 def should_leave_in_progress(setup: Setup) -> bool:

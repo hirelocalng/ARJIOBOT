@@ -24,6 +24,7 @@ from arjiobot.fvg.fvg import FVGDetectionEngine
 from arjiobot.market_data.candle_models import Candle, CandleStatus, Timeframe
 from arjiobot.setup_tracker.setup_history_store import save_setup_history_store
 from arjiobot.setup_tracker.setup_models import (
+    MIN_DWELL_SECONDS,
     InvalidationReason,
     Setup,
     SetupDirection,
@@ -574,6 +575,31 @@ def _record_in_progress_before_terminal_move(
     ]
 
 
+def _dwell_elapsed(*, symbol: str, setup_id: str, created_at: datetime, now: datetime, reason: str) -> bool:
+    """Minimum IN PROGRESS dwell time: a non-execution exit to INVALIDATED
+    (strategy failure or structural-match-only, here; the staleness gate has
+    its own identical check in live_automation.py's _expire_if_stale) must
+    wait at least MIN_DWELL_SECONDS since the setup's own created_at before
+    it is allowed to actually happen - so the frontend (which polls every
+    few seconds) gets a real chance to display the setup in IN PROGRESS
+    first, instead of it being created and resolved within the same poll
+    cycle and never visibly appearing at all. Does not apply to a hard
+    execution decision (trade_opened/rejected/risk_blocked/no_margin) -
+    those are never routed through here.
+
+    Logs at DEBUG while still waiting, INFO the one time it actually clears.
+    Returns True once dwell has elapsed (the caller should proceed with the
+    move), False while still waiting (the caller must leave the setup
+    exactly as it is - no field update, no re-evaluation recorded).
+    """
+    time_in_progress = (now - created_at).total_seconds()
+    if time_in_progress < MIN_DWELL_SECONDS:
+        logger.debug("[DWELL] %s %s waiting %.1fs / %ss before INVALIDATED (%s)", symbol, setup_id, time_in_progress, MIN_DWELL_SECONDS, reason)
+        return False
+    logger.info("[IN PROGRESS -> INVALIDATED] %s %s dwell complete, reason: %s", symbol, setup_id, reason)
+    return True
+
+
 def _apply_one_attempt_trace(
     state: Any,
     trace: dict[str, object],
@@ -737,6 +763,12 @@ def _apply_one_attempt_trace(
                 now=now,
                 source=source,
             )
+        if is_invalidated and not _dwell_elapsed(symbol=str(trace["symbol"]), setup_id=setup_id, created_at=swing_timestamp, now=now, reason=field_updates["invalidation_reason"].value):
+            # Not yet - the swing is already recorded in IN PROGRESS above
+            # (at its pre-failure stage), but the move to INVALIDATED itself
+            # waits for MIN_DWELL_SECONDS to elapse since swing_timestamp -
+            # no strategy re-evaluation, nothing else happens here.
+            return
         setup = Setup(
             setup_id=setup_id,
             created_at=swing_timestamp,
@@ -762,6 +794,13 @@ def _apply_one_attempt_trace(
             }
         )
         _store_setup(state, setup, is_invalidated=is_invalidated, target_status=target_status)
+        return
+
+    if is_invalidated and not _dwell_elapsed(symbol=existing.symbol, setup_id=setup_id, created_at=existing.created_at, now=now, reason=field_updates["invalidation_reason"].value):
+        # Not yet - leave existing exactly as it is: no field update, no
+        # state_history append, no strategy re-evaluation recorded. The
+        # funnel may keep re-deriving the same trace every poll until dwell
+        # elapses, but nothing about the stored setup changes because of it.
         return
 
     if existing.current_state != target_state:

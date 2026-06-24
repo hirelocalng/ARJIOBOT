@@ -16,7 +16,7 @@ from arjiobot.exchange.bitget_environment import EnvironmentLockError, LIVE_CONF
 from arjiobot.live_setup_detection import expire_stale_setup, move_setup_to_completed
 from arjiobot.risk.isolated_margin import DEFAULT_FEE_RATE, DEFAULT_SLIPPAGE_BUFFER_RATE
 from arjiobot.risk.risk_models import AccountSnapshot, OpenRiskState, RiskConfig, RiskRejectionReason, TradePlanStatus
-from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
+from arjiobot.setup_tracker.setup_models import MIN_DWELL_SECONDS, SetupState, SetupStatus
 from arjiobot.strategy.strategy_models import SignalAction, SignalRejectionReason, SignalStatus
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,22 @@ logger = logging.getLogger(__name__)
 # moved away from its entry zone by then, so it must not be executed late -
 # 2 closed 12M candles (24 minutes) is the staleness limit.
 STALE_ENTRY_READY_MAX_AGE = timedelta(minutes=24)
+
+# Minimum IN PROGRESS dwell time fix: if a real ENTRY_READY setup keeps
+# getting blocked at a retryable stage (BITGET_DRY_RUN_PREVIEW/
+# BITGET_LIVE_ORDER - see _process_setup's docstring on why those retry
+# instead of resolving immediately) without EVER reaching a hard execution
+# decision, it must not be left retrying forever - after this many seconds
+# with no resolution, _timeout_if_execution_pending_too_long forces it to
+# COMPLETED tagged execution_timeout, so Setup Radar shows what actually
+# happened instead of a setup stuck "pending execution" indefinitely. Far
+# shorter than STALE_ENTRY_READY_MAX_AGE above (a different, existing gate
+# about the entry zone's own price staleness, not execution responsiveness) -
+# _expire_if_stale is still checked first in the loop below, so that more
+# specific, pre-existing diagnostic keeps taking precedence in the rare case
+# both thresholds are already satisfied at once (e.g. automation was paused
+# for a very long time).
+EXECUTION_TIMEOUT_SECONDS = 60
 
 
 def ensure_live_automation_state(state: Any) -> dict[str, Any]:
@@ -118,6 +134,10 @@ def run_live_automation_once(state: Any, *, source: str = "MANUAL") -> dict[str,
             if expired_attempt is not None:
                 attempts.append(expired_attempt)
                 continue
+            timed_out_attempt = _timeout_if_execution_pending_too_long(state, automation, setup, source=source)
+            if timed_out_attempt is not None:
+                attempts.append(timed_out_attempt)
+                continue
             try:
                 attempts.append(_process_setup(state, automation, setup, source=source))
             except Exception as exc:
@@ -174,11 +194,27 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     Returns the skipped attempt record (and marks the setup EXPIRED in Setup
     Radar via expire_stale_setup) if completed_at is missing or older than
     STALE_ENTRY_READY_MAX_AGE; returns None if the setup is fresh enough to
-    proceed to _process_setup unchanged."""
+    proceed to _process_setup unchanged.
+
+    Minimum dwell time: even once staleness is confirmed, the move to
+    INVALIDATED waits for MIN_DWELL_SECONDS since the setup's own created_at
+    (same rule as the attempt-tracer's non-execution exits in
+    live_setup_detection.py) - in practice STALE_ENTRY_READY_MAX_AGE (24
+    minutes) is always already far past MIN_DWELL_SECONDS (15s) by the time
+    this fires, so this only matters defensively if either constant is ever
+    reconfigured. Dwell never delays _process_setup itself - only this
+    non-execution exit; a hard execution decision can still happen this same
+    poll regardless of dwell.
+    """
     now = datetime.now(timezone.utc)
     age = (now - setup.completed_at) if setup.completed_at is not None else None
     if age is not None and age <= STALE_ENTRY_READY_MAX_AGE:
         return None
+    time_in_progress = (now - setup.created_at).total_seconds()
+    if time_in_progress < MIN_DWELL_SECONDS:
+        logger.debug("[DWELL] %s %s waiting %.1fs / %ss before INVALIDATED (staleness_expired)", setup.symbol, setup.setup_id, time_in_progress, MIN_DWELL_SECONDS)
+        return None
+    logger.info("[IN PROGRESS -> INVALIDATED] %s %s dwell complete, reason: SETUP_EXPIRED", setup.symbol, setup.setup_id)
     expire_stale_setup(state, setup, expired_at=now)
     # Self-healing, same reason as the DUPLICATE_SIGNAL branch in
     # _process_setup: this setup never reached SUBMITTED, so any earlier
@@ -203,6 +239,52 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     return record
 
 
+def _timeout_if_execution_pending_too_long(state: Any, automation: dict[str, Any], setup: Any, *, source: str) -> dict[str, Any] | None:
+    """Execution-timeout safety net: a real ENTRY_READY setup that keeps
+    getting blocked at a retryable stage (BITGET_DRY_RUN_PREVIEW/
+    BITGET_LIVE_ORDER) without ever reaching a hard execution decision must
+    not be left retrying forever - after EXECUTION_TIMEOUT_SECONDS with no
+    resolution, force it to COMPLETED tagged execution_timeout instead.
+
+    Checked after _expire_if_stale (which takes precedence if both
+    thresholds are already satisfied) and before _process_setup is given
+    another chance to actually attempt execution this cycle.
+
+    Measured from _seconds_since_detected (metadata["detected_at_wallclock"],
+    stamped by _setup_from_trade) - real wall-clock time since detection,
+    not setup.created_at/completed_at, both of which can be a candle's own
+    historical timestamp (arbitrarily far in the past during a backtest or a
+    restart catch-up) rather than when this process actually started trying
+    to execute it. A setup with no such metadata (e.g. hand-built outside
+    the normal detection flow) never times out here - fail-safe, since there
+    is no reliable wall-clock anchor to measure against.
+
+    Returns the timeout attempt record if it fired; None if the setup is
+    still within its execution-pending window (or has no reliable detection
+    timestamp) and must be handed to _process_setup as normal.
+    """
+    time_in_progress = _seconds_since_detected(setup)
+    if time_in_progress is None or time_in_progress < EXECUTION_TIMEOUT_SECONDS:
+        return None
+    resolved = replace(setup, execution_status="execution_timeout", updated_at=datetime.now(timezone.utc))
+    move_setup_to_completed(state, resolved)
+    state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
+    reason = f"execution never reached a decision within {EXECUTION_TIMEOUT_SECONDS}s of detection ({time_in_progress:.1f}s elapsed) - marked COMPLETED/execution_timeout"
+    record = {
+        "source": source,
+        "setup_id": setup.setup_id,
+        "symbol": setup.symbol,
+        "stage": "EXECUTION_TIMEOUT",
+        "status": "COMPLETED",
+        "reason": reason,
+        "created_at": _now(),
+    }
+    logger.warning("Live automation: setup %s timed out waiting for an execution decision (%s)", setup.setup_id, reason)
+    logger.info("[IN PROGRESS -> COMPLETED] %s %s dwell complete, status: execution_timeout", setup.symbol, setup.setup_id)
+    _append_attempt(automation, record)
+    return record
+
+
 def _resolve_rejected_setup(state: Any, setup: Any, *, execution_status: str, reason: str) -> None:
     """Move a real ENTRY_READY setup out of IN PROGRESS the moment execution
     explicitly rejects it (signal-level or risk-level - see
@@ -215,6 +297,10 @@ def _resolve_rejected_setup(state: Any, setup: Any, *, execution_status: str, re
     before (see test_setup_blocked_downstream_of_signal_generation_can_be_retried_on_a_later_poll)."""
     resolved = replace(setup, execution_status=execution_status, updated_at=datetime.now(timezone.utc))
     move_setup_to_completed(state, resolved)
+    # Hard execution decision (Setup Radar dwell fix): never delayed by
+    # MIN_DWELL_SECONDS - rejected/risk_blocked/no_margin resolve immediately,
+    # the instant execution actually makes the call, exactly like trade_opened.
+    logger.info("[IN PROGRESS -> COMPLETED] %s %s immediate - %s (bypassed dwell)", setup.symbol, setup.setup_id, execution_status)
     logger.warning("[EXECUTION] %s REJECTED - reason: %s | setup stays in history as completed/rejected", setup.setup_id, reason)
 
 
@@ -343,6 +429,10 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     # this attempt's bitget_order_id/trade_plan_id (see radar.py's
     # _related_execution), and stops being listed as "in progress".
     move_setup_to_completed(state, replace(setup, execution_status="trade_opened", updated_at=datetime.now(timezone.utc)))
+    # Hard execution decision (Setup Radar dwell fix): never delayed by
+    # MIN_DWELL_SECONDS - the order was actually placed, so this resolves
+    # immediately regardless of how long the setup has been in IN PROGRESS.
+    logger.info("[IN PROGRESS -> COMPLETED] %s %s immediate - trade_opened (bypassed dwell)", setup.symbol, setup.setup_id)
     _append_attempt(automation, attempt)
     logger.info(
         "Live automation: order PLACED on Bitget for setup %s (%s) - bitget_order_id=%s trade_plan_id=%s",
