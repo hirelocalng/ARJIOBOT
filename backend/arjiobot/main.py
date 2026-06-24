@@ -19,6 +19,19 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """Create Backend API Routes app."""
+    # The very first thing that runs, full stop - before the profile-freeze
+    # check, before the FastAPI app object even exists, before any router is
+    # registered, before bootstrap_live_trading_from_env/
+    # resume_monitoring_if_enabled (the latter can synchronously resume a
+    # polling session right here if monitoring_enabled was persisted from a
+    # previous deploy - that must never get a chance to write a single setup
+    # before this wipe runs). Every deploy starts with zero Setup Radar
+    # history: clears completed_setups/invalidated_setups in memory, clears
+    # the seen-setups dedup cache, and overwrites setup_history_store.json
+    # with the empty fresh-start shape regardless of what it already
+    # contained. Old history from a previous deployment session never loads.
+    # IN PROGRESS (state.setups) is never touched by this.
+    wipe_setup_history(get_state())
     assert_profile_freeze()
     logger.warning(PROFILE_FREEZE_RUNTIME_WARNING)
     app = FastAPI(title="ArjioBot Backend API", version="1.0.0")
@@ -43,10 +56,4 @@ def create_app() -> FastAPI:
         app.include_router(router)
     bootstrap_live_trading_from_env(get_state())
     resume_monitoring_if_enabled(get_state())
-    # Every deploy starts with zero Setup Radar history, on purpose - clears
-    # completed_setups/invalidated_setups in memory, clears the seen-setups
-    # dedup cache, and overwrites setup_history_store.json with the empty
-    # fresh-start shape. Old history from a previous deployment session never
-    # loads. IN PROGRESS (state.setups) is never touched by this.
-    wipe_setup_history(get_state())
     return app

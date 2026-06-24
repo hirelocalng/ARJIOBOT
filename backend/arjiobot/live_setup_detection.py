@@ -53,20 +53,24 @@ MAX_TRACKED_SETUP_ATTEMPTS = 100
 # strategy-level rejection noise than a genuine restart catch-up.
 RESTART_CATCHUP_WINDOW_SECONDS = 300
 
-# Setup Radar attempt stage -> SetupState. A trace reaching "ENTRY_READY" maps to
-# COMPLETED rather than SetupState.ENTRY_READY: the actual automation-triggering
-# ENTRY_READY row is created separately by the existing, untouched
-# _setup_from_trade/_fresh_trade_candidate flow below (which carries the
-# RR/TP-model-aware stop/target the risk engine actually needs). If a trace-derived
-# row also became ENTRY_READY, run_live_automation_once's `current_state is
-# ENTRY_READY` filter could see two rows for the same opportunity and submit twice.
+# Setup Radar attempt stage -> SetupState, for every NON-terminal stage. A
+# trace reaching "ENTRY_READY" is never looked up here - it is always routed
+# straight to SetupState.INVALIDATED/NO_EXECUTION_ATTEMPTED instead (see
+# _apply_one_attempt_trace's structural_match_only handling): the actual
+# automation-triggering ENTRY_READY row is created separately by the
+# existing, untouched _setup_from_trade/_fresh_trade_candidate flow below
+# (which carries the RR/TP-model-aware stop/target the risk engine actually
+# needs) - reaching ENTRY_READY here only means the funnel's structural
+# conditions matched, never that execution made a decision (Setup Radar
+# journey rule). If a trace-derived row also became ENTRY_READY,
+# run_live_automation_once's `current_state is ENTRY_READY` filter could see
+# two rows for the same opportunity and submit twice.
 _ATTEMPT_STAGE_TO_STATE = {
     "SWING_16M_CONFIRMED": SetupState.SWING_16M_CONFIRMED,
     "EXPANSION_16M_CONFIRMED": SetupState.EXPANSION_16M_CONFIRMED,
     "FVG_16M_CONFIRMED": SetupState.FVG_16M_CONFIRMED,
     "FVG_12M_CONFIRMED": SetupState.FVG_12M_CONFIRMED,
     "FVG_8M_CONFIRMED": SetupState.FVG_8M_CONFIRMED,
-    "ENTRY_READY": SetupState.COMPLETED,
 }
 
 
@@ -564,12 +568,26 @@ def _apply_one_attempt_trace(
     stage = str(trace.get("stage") or "SWING_16M_CONFIRMED")
     mapped_state_for_stage = _ATTEMPT_STAGE_TO_STATE.get(stage, SetupState.SWING_16M_CONFIRMED)
     target_state = mapped_state_for_stage
-    is_invalidated = trace.get("invalidation_reason") is not None and bool(trace.get("is_terminal")) and stage != "ENTRY_READY"
+    strategy_failed = trace.get("invalidation_reason") is not None and bool(trace.get("is_terminal")) and stage != "ENTRY_READY"
+    # Fix 2 (Setup Radar journey): the attempt-tracer is a diagnostic system
+    # only - it is never wired into real execution. _setup_from_trade plus
+    # live_automation.py's signal->risk->dry-run->live-order pipeline is the
+    # only path that ever makes a real execution decision (trade_opened/
+    # rejected/risk_blocked/no_margin - see should_leave_in_progress's
+    # TERMINAL_EXECUTION_STATES). Reaching ENTRY_READY here only means the
+    # funnel's structural conditions (swing/expansion/FVG/retrace) matched -
+    # it is NOT an execution outcome, so it must never land in COMPLETED.
+    # Classified as INVALIDATED instead, with a dedicated reason
+    # (NO_EXECUTION_ATTEMPTED). If _setup_from_trade also finds this exact
+    # swing (this poll or a later one), it reclaims this same setup_id
+    # straight out of invalidated_setups exactly like it already does out of
+    # completed_setups (see _find_tracked_setup_by_swing) - that reclaim path
+    # is unaffected by this change.
+    structural_match_only = stage == "ENTRY_READY"
+    is_invalidated = strategy_failed or structural_match_only
     if is_invalidated:
         target_state = SetupState.INVALIDATED
         target_status = SetupStatus.INVALIDATED
-    elif stage == "ENTRY_READY":
-        target_status = SetupStatus.COMPLETED
     else:
         target_status = SetupStatus.ACTIVE
     now = datetime.now(timezone.utc)
@@ -595,16 +613,6 @@ def _apply_one_attempt_trace(
     if trace.get("entry_price"):
         metadata["entry_signal_price"] = str(trace["entry_price"])
 
-    # The tap candle's own timestamp - the true moment this setup's chain
-    # completed based on price action, not when a later poll happened to
-    # evaluate it. Only set once the trace actually reaches ENTRY_READY.
-    completed_at = existing.completed_at if existing is not None else None
-    if stage == "ENTRY_READY" and trace.get("entry_timestamp"):
-        try:
-            completed_at = datetime.fromisoformat(str(trace["entry_timestamp"]).replace("Z", "+00:00"))
-        except ValueError:
-            pass
-
     field_updates: dict[str, object] = {
         "symbol": str(trace["symbol"]),
         "direction": direction,
@@ -612,7 +620,7 @@ def _apply_one_attempt_trace(
         "progress_percent": new_progress,
         "status": target_status,
         "updated_at": now,
-        "completed_at": completed_at,
+        "completed_at": existing.completed_at if existing is not None else None,
         "swing_16m_id": swing_id,
         "expansion_16m_id": trace.get("expansion_16m_id") or (existing.expansion_16m_id if existing else None),
         "fvg_16m_id": trace.get("fvg_16m_id") or (existing.fvg_16m_id if existing else None),
@@ -622,7 +630,7 @@ def _apply_one_attempt_trace(
         "final_target_price": trace.get("take_profit") or (existing.final_target_price if existing else None),
         "metadata": metadata,
     }
-    if is_invalidated:
+    if strategy_failed:
         field_updates["invalidated_at"] = now
         field_updates["invalidation_reason"] = InvalidationReason(str(trace["invalidation_reason"]))
         # trace["stage"] is never advanced past the last checkpoint that
@@ -630,6 +638,16 @@ def _apply_one_attempt_trace(
         # reassigned to a failure marker - so it is exactly the last valid
         # stage reached before this trace's failing check ran.
         field_updates["last_valid_stage"] = stage
+        field_updates["execution_status"] = "invalidated"
+    elif structural_match_only:
+        # Reached ENTRY_READY/100% structurally, but - unlike a real trade -
+        # this diagnostic row never goes through execution, so completed_at
+        # (the entry-tap timestamp) stays unset too: it represents "the
+        # moment this setup's chain actually completed", and this one never
+        # really did.
+        field_updates["invalidated_at"] = now
+        field_updates["invalidation_reason"] = InvalidationReason.NO_EXECUTION_ATTEMPTED
+        field_updates["last_valid_stage"] = "ENTRY_READY"
         field_updates["execution_status"] = "invalidated"
     # No "favorable resolution" branch anymore: a setup_id that was ever
     # invalidated never reaches this point a second time (the
@@ -642,15 +660,20 @@ def _apply_one_attempt_trace(
         # recorded in IN PROGRESS before moving on - otherwise it would go
         # straight into invalidated_setups/completed_setups and never once
         # appear in IN PROGRESS history.
-        if is_invalidated:
+        if structural_match_only:
+            # Reached ENTRY_READY on the very first poll this swing was ever
+            # observed on - still must be recorded at the last real stage
+            # before ENTRY_READY (FVG_8M_CONFIRMED/80%), never at
+            # mapped_state_for_stage (SetupState.COMPLETED for this stage),
+            # which would be a terminal marker, not an IN PROGRESS one.
             _record_in_progress_before_terminal_move(
                 state,
                 setup_id=setup_id,
                 symbol=str(trace["symbol"]),
                 direction=direction,
                 created_at=swing_timestamp,
-                current_state=mapped_state_for_stage,
-                progress_percent=new_progress,
+                current_state=SetupState.FVG_8M_CONFIRMED,
+                progress_percent=80.0,
                 swing_16m_id=swing_id,
                 expansion_16m_id=field_updates.get("expansion_16m_id"),
                 fvg_16m_id=field_updates.get("fvg_16m_id"),
@@ -660,15 +683,15 @@ def _apply_one_attempt_trace(
                 now=now,
                 source=source,
             )
-        elif target_status is SetupStatus.COMPLETED:
+        elif is_invalidated:  # strategy_failed
             _record_in_progress_before_terminal_move(
                 state,
                 setup_id=setup_id,
                 symbol=str(trace["symbol"]),
                 direction=direction,
                 created_at=swing_timestamp,
-                current_state=SetupState.FVG_8M_CONFIRMED,
-                progress_percent=80.0,
+                current_state=mapped_state_for_stage,
+                progress_percent=new_progress,
                 swing_16m_id=swing_id,
                 expansion_16m_id=field_updates.get("expansion_16m_id"),
                 fvg_16m_id=field_updates.get("fvg_16m_id"),
@@ -801,27 +824,34 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
 
 
 def _suppress_redundant_attempt_trace(state: Any, swing_16m_id: str | None) -> None:
-    """Drop the attempt-tracer's own COMPLETED row for a swing once a real
-    ENTRY_READY trade has been tracked for that same swing.
+    """Drop the attempt-tracer's own diagnostic row for a swing (INVALIDATED/
+    NO_EXECUTION_ATTEMPTED, see _apply_one_attempt_trace's structural-match
+    handling) once a real ENTRY_READY trade has been tracked for that same
+    swing.
 
     _apply_one_attempt_trace and _setup_from_trade both derive from the
     exact same funnel evaluation for a given swing - one is a diagnostic
-    "this chain finished" marker, the other is the real, tradable setup.
-    Without this, a single real-world completion shows as two rows in
-    Setup Radar's Completed tab (same symbol, direction, 100% progress, and
-    near-identical timestamp, since both are produced moments apart within
-    the same poll) which looks like a duplicate-completion bug even though
-    the two setup_ids are never actually equal. A narrow, documented
-    exception to "append-only" (Fix 2/3) - this removes a genuine duplicate
-    of the same real-world event, not a poll-cycle reorder, and is normally
-    a no-op now that _find_tracked_setup_by_swing lets the real trade take
-    over the tracer row's own setup_id instead of minting a second one.
+    "this chain reached ENTRY_READY structurally" marker, the other is the
+    real, tradable setup. Without this, a single real-world completion shows
+    as two rows in Setup Radar (same symbol, direction, near-identical
+    timestamp, since both are produced moments apart within the same poll)
+    which looks like a duplicate bug even though the two setup_ids are never
+    actually equal. A narrow, documented exception to "append-only" (Fix
+    2/3) - this removes a genuine duplicate of the same real-world event,
+    not a poll-cycle reorder, and is normally a no-op now that
+    _find_tracked_setup_by_swing lets the real trade take over the tracer
+    row's own setup_id instead of minting a second one.
     """
     if not swing_16m_id:
         return
     for setup in list(state.completed_setups):
         if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
             state.completed_setups.remove(setup)
+            state.setup_history.pop(setup.setup_id, None)
+            state.resolved_setup_ids.discard(setup.setup_id)
+    for setup in list(state.invalidated_setups):
+        if setup.swing_16m_id == swing_16m_id and setup.invalidation_reason is InvalidationReason.NO_EXECUTION_ATTEMPTED and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
+            state.invalidated_setups.remove(setup)
             state.setup_history.pop(setup.setup_id, None)
             state.resolved_setup_ids.discard(setup.setup_id)
 

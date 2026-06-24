@@ -68,6 +68,16 @@ class InvalidationReason(str, Enum):
     PRICE_REACHED_TARGET_BEFORE_ENTRY = "PRICE_REACHED_TARGET_BEFORE_ENTRY"
     SETUP_EXPIRED = "SETUP_EXPIRED"
     MANUAL_INVALIDATION = "MANUAL_INVALIDATION"
+    # The attempt-tracer (a diagnostic system, see live_setup_detection.py's
+    # _apply_one_attempt_trace) reached ENTRY_READY/100% structurally - every
+    # FVG/expansion/retrace condition matched - but no execution decision was
+    # ever made for it (no real trade was found for this swing by
+    # _setup_from_trade). Reaching ENTRY_READY structurally is not an
+    # execution outcome, so per the Setup Radar journey rule it must never
+    # land in COMPLETED (valid execution_status values there are only
+    # trade_opened/rejected/risk_blocked/no_margin) - this is INVALIDATED
+    # instead, with this dedicated reason.
+    NO_EXECUTION_ATTEMPTED = "NO_EXECUTION_ATTEMPTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,15 +164,22 @@ class Setup:
                 raise ValueError("invalidated setups require reason and timestamp")
         if self.current_state is SetupState.ENTRY_READY and self.status is not SetupStatus.ENTRY_READY:
             raise ValueError("entry-ready setup status must be ENTRY_READY")
-        # EXPIRED is the one deliberate exception: it legitimately reached
-        # 100% (ENTRY_READY) before going stale (see expire_stale_setup in
-        # live_setup_detection.py), and the Setup Radar journey now requires
-        # every staleness-expired setup to carry invalidation_reason=
-        # SETUP_EXPIRED on its way into INVALIDATED - current_state/status
-        # EXPIRED is a different terminal marker than INVALIDATED, so this
-        # does not reopen the case the rule below still blocks (a COMPLETED/
-        # ENTRY_READY setup must never simultaneously carry a reason).
-        if self.progress_percent >= 100.0 and self.invalidation_reason is not None and self.current_state is not SetupState.EXPIRED:
+        # Two deliberate exceptions to "100%-complete setups never carry an
+        # invalidation_reason" - both legitimately reached ENTRY_READY/100%
+        # before being marked invalidated for a reason that has nothing to
+        # do with the strategy conditions themselves:
+        # - EXPIRED (see expire_stale_setup): went stale before submission.
+        # - INVALIDATED + NO_EXECUTION_ATTEMPTED (see _apply_one_attempt_trace):
+        #   the attempt-tracer's diagnostic system reached ENTRY_READY
+        #   structurally, but no execution decision was ever made for it.
+        # Neither reopens the case this rule still blocks (a COMPLETED setup,
+        # or any OTHER invalidation_reason, must never coexist with 100%).
+        if (
+            self.progress_percent >= 100.0
+            and self.invalidation_reason is not None
+            and self.current_state is not SetupState.EXPIRED
+            and self.invalidation_reason is not InvalidationReason.NO_EXECUTION_ATTEMPTED
+        ):
             raise ValueError("a setup cannot be both 100% complete and invalidated")
 
 

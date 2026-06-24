@@ -7,6 +7,7 @@ progresses or is invalidated through the chain, capped at the latest 100.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from arjiobot.live_setup_detection import (
     _suppress_redundant_attempt_trace,
     _trade_key,
     detect_live_setups_for_symbol,
+    move_setup_to_completed,
 )
 from arjiobot.market_data.candle_models import Candle, Timeframe
 from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
@@ -164,16 +166,58 @@ def test_invalidated_history_is_capped_at_100_independently_of_in_progress() -> 
     assert "swing_inv_0" not in remaining_ids
 
 
-def test_completed_history_is_capped_at_100_independently_of_in_progress() -> None:
+def test_structural_match_only_attempt_traces_land_in_invalidated_capped_at_100() -> None:
+    """Fix 2 (Setup Radar journey): the attempt-tracer reaching ENTRY_READY
+    structurally (every condition matched, but no real trade/execution ever
+    happened for it) is NOT an execution outcome, so it must never land in
+    COMPLETED - it lands in invalidated_setups instead, tagged
+    NO_EXECUTION_ATTEMPTED, capped at 100 exactly like any other
+    invalidation."""
     state = _fake_state("ADAUSDT", ())
     traces = tuple(_swing_trace(f"swing_done_{i}", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True) for i in range(105))
     _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    assert len(state.completed_setups) == 100
-    assert state.setups == {}, "completed setups must never land in the in-progress store"
-    remaining_ids = {setup.swing_16m_id for setup in state.completed_setups}
+    assert state.completed_setups == [], "structural-match-only traces must never land in COMPLETED"
+    assert len(state.invalidated_setups) == 100
+    assert state.setups == {}, "resolved setups must never land in the in-progress store"
+    assert all(setup.invalidation_reason is InvalidationReason.NO_EXECUTION_ATTEMPTED for setup in state.invalidated_setups)
+    remaining_ids = {setup.swing_16m_id for setup in state.invalidated_setups}
     assert "swing_done_104" in remaining_ids
     assert "swing_done_0" not in remaining_ids
+
+
+def test_completed_history_via_real_trades_is_capped_at_100() -> None:
+    """Now that COMPLETED is execution-only, the only way to fill it is the
+    real trade path (_setup_from_trade -> move_setup_to_completed) - same
+    append-only, capped-at-100 behavior as invalidated_setups."""
+    state = _fake_state("ADAUSDT", ())
+    trades = [
+        _setup_from_trade(
+            {
+                "trade_id": f"trade_cap_{i}",
+                "symbol": "ADAUSDT",
+                "direction": "BEARISH",
+                "entry_timestamp": (datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(minutes=i)).isoformat(),
+                "entry_price": "100",
+                "stop_loss": "120",
+                "take_profit": "80",
+                "source_12m_fvg_id": f"fvg12_cap_{i}",
+                "source_16m_swing_id": f"swing_cap_{i}",
+                "source_16m_fvg_id": f"fvg16_cap_{i}",
+            },
+            state=state,
+            profile_id="PROFILE_2",
+            timeframe_profile_id="DEFAULT_16_12_8",
+        )
+        for i in range(105)
+    ]
+    for trade in trades:
+        move_setup_to_completed(state, replace(trade, execution_status="trade_opened"))
+
+    assert len(state.completed_setups) == 100
+    remaining_ids = {setup.setup_id for setup in state.completed_setups}
+    assert trades[104].setup_id in remaining_ids
+    assert trades[0].setup_id not in remaining_ids
 
 
 def test_completed_and_invalidated_mutations_persist_to_disk_in_progress_does_not(monkeypatch, tmp_path) -> None:
@@ -192,8 +236,26 @@ def test_completed_and_invalidated_mutations_persist_to_disk_in_progress_does_no
 
     invalidated_trace = _swing_trace("swing_inv_persist_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
     _apply_attempt_traces(state, "ADAUSDT", (invalidated_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
-    completed_trace = {**_swing_trace("swing_done_persist_1", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-24T01:30:00+00:00"}
-    _apply_attempt_traces(state, "ADAUSDT", (completed_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    # COMPLETED is execution-only now (Fix 2) - the only way to populate it is
+    # the real trade path (_setup_from_trade -> move_setup_to_completed).
+    real_trade = _setup_from_trade(
+        {
+            "trade_id": "trade_done_persist_1",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": "2026-06-24T01:30:00+00:00",
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_done_persist",
+            "source_16m_swing_id": "swing_done_persist_1",
+            "source_16m_fvg_id": "fvg16_done_persist",
+        },
+        state=state,
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    move_setup_to_completed(state, replace(real_trade, execution_status="trade_opened"))
     in_progress_trace = _swing_trace("swing_active_persist_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0)
     _apply_attempt_traces(state, "ADAUSDT", (in_progress_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
@@ -243,7 +305,7 @@ def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
 
     assert pending.setup_id in state.setups, "a pending ENTRY_READY setup must never be evicted"
     assert state.setups[pending.setup_id].status is SetupStatus.ENTRY_READY
-    assert len(state.completed_setups) == 100, "the flood of unrelated completions must still respect its own cap"
+    assert len(state.invalidated_setups) == 100, "the flood of unrelated structural-match-only rows must still respect its own cap"
 
 
 def test_invalidated_setup_is_permanently_done_and_never_resurrected_by_a_later_poll() -> None:
@@ -559,17 +621,18 @@ def test_fresh_trade_candidate_picks_the_most_recently_confirmed_never_seen_trad
 
 def test_suppress_redundant_attempt_trace_removes_only_the_attempt_tracer_row_for_that_swing() -> None:
     """Once a real ENTRY_READY trade is tracked for a swing, the
-    attempt-tracer's own COMPLETED row for that same swing_16m_id must be
-    dropped from completed_setups - otherwise one real-world completion
-    shows as two rows (the exact "duplicate ETHUSDT" symptom reported)."""
+    attempt-tracer's own NO_EXECUTION_ATTEMPTED row for that same
+    swing_16m_id must be dropped from invalidated_setups - otherwise one
+    real-world completion shows as two rows (the exact "duplicate ETHUSDT"
+    symptom reported)."""
     state = _fake_state("ADAUSDT", ())
     traces = (_swing_trace("swing_shared_0", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),)
     _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
-    assert any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups)
+    assert any(setup.swing_16m_id == "swing_shared_0" for setup in state.invalidated_setups)
 
     _suppress_redundant_attempt_trace(state, "swing_shared_0")
 
-    assert not any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups)
+    assert not any(setup.swing_16m_id == "swing_shared_0" for setup in state.invalidated_setups)
 
 
 def test_suppress_redundant_attempt_trace_never_removes_the_real_trade_row_itself() -> None:
@@ -630,23 +693,25 @@ def test_real_entry_ready_setup_takes_over_the_attempt_tracers_setup_id() -> Non
     assert real_setup.status is SetupStatus.ENTRY_READY
 
 
-def test_attempt_tracer_setup_completing_on_first_poll_is_recorded_in_in_progress_first() -> None:
+def test_attempt_tracer_structural_match_on_first_poll_is_recorded_in_in_progress_first() -> None:
     """The fix for setups skipping IN PROGRESS entirely: a swing whose very
-    first observed trace already reaches ENTRY_READY/COMPLETED must still be
-    recorded in IN PROGRESS (state.setup_history) before the terminal
-    COMPLETED entry - never go straight from never-seen to COMPLETED."""
+    first observed trace already reaches ENTRY_READY structurally (no real
+    execution ever attempted for it) must still be recorded in IN PROGRESS
+    (state.setup_history) before the terminal INVALIDATED/NO_EXECUTION_ATTEMPTED
+    entry - never go straight from never-seen to INVALIDATED."""
     state = _fake_state("ADAUSDT", ())
     trace = {**_swing_trace("swing_instant_complete_1", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    [setup] = state.completed_setups
-    assert setup.status is SetupStatus.COMPLETED
-    assert setup.setup_id not in state.setups, "it must have moved on to completed_setups, not stayed in IN PROGRESS"
+    [setup] = state.invalidated_setups
+    assert setup.status is SetupStatus.INVALIDATED
+    assert setup.invalidation_reason is InvalidationReason.NO_EXECUTION_ATTEMPTED
+    assert setup.setup_id not in state.setups, "it must have moved on to invalidated_setups, not stayed in IN PROGRESS"
     history = state.setup_history[setup.setup_id]
-    assert len(history) == 2, f"expected an IN PROGRESS entry before the terminal COMPLETED entry, got: {history}"
+    assert len(history) == 2, f"expected an IN PROGRESS entry before the terminal INVALIDATED entry, got: {history}"
     assert history[0]["reason"] == "recorded in IN PROGRESS before resolving in the same poll"
     assert history[0]["to_state"] == SetupState.FVG_8M_CONFIRMED.value
-    assert history[1]["to_state"] == SetupState.COMPLETED.value
+    assert history[1]["to_state"] == SetupState.INVALIDATED.value
 
 
 def test_attempt_tracer_setup_invalidating_on_first_poll_is_recorded_in_in_progress_first() -> None:
@@ -768,18 +833,40 @@ def test_progress_pct_advances_through_every_stage_including_waiting_retrace() -
         ("FVG_12M_CONFIRMED", 65.0, False, "12M_FVG_DETECTED", 55.0),
         ("FVG_8M_CONFIRMED", 80.0, False, "8M_FVG_DETECTED", 70.0),
         ("FVG_8M_CONFIRMED", 80.0, True, "WAITING_RETRACE", 85.0),
-        ("ENTRY_READY", 100.0, True, "ENTRY_READY", 100.0),
     )
     for index, (stage, internal_pct, retrace_found, expected_stage, expected_pct) in enumerate(expectations):
         state = _fake_state("ADAUSDT", ())
         trace = {**_swing_trace(f"swing_stage_{index}", stage=stage, progress_percent=internal_pct), "retrace_candle_found": retrace_found}
-        if stage == "ENTRY_READY":
-            trace["entry_timestamp"] = "2026-06-16T01:30:00+00:00"
         _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
         [setup] = _all_tracked(state)
         record = radar_record(setup)
         assert record["current_stage"] == expected_stage, f"stage {stage} (retrace_found={retrace_found})"
         assert record["progress_pct"] == expected_pct, f"stage {stage} (retrace_found={retrace_found})"
+
+    # ENTRY_READY/100% display mapping is exercised through the real trade
+    # path (_setup_from_trade), not an attempt trace - the attempt-tracer
+    # reaching ENTRY_READY structurally is a different, INVALIDATED/
+    # NO_EXECUTION_ATTEMPTED outcome now (Fix 2), not this stage's ENTRY_READY.
+    entry_ready = _setup_from_trade(
+        {
+            "trade_id": "trade_stage_entry_ready",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": "2026-06-16T01:30:00+00:00",
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_stage_entry_ready",
+            "source_16m_swing_id": "swing_stage_entry_ready",
+            "source_16m_fvg_id": "fvg16_stage_entry_ready",
+        },
+        state=_fake_state("ADAUSDT", ()),
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    record = radar_record(entry_ready)
+    assert record["current_stage"] == "ENTRY_READY"
+    assert record["progress_pct"] == 100.0
 
 
 def test_invalidated_setup_carries_reason_and_last_valid_stage() -> None:
@@ -802,10 +889,12 @@ def test_invalidated_setup_carries_reason_and_last_valid_stage() -> None:
     assert record["progress_pct"] == 40.0, "% reached before invalidation must use the last valid stage, not the terminal state"
 
 
-def test_completed_setup_moves_to_completed_with_completed_at_set() -> None:
-    """Once an attempt trace reaches ENTRY_READY/100%, the resulting row must
-    land in completed_setups with status COMPLETED and completed_at set to the
-    real entry-tap timestamp - not left as None."""
+def test_structural_match_only_setup_lands_in_invalidated_with_no_completed_at() -> None:
+    """Once an attempt trace reaches ENTRY_READY/100% structurally with no
+    real execution ever attempted for it (Fix 2), the resulting row must land
+    in invalidated_setups (NO_EXECUTION_ATTEMPTED) - and, unlike a real trade,
+    completed_at (the entry-tap timestamp) must stay unset, since this row's
+    chain never actually went through execution."""
     state = _fake_state("ADAUSDT", ())
     trace = {
         **_swing_trace("swing_completedat_1", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),
@@ -814,8 +903,42 @@ def test_completed_setup_moves_to_completed_with_completed_at_set() -> None:
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
     assert state.setups == {}
+    assert state.completed_setups == []
+    [setup] = state.invalidated_setups
+    assert setup.status is SetupStatus.INVALIDATED
+    assert setup.invalidation_reason is InvalidationReason.NO_EXECUTION_ATTEMPTED
+    assert setup.completed_at is None
+    record = radar_record(setup)
+    assert record["current_stage"] == "INVALIDATED"
+    assert record["progress_pct"] == 100.0
+
+
+def test_real_trade_moved_to_completed_has_completed_at_set() -> None:
+    """A real trade (the only legitimate path into COMPLETED now - Fix 2)
+    must land in completed_setups with completed_at set to the real
+    entry-tap timestamp, not left as None."""
+    state = _fake_state("ADAUSDT", ())
+    trade = _setup_from_trade(
+        {
+            "trade_id": "trade_completedat_1",
+            "symbol": "ADAUSDT",
+            "direction": "BEARISH",
+            "entry_timestamp": "2026-06-16T03:45:00+00:00",
+            "entry_price": "100",
+            "stop_loss": "120",
+            "take_profit": "80",
+            "source_12m_fvg_id": "fvg12_completedat",
+            "source_16m_swing_id": "swing_completedat_real",
+            "source_16m_fvg_id": "fvg16_completedat",
+        },
+        state=state,
+        profile_id="PROFILE_2",
+        timeframe_profile_id="DEFAULT_16_12_8",
+    )
+    move_setup_to_completed(state, replace(trade, execution_status="trade_opened"))
+
     [setup] = state.completed_setups
-    assert setup.status is SetupStatus.COMPLETED
+    assert setup.execution_status == "trade_opened"
     assert setup.completed_at is not None
     assert setup.completed_at.isoformat() == "2026-06-16T03:45:00+00:00"
     record = radar_record(setup)
@@ -890,27 +1013,27 @@ def test_invalidated_list_at_cap_drops_only_the_oldest_order_of_others_unchanged
     assert before[-1] not in state.invalidated_setups, "only the oldest (now evicted) entry is gone"
 
 
-def test_two_polls_with_no_new_events_leave_both_lists_byte_for_byte_identical() -> None:
-    """Stability test: re-running the exact same poll (the swing already
-    resolved into invalidated_setups on the first pass) must not change
-    invalidated_setups/completed_setups at all on the second pass - not even
+def test_two_polls_with_no_new_events_leave_invalidated_list_byte_for_byte_identical() -> None:
+    """Stability test: re-running the exact same poll (both swings already
+    resolved into invalidated_setups on the first pass - one a genuine
+    strategy failure, one a structural-match-only/NO_EXECUTION_ATTEMPTED row)
+    must not change invalidated_setups at all on the second pass - not even
     re-create the same object - because resolved_setup_ids short-circuits
     _apply_one_attempt_trace entirely for an already-resolved setup_id."""
     state = _fake_state("ADAUSDT", ())
-    invalidated_trace = _swing_trace("swing_stable_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
-    completed_trace = {**_swing_trace("swing_stable_2", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
-    _apply_attempt_traces(state, "ADAUSDT", (invalidated_trace, completed_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    strategy_failed_trace = _swing_trace("swing_stable_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+    structural_match_trace = {**_swing_trace("swing_stable_2", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
+    _apply_attempt_traces(state, "ADAUSDT", (strategy_failed_trace, structural_match_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
     invalidated_after_poll_1 = list(state.invalidated_setups)
-    completed_after_poll_1 = list(state.completed_setups)
-    assert len(invalidated_after_poll_1) == 1
-    assert len(completed_after_poll_1) == 1
+    assert len(invalidated_after_poll_1) == 2
+    assert state.completed_setups == []
 
     # Second poll: the exact same traces again - nothing new happened.
-    _apply_attempt_traces(state, "ADAUSDT", (invalidated_trace, completed_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    _apply_attempt_traces(state, "ADAUSDT", (strategy_failed_trace, structural_match_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
     assert state.invalidated_setups == invalidated_after_poll_1
-    assert state.completed_setups == completed_after_poll_1
+    assert state.completed_setups == []
     # Not just equal - the identical objects, never replaced or re-appended.
     assert state.invalidated_setups[0] is invalidated_after_poll_1[0]
-    assert state.completed_setups[0] is completed_after_poll_1[0]
+    assert state.invalidated_setups[1] is invalidated_after_poll_1[1]
