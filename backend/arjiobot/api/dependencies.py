@@ -313,20 +313,29 @@ class ApiState:
     # real ENTRY_READY trade) into completed_setups once live automation
     # actually submits it (see live_automation.py _process_setup).
     setups: dict[str, object] = field(default_factory=dict)
-    # Separate, independently-capped-at-100 histories (see
-    # MAX_TRACKED_SETUP_ATTEMPTS in live_setup_detection.py) - kept apart
-    # from `setups` so a burst of in-progress attempts can never push
-    # completed/invalidated history out, and vice versa.
-    invalidated_setups: dict[str, object] = field(default_factory=dict)
-    completed_setups: dict[str, object] = field(default_factory=dict)
-    # Set by setup_tracker.setup_history_store.clear_setup_history, in the same
-    # call that wipes completed_setups/invalidated_setups - never after. A
-    # setup whose completed_at/invalidated_at is at or before this instant
-    # must never be (re-)written into either store, even though the live
-    # detection funnel keeps re-deriving COMPLETED/INVALIDATED rows for
-    # swings still sitting in its rolling candle buffer on every later poll
-    # (see _predates_last_clear in live_setup_detection.py). None means no
-    # manual clear has happened yet this process lifetime.
+    # Append-only, newest-first ordered lists (see live_setup_detection.py's
+    # _append_resolved_setup) - a setup is only ever inserted once (index 0),
+    # and only ever removed by capping at MAX_TRACKED_SETUP_ATTEMPTS (the
+    # oldest, at the end of the list). Never re-sorted or rebuilt on a poll
+    # cycle - the list is byte-for-byte identical between polls unless a new
+    # completion/invalidation just happened. Kept apart from `setups` so a
+    # burst of in-progress attempts can never push completed/invalidated
+    # history out, and vice versa.
+    invalidated_setups: list[object] = field(default_factory=list)
+    completed_setups: list[object] = field(default_factory=list)
+    # Every setup_id that has ever resolved (moved into completed_setups or
+    # invalidated_setups) for the life of this process - never shrinks except
+    # via the startup fresh-start wipe (setup_history_store.wipe_setup_history).
+    # Deliberately NOT capped at 100 like the visible lists above: once a
+    # setup_id is evicted from the visible list it must still be permanently
+    # blocked from being re-created by the live detection funnel re-deriving
+    # the same swing from its rolling candle buffer on a later poll - see
+    # live_setup_detection.py's _apply_one_attempt_trace.
+    resolved_setup_ids: set[str] = field(default_factory=set)
+    # Set by setup_tracker.setup_history_store on every fresh start (process
+    # boot) and on a manual admin clear - see setup_history_store.
+    # wipe_setup_history. None only ever briefly, before the very first
+    # startup wipe has run.
     history_cleared_at: datetime | None = None
     setup_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     # Keyed by swing_16m_id so Setup Radar can correlate a COMPLETED attempt

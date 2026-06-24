@@ -16,6 +16,13 @@ from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, 
 from arjiobot.strategy.demo_strategy import make_entry_ready_setup
 
 
+def _find(store, setup_id: str):
+    """completed_setups/invalidated_setups are append-only lists (see
+    live_setup_detection.py's _append_resolved_setup), not dicts keyed by
+    setup_id - this is the by-id lookup tests need."""
+    return next((setup for setup in store if setup.setup_id == setup_id), None)
+
+
 def test_position_notional_computes_real_dollar_value_not_a_flat_sentinel() -> None:
     """The actual fix for max_symbol_exposure being meaningless: an existing
     $5,000 position must read as $5,000 of exposure, not a flat "1"."""
@@ -597,10 +604,12 @@ def test_stale_entry_ready_setup_is_expired_not_executed() -> None:
 
     assert state.bitget_environment.orders == [], "a stale setup must never be executed"
     assert stale_setup.setup_id not in state.setups, "an expired setup must leave the uncapped in-progress pool"
-    expired = state.invalidated_setups[stale_setup.setup_id]
+    expired = _find(state.invalidated_setups, stale_setup.setup_id)
+    assert expired is not None
     assert expired.current_state is SetupState.EXPIRED
     assert expired.status is SetupStatus.EXPIRED
     assert expired.last_valid_stage == "ENTRY_READY"
+    assert expired.invalidation_reason is InvalidationReason.SETUP_EXPIRED
     expired_attempts = [attempt for attempt in result["attempts"] if attempt.get("status") == "EXPIRED"]
     assert expired_attempts, f"expected an EXPIRED attempt record, got: {result}"
     assert expired_attempts[0]["setup_id"] == stale_setup.setup_id
@@ -652,8 +661,8 @@ def test_fresh_entry_ready_setup_within_staleness_window_still_executes(monkeypa
     result = api.post("/api/live-automation/run-once").json()["data"]
 
     assert result["status"] == "SUBMITTED", f"expected a submitted order, got: {result}"
-    assert setup.setup_id in state.completed_setups
-    assert setup.setup_id not in state.invalidated_setups
+    assert _find(state.completed_setups, setup.setup_id) is not None
+    assert _find(state.invalidated_setups, setup.setup_id) is None
 
 
 def test_live_automation_executes_only_the_entry_ready_setup_not_in_progress_or_invalidated(monkeypatch) -> None:
@@ -704,7 +713,8 @@ def test_live_automation_executes_only_the_entry_ready_setup_not_in_progress_or_
         invalidated_at=entry_ready.created_at,
         invalidation_reason=InvalidationReason.EXPANSION_NOT_CONFIRMED,
     )
-    state.invalidated_setups[invalidated.setup_id] = invalidated
+    state.invalidated_setups.insert(0, invalidated)
+    state.resolved_setup_ids.add(invalidated.setup_id)
 
     monkeypatch.setattr(service, "fetch_contract_config", lambda symbol, product_type="USDT-FUTURES": _contract(symbol))
     monkeypatch.setattr(service, "fetch_ticker", lambda symbol, product_type="USDT-FUTURES": _ticker(symbol))
@@ -720,13 +730,14 @@ def test_live_automation_executes_only_the_entry_ready_setup_not_in_progress_or_
     assert submitted_setup_ids == {entry_ready.setup_id}
     # Untouched - still exactly where they started, never considered for execution.
     assert state.setups[in_progress.setup_id].status is SetupStatus.ACTIVE
-    assert state.invalidated_setups[invalidated.setup_id].status is SetupStatus.INVALIDATED
+    assert _find(state.invalidated_setups, invalidated.setup_id).status is SetupStatus.INVALIDATED
     # The executed setup left the in-progress pool for completed_setups.
     assert entry_ready.setup_id not in state.setups
-    assert entry_ready.setup_id in state.completed_setups
+    completed_entry = _find(state.completed_setups, entry_ready.setup_id)
+    assert completed_entry is not None
     # FIX 3: a confirmed live trade is tagged trade_opened, the one
     # execution_status that should_leave_in_progress treats as terminal.
-    assert state.completed_setups[entry_ready.setup_id].execution_status == "trade_opened"
+    assert completed_entry.execution_status == "trade_opened"
 
 
 def test_risk_rejected_entry_ready_setup_moves_to_completed_with_rejected_status() -> None:
@@ -776,8 +787,9 @@ def test_risk_rejected_entry_ready_setup_moves_to_completed_with_rejected_status
     assert "BLOCKED_INSUFFICIENT_AVAILABLE_MARGIN" in result["attempts"][0]["reason"]
     assert service.orders == []
     assert setup.setup_id not in state.setups, "a risk-rejected setup must leave IN PROGRESS, not be retried forever"
-    assert setup.setup_id in state.completed_setups
-    assert state.completed_setups[setup.setup_id].execution_status == "no_margin"
+    completed_entry = _find(state.completed_setups, setup.setup_id)
+    assert completed_entry is not None
+    assert completed_entry.execution_status == "no_margin"
 
     in_progress_ids = {row["setup_id"] for row in api.get("/api/setups/in-progress").json()["data"]}
     completed_rows = {row["setup_id"]: row for row in api.get("/api/setups/completed").json()["data"]}
@@ -864,7 +876,7 @@ def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_orde
     assert len(service.orders) == 1
     assert service.orders[0]["bitget_order_id"] == "ord_real_detection_1"
     assert setup.setup_id not in state.setups, "the executed setup must leave the in-progress pool"
-    assert setup.setup_id in state.completed_setups
+    assert _find(state.completed_setups, setup.setup_id) is not None
 
 
 def _contract(symbol: str) -> dict[str, object]:

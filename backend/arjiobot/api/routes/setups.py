@@ -10,7 +10,6 @@ from arjiobot.api.dependencies import ApiState, get_state
 from arjiobot.api.errors import api_error
 from arjiobot.api.routes.radar import radar_record
 from arjiobot.api.schemas.common import ok
-from arjiobot.setup_tracker.setup_history_store import filter_and_cap_history
 from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
 
 router = APIRouter(prefix="/api/setups", tags=["setups"])
@@ -24,14 +23,11 @@ setup_radar_router = APIRouter(prefix="/api/setup-radar", tags=["setup-radar"])
 
 def _all_setups(state: ApiState):
     """Every tracked setup across all three stores - in-progress (uncapped),
-    invalidated (age-filtered + capped at 100), completed (age-filtered +
-    capped at 100). See live_setup_detection.py's _store_setup/
-    move_setup_to_completed for how a setup ends up in exactly one of these
-    at any given time. filter_and_cap_history is read-only (returns a new
-    dict, never mutates state.invalidated_setups/completed_setups
-    themselves) - applied here defensively, since wall-clock time alone can
-    push a setup past the 1-hour age limit between writes."""
-    return chain(state.setups.values(), filter_and_cap_history(state.invalidated_setups).values(), filter_and_cap_history(state.completed_setups).values())
+    invalidated (append-only, capped at 100), completed (append-only, capped
+    at 100, newest-first - see live_setup_detection.py's
+    _append_resolved_setup for how a setup ends up in exactly one of these,
+    exactly once, for good)."""
+    return chain(state.setups.values(), state.invalidated_setups, state.completed_setups)
 
 
 @router.get("")
@@ -73,18 +69,15 @@ def completed():
     in completed_setups already (see _store_setup), so it needs no separate
     union with state.setups here.
 
-    filter_and_cap_history (age + 100-cap) is applied here too, not just at
-    load/write time - wall-clock time passing alone can push a setup past
-    the 1-hour age limit between writes, with nothing to re-trigger
-    filtering until the next one."""
-    setups = sorted(filter_and_cap_history(get_state().completed_setups).values(), key=lambda setup: setup.completed_at or setup.updated_at, reverse=True)
-    return ok(tuple(radar_record(setup) for setup in setups))
+    Returned exactly in list order (newest-first, append-only - see
+    _append_resolved_setup) - never re-sorted here, so this is byte-for-byte
+    stable between polls unless a new entry was just added."""
+    return ok(tuple(radar_record(setup) for setup in get_state().completed_setups))
 
 
 @router.get("/invalidated")
 def invalidated():
-    setups = sorted(filter_and_cap_history(get_state().invalidated_setups).values(), key=lambda setup: setup.invalidated_at or setup.updated_at, reverse=True)
-    return ok(tuple(radar_record(setup) for setup in setups))
+    return ok(tuple(radar_record(setup) for setup in get_state().invalidated_setups))
 
 
 @setup_radar_router.get("/in-progress")
@@ -111,7 +104,7 @@ def progress(percent: str):
 @router.get("/{setup_id}")
 def get_setup(setup_id: str):
     state = get_state()
-    setup = state.setups.get(setup_id) or state.invalidated_setups.get(setup_id) or state.completed_setups.get(setup_id)
+    setup = state.setups.get(setup_id) or next((s for s in (*state.invalidated_setups, *state.completed_setups) if s.setup_id == setup_id), None)
     if setup is None:
         raise api_error(404, "SETUP_NOT_FOUND", "setup not found")
     return ok(radar_record(setup))

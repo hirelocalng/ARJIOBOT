@@ -1,16 +1,16 @@
 """Disk-backed persistence for completed/invalidated Setup Radar history.
 
-completed_setups and invalidated_setups previously lived purely in memory,
-so every process restart (a deploy, a crash, a redeploy) silently reset
-both Setup Radar tabs to empty. This module persists both stores (and the
-state.setup_history entries that belong to them) to a JSON file under
-backend/data/, the same pattern already used for runtime_settings.json and
-the encrypted accounts vault, so completed/invalidated setups now survive a
-restart the same way everything else this app already persists does.
+completed_setups and invalidated_setups are append-only, newest-first lists
+(see live_setup_detection.py's _append_resolved_setup) - a setup is written
+here exactly once, ever, and only ever removed by capping at
+MAX_TRACKED_SETUP_ATTEMPTS (the oldest, at the end of the list). This module
+mirrors that list, in that same order, to a JSON file under backend/data/, so
+the lists are visible without needing to read process memory directly.
 
-IN PROGRESS (state.setups) is deliberately never persisted here - it always
-reflects only currently-active setups, with nothing historical that needs
-to survive a restart.
+Every deploy starts with zero history (see wipe_setup_history, called once at
+process boot from main.py): IN PROGRESS (state.setups) is never written here
+either way - it always reflects only currently-active setups, with nothing
+that needs to survive a restart, by design.
 """
 
 from __future__ import annotations
@@ -18,61 +18,17 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from arjiobot.setup_tracker.setup_models import (
-    InvalidationReason,
-    Setup,
-    SetupDirection,
-    SetupState,
-    SetupStatus,
-    StateHistoryEntry,
-)
+from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 STORE_PATH = DATA_DIR / "setup_history_store.json"
-# Tracks whether the one-time history-clear migration has already run - a
-# marker file, not a repeated-on-every-startup wipe, so genuine history
-# accumulated after the migration survives every later restart instead of
-# being wiped again each time.
-HISTORY_CLEARED_MARKER_PATH = DATA_DIR / ".history_cleared"
-
-# Setup Radar history rules (apply together, in this order, at all three
-# points data crosses a boundary - load from disk, write to disk, and every
-# API response that lists completed/invalidated setups): drop anything
-# completed/invalidated more than MAX_HISTORY_AGE ago, THEN cap to the latest
-# MAX_HISTORY_ENTRIES of what remains. The age rule alone is why this can't
-# be enforced once at write time and left alone - a setup that was fresh at
-# the last write can still cross the 1-hour line purely from wall-clock time
-# passing, with no new write to re-trigger filtering.
-MAX_HISTORY_ENTRIES = 100
-MAX_HISTORY_AGE = timedelta(hours=1)
-
-_DATETIME_FIELDS = ("created_at", "updated_at", "invalidated_at", "completed_at")
-
-
-def _terminal_timestamp(setup: Setup) -> datetime:
-    """The timestamp a completed/invalidated setup's age is measured from -
-    completed_at for a COMPLETED row, invalidated_at for an INVALIDATED one
-    (Setup._validate forbids both being set at once). Falls back to
-    updated_at for the rare row missing both."""
-    return setup.completed_at or setup.invalidated_at or setup.updated_at
-
-
-def filter_and_cap_history(setups: dict[str, Setup], *, now: datetime | None = None) -> dict[str, Setup]:
-    """Apply the age filter then the count cap, in that order, to a
-    completed_setups/invalidated_setups-shaped dict. Read-only - returns a
-    new dict, never mutates the one passed in, so this is safe to call from
-    a GET handler without surprising side effects on shared state."""
-    cutoff = (now or datetime.now(timezone.utc)) - MAX_HISTORY_AGE
-    fresh = {setup_id: setup for setup_id, setup in setups.items() if _terminal_timestamp(setup) >= cutoff}
-    newest_first = sorted(fresh.values(), key=_terminal_timestamp, reverse=True)[:MAX_HISTORY_ENTRIES]
-    return {setup.setup_id: setup for setup in newest_first}
 
 
 def _json_default(value: Any) -> Any:
@@ -86,64 +42,33 @@ def _json_default(value: Any) -> Any:
 
 
 def _setup_to_json(setup: Setup) -> dict[str, Any]:
-    """Full round-trip serialization of a Setup, including state_history and
-    metadata - setup_to_record() (setup_models.py) is a lighter, API-facing
-    projection that drops fields (created_at, metadata, state_history) this
-    persistence layer needs for a faithful reload after a restart."""
+    """Full serialization of a Setup, including state_history and metadata -
+    setup_to_record() (setup_models.py) is a lighter, API-facing projection
+    that drops fields (created_at, metadata, state_history) this audit trail
+    keeps. Write-only - nothing reads this back into memory (see module
+    docstring: every deploy starts with zero history)."""
     return json.loads(json.dumps(asdict(setup), default=_json_default))
 
 
-def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    return datetime.fromisoformat(value)
-
-
-def _setup_from_json(data: dict[str, Any]) -> Setup:
-    payload = dict(data)
-    payload["direction"] = SetupDirection(payload["direction"])
-    payload["current_state"] = SetupState(payload["current_state"])
-    payload["status"] = SetupStatus(payload["status"])
-    payload["invalidation_reason"] = InvalidationReason(payload["invalidation_reason"]) if payload.get("invalidation_reason") else None
-    for field_name in _DATETIME_FIELDS:
-        payload[field_name] = _parse_datetime(payload.get(field_name))
-    payload["state_history"] = tuple(
-        StateHistoryEntry(
-            from_state=SetupState(entry["from_state"]) if entry.get("from_state") else None,
-            to_state=SetupState(entry["to_state"]),
-            changed_at=_parse_datetime(entry["changed_at"]),
-            reason=entry.get("reason"),
-            triggering_object_type=entry.get("triggering_object_type"),
-            triggering_object_id=entry.get("triggering_object_id"),
-        )
-        for entry in payload.get("state_history") or ()
-    )
-    payload["one_minute_fvg_ids"] = tuple(payload.get("one_minute_fvg_ids") or ())
-    payload["watched_timeframes"] = tuple(payload.get("watched_timeframes") or ("30M", "1H", "16M", "12M", "8M", "1M"))
-    return Setup(**payload)
-
-
 def save_setup_history_store(state: Any) -> None:
-    """Persist completed_setups/invalidated_setups (and only the
-    state.setup_history entries belonging to them) to disk - call after
-    every mutation to either store so a restart can reload exactly what
-    existed before it.
+    """Mirror completed_setups/invalidated_setups (and only the
+    state.setup_history entries belonging to them) to disk, in their current
+    in-memory order - call after every mutation to either list (i.e. only
+    when a new entry was just appended - see _append_resolved_setup) so a
+    restart can reload exactly what existed before it.
 
-    What gets WRITTEN is filtered through filter_and_cap_history (age + cap)
-    first - this does not mutate state.completed_setups/invalidated_setups
-    themselves (the existing _evict_oldest count-cap already keeps those
-    bounded at the point of insertion; this is purely an additional
-    guarantee on what ends up on disk, age included)."""
+    No filtering, capping, or sorting happens here - the in-memory lists are
+    already correct by construction (append-only, capped at insertion time),
+    so this is pure, trustful persistence."""
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        filtered_completed = filter_and_cap_history(state.completed_setups)
-        filtered_invalidated = filter_and_cap_history(state.invalidated_setups)
         payload = {
-            "completed_setups": {setup_id: _setup_to_json(setup) for setup_id, setup in filtered_completed.items()},
-            "invalidated_setups": {setup_id: _setup_to_json(setup) for setup_id, setup in filtered_invalidated.items()},
+            "completed": [_setup_to_json(setup) for setup in state.completed_setups],
+            "invalidated": [_setup_to_json(setup) for setup in state.invalidated_setups],
+            "cleared_at": state.history_cleared_at.isoformat() if getattr(state, "history_cleared_at", None) else None,
             "setup_history": {
-                setup_id: state.setup_history.get(setup_id, [])
-                for setup_id in (*filtered_completed, *filtered_invalidated)
+                setup.setup_id: state.setup_history.get(setup.setup_id, [])
+                for setup in (*state.completed_setups, *state.invalidated_setups)
             },
         }
         STORE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -154,120 +79,40 @@ def save_setup_history_store(state: Any) -> None:
         logger.exception("Failed to persist completed/invalidated setup history to %s", STORE_PATH)
 
 
-def load_setup_history_store(state: Any) -> tuple[int, int]:
-    """Load completed_setups/invalidated_setups (and their setup_history
-    entries) from disk at startup, so they survive this restart instead of
-    starting empty every time. Returns (completed_count, invalidated_count)
-    loaded, for logging.
+def wipe_setup_history(state: Any) -> tuple[int, int]:
+    """Fresh start: clear completed_setups/invalidated_setups in memory,
+    clear the seen-setups dedup cache (resolved_setup_ids), record
+    history_cleared_at, and overwrite the persisted file with the empty
+    shape - all in this one synchronous call, so no request in between can
+    ever observe a partially-cleared state. Called unconditionally on every
+    process boot (see main.py's create_app) - every deploy starts with zero
+    history, and old history from a previous deployment session never loads
+    - and on demand for a manual operator clear (see api/routes/admin.py's
+    POST /api/admin/clear-setup-history).
 
-    Loaded data is filtered through filter_and_cap_history (age + cap)
-    BEFORE anything is inserted into state - a persisted file accumulated
-    before this filtering existed (or one that simply sat untouched past the
-    1-hour/100-entry limits since its last write) must not resurrect
-    stale/excess entries into memory just because a restart happened."""
-    if not STORE_PATH.exists():
-        return 0, 0
-    try:
-        payload = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        logger.exception("Failed to read %s - starting with empty completed/invalidated setup history", STORE_PATH)
-        return 0, 0
-    loaded_completed: dict[str, Setup] = {}
-    loaded_invalidated: dict[str, Setup] = {}
-    for setup_id, data in (payload.get("completed_setups") or {}).items():
-        try:
-            loaded_completed[setup_id] = _setup_from_json(data)
-        except Exception:
-            logger.exception("Failed to load persisted completed setup %s - skipping it", setup_id)
-    for setup_id, data in (payload.get("invalidated_setups") or {}).items():
-        try:
-            loaded_invalidated[setup_id] = _setup_from_json(data)
-        except Exception:
-            logger.exception("Failed to load persisted invalidated setup %s - skipping it", setup_id)
-    filtered_completed = filter_and_cap_history(loaded_completed)
-    filtered_invalidated = filter_and_cap_history(loaded_invalidated)
-    state.completed_setups.update(filtered_completed)
-    state.invalidated_setups.update(filtered_invalidated)
-    for setup_id, history in (payload.get("setup_history") or {}).items():
-        if setup_id in filtered_completed or setup_id in filtered_invalidated:
-            state.setup_history[setup_id] = history
-    return len(filtered_completed), len(filtered_invalidated)
-
-
-def clear_setup_history(state: Any) -> tuple[int, int]:
-    """Clear completed_setups/invalidated_setups in memory, reset both of
-    those in-memory dicts to empty, delete the persisted file from disk, AND
-    record state.history_cleared_at - all four in this one synchronous call,
-    so no request in between can ever observe a partially-cleared state and
-    the clear timestamp is never set a moment after (or before) the wipe
-    itself. The on-demand equivalent of the one-time startup migration below,
-    for an operator to trigger manually (see api/routes/admin.py's POST
-    /api/admin/clear-setup-history) without waiting for a restart. IN
-    PROGRESS (state.setups) is never touched.
-
-    history_cleared_at is what stops the live detection funnel from silently
-    re-adding a setup that already existed before this clear the next time it
-    re-derives that same swing from its rolling candle buffer - see
-    _predates_last_clear in live_setup_detection.py, checked by every place a
-    completed/invalidated setup gets written. Without it, the next poll cycle
-    would re-hydrate exactly what was just cleared.
+    IN PROGRESS (state.setups) is never touched by this.
 
     Returns (completed_count, invalidated_count) cleared."""
     completed_count = len(state.completed_setups)
     invalidated_count = len(state.invalidated_setups)
-    for setup_id in (*state.completed_setups, *state.invalidated_setups):
-        state.setup_history.pop(setup_id, None)
+    for setup in (*state.completed_setups, *state.invalidated_setups):
+        state.setup_history.pop(setup.setup_id, None)
     state.completed_setups.clear()
     state.invalidated_setups.clear()
+    state.resolved_setup_ids.clear()
     state.history_cleared_at = datetime.now(timezone.utc)
-    STORE_PATH.unlink(missing_ok=True)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"completed": [], "invalidated": [], "cleared_at": state.history_cleared_at.isoformat(), "setup_history": {}}
+        STORE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        logger.exception("Failed to overwrite %s with the empty fresh-start state", STORE_PATH)
     logger.warning(
-        "Manual clear: cleared %d completed setup(s) and %d invalidated setup(s), deleted %s, and recorded "
-        "history_cleared_at=%s - any setup that completed/invalidated at or before this instant will never be "
-        "re-written into history again this process lifetime.",
+        "Setup history wiped: cleared %d completed setup(s) and %d invalidated setup(s), cleared the seen-setups "
+        "dedup cache, and recorded history_cleared_at=%s - %s starts with zero history.",
         completed_count,
         invalidated_count,
-        STORE_PATH,
         state.history_cleared_at.isoformat(),
+        STORE_PATH,
     )
     return completed_count, invalidated_count
-
-
-def run_one_time_history_clear_migration(state: Any) -> bool:
-    """Exactly once - tracked by HISTORY_CLEARED_MARKER_PATH, never by a
-    repeated startup wipe - clear completed_setups/invalidated_setups in
-    memory and save that now-empty state to disk, OVERWRITING whatever was
-    already in setup_history_store.json (including a file that predates
-    this migration entirely, e.g. one left over from before the marker
-    existed). This is what guarantees the wipe happens on the next deploy
-    regardless of what is already on disk - then it never runs again, so
-    genuine history recorded after this point survives every later restart.
-
-    Returns whether the wipe actually ran (False on every call after the
-    first, once the marker file exists).
-    """
-    if HISTORY_CLEARED_MARKER_PATH.exists():
-        return False
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    completed_count = len(state.completed_setups)
-    invalidated_count = len(state.invalidated_setups)
-    for setup_id in list(state.completed_setups):
-        state.completed_setups.pop(setup_id, None)
-        state.setup_history.pop(setup_id, None)
-    for setup_id in list(state.invalidated_setups):
-        state.invalidated_setups.pop(setup_id, None)
-        state.setup_history.pop(setup_id, None)
-    # Overwrites any pre-existing setup_history_store.json with the now-empty
-    # state, rather than relying on the file not existing - this is what
-    # makes the migration correct even when an old file with stale entries
-    # is already sitting on disk before this code ever runs.
-    save_setup_history_store(state)
-    HISTORY_CLEARED_MARKER_PATH.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
-    logger.warning(
-        "One-time migration: cleared %d completed setup(s) and %d invalidated setup(s) and saved the empty state "
-        "to %s - COMPLETED/INVALIDATED tabs start at 0 from this deploy forward; this migration will not run again.",
-        completed_count,
-        invalidated_count,
-        STORE_PATH,
-    )
-    return True

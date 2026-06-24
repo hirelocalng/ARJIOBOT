@@ -154,7 +154,15 @@ class Setup:
                 raise ValueError("invalidated setups require reason and timestamp")
         if self.current_state is SetupState.ENTRY_READY and self.status is not SetupStatus.ENTRY_READY:
             raise ValueError("entry-ready setup status must be ENTRY_READY")
-        if self.progress_percent >= 100.0 and self.invalidation_reason is not None:
+        # EXPIRED is the one deliberate exception: it legitimately reached
+        # 100% (ENTRY_READY) before going stale (see expire_stale_setup in
+        # live_setup_detection.py), and the Setup Radar journey now requires
+        # every staleness-expired setup to carry invalidation_reason=
+        # SETUP_EXPIRED on its way into INVALIDATED - current_state/status
+        # EXPIRED is a different terminal marker than INVALIDATED, so this
+        # does not reopen the case the rule below still blocks (a COMPLETED/
+        # ENTRY_READY setup must never simultaneously carry a reason).
+        if self.progress_percent >= 100.0 and self.invalidation_reason is not None and self.current_state is not SetupState.EXPIRED:
             raise ValueError("a setup cannot be both 100% complete and invalidated")
 
 

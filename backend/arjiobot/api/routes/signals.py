@@ -33,7 +33,7 @@ def get_signal(signal_id: str):
 @router.post("/generate/{setup_id}")
 def generate_signal(setup_id: str, payload: dict[str, object] | None = None):
     state = get_state()
-    setup = state.setups.get(setup_id) or state.invalidated_setups.get(setup_id) or state.completed_setups.get(setup_id)
+    setup = state.setups.get(setup_id) or next((s for s in (*state.invalidated_setups, *state.completed_setups) if s.setup_id == setup_id), None)
     if setup is None:
         raise api_error(404, "SETUP_NOT_FOUND", "setup not found")
     signal = state.strategy_engine.generate_signal_from_setup(setup)

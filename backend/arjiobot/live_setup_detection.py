@@ -261,14 +261,19 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 source=source,
             )
             # setup.setup_id may already be tracked - the attempt-tracer's row
-            # for this exact swing (see _find_tracked_setup_by_swing) - so
-            # remove it from whichever store currently holds it before
-            # inserting the final ENTRY_READY object under that same id. The
-            # real setup takes over its own tracked identity instead of
-            # appearing as a second, separate row next to it.
+            # for this exact swing (see _find_tracked_setup_by_swing), which
+            # can itself already be resolved (COMPLETED this same poll, or
+            # INVALIDATED/COMPLETED from an earlier poll if this trade was
+            # queued behind another candidate and only picked up now - see
+            # _stale_trade_candidates) - so remove it from whichever store
+            # currently holds it, and un-resolve its setup_id (it is about to
+            # become a real, freshly-tracked IN PROGRESS row again, taking
+            # over its own tracked identity instead of appearing as a second,
+            # separate row next to it).
             state.setups.pop(setup.setup_id, None)
-            state.invalidated_setups.pop(setup.setup_id, None)
-            state.completed_setups.pop(setup.setup_id, None)
+            state.invalidated_setups[:] = [tracked for tracked in state.invalidated_setups if tracked.setup_id != setup.setup_id]
+            state.completed_setups[:] = [tracked for tracked in state.completed_setups if tracked.setup_id != setup.setup_id]
+            state.resolved_setup_ids.discard(setup.setup_id)
             _suppress_redundant_attempt_trace(state, setup.swing_16m_id)  # defensive backstop; normally a no-op now
             state.setups[setup.setup_id] = setup
             state.setup_history.setdefault(setup.setup_id, []).append(
@@ -338,13 +343,18 @@ def _find_tracked_setup_by_swing(state: Any, swing_16m_id: str) -> Any | None:
     - a row already belonging to a real trade must never be reused/
     overwritten here; _fresh_trade_candidate's processed_trade_keys already
     prevents the same real trade from reaching _setup_from_trade twice.
+
+    completed_setups/invalidated_setups are append-only lists, not dicts
+    keyed by setup_id (see ApiState) - state.setups is still a dict.
     """
     if not swing_16m_id:
         return None
-    for store in (state.setups, state.completed_setups, state.invalidated_setups):
-        for setup in store.values():
-            if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
-                return setup
+    for setup in state.setups.values():
+        if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
+            return setup
+    for setup in (*state.completed_setups, *state.invalidated_setups):
+        if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
+            return setup
     return None
 
 
@@ -538,6 +548,19 @@ def _apply_one_attempt_trace(
     swing_id = str(trace["swing_16m_id"])
     setup_id = build_setup_id(symbol=str(trace["symbol"]), direction=direction, created_at=swing_timestamp, htf_fvg_id=swing_id)
 
+    # Fix 4 (Setup Radar journey): once a setup_id has ever resolved into
+    # completed_setups or invalidated_setups, it is permanently done - the
+    # live detection funnel re-derives the exact same trace for this swing
+    # on every later poll for as long as it stays in the rolling candle
+    # buffer, and must never recreate or re-toggle it. This is also what
+    # keeps the append-only history lists stable between polls (Fix 2/3):
+    # without it, a swing whose expansion/retrace check flips poll-to-poll
+    # could un-invalidate and re-invalidate the same setup_id repeatedly,
+    # which means removing and re-adding list entries instead of writing
+    # each one exactly once, ever.
+    if setup_id in state.resolved_setup_ids:
+        return
+
     stage = str(trace.get("stage") or "SWING_16M_CONFIRMED")
     mapped_state_for_stage = _ATTEMPT_STAGE_TO_STATE.get(stage, SetupState.SWING_16M_CONFIRMED)
     target_state = mapped_state_for_stage
@@ -551,12 +574,11 @@ def _apply_one_attempt_trace(
         target_status = SetupStatus.ACTIVE
     now = datetime.now(timezone.utc)
 
-    # existing may currently live in any of the three stores - a setup that
-    # was invalidated on an earlier poll but whose underlying check can
-    # genuinely change with more candles (e.g. expansion confirmation - see
-    # the stale invalidation_reason fix below) needs to be found and moved,
-    # not recreated from scratch as if this were the first time it's seen.
-    existing = state.setups.get(setup_id) or state.invalidated_setups.get(setup_id) or state.completed_setups.get(setup_id)
+    # existing can only ever be an IN PROGRESS row now - once resolved (and
+    # therefore in resolved_setup_ids), the early return above already
+    # skipped this trace entirely, so existing is never found carrying an
+    # invalidation_reason here.
+    existing = state.setups.get(setup_id)
     new_progress = max(existing.progress_percent if existing is not None else 0.0, float(trace.get("progress_percent") or 0.0))
 
     metadata = dict(existing.metadata) if existing is not None else {}
@@ -609,18 +631,10 @@ def _apply_one_attempt_trace(
         # stage reached before this trace's failing check ran.
         field_updates["last_valid_stage"] = stage
         field_updates["execution_status"] = "invalidated"
-    elif existing is not None and existing.invalidation_reason is not None:
-        # A swing whose expansion/FVG check failed on an earlier poll can still
-        # resolve favorably on a later one once more candles arrive (e.g. an
-        # expansion that takes more bars to confirm) - replace() only overrides
-        # the keys listed here, so without this the setup's stale INVALIDATED
-        # reason/timestamp would survive onto its new ACTIVE/COMPLETED row and
-        # the radar would show a "100% complete" or "still active" attempt that
-        # also displays an old invalidation reason.
-        field_updates["invalidated_at"] = None
-        field_updates["invalidation_reason"] = None
-        field_updates["last_valid_stage"] = None
-        field_updates["execution_status"] = None
+    # No "favorable resolution" branch anymore: a setup_id that was ever
+    # invalidated never reaches this point a second time (the
+    # resolved_setup_ids check above already returned) - once invalidated,
+    # permanently done, per the Setup Radar journey rule (Fix 4).
 
     if existing is None:
         # A setup that resolves immediately on the very first poll it is
@@ -704,49 +718,40 @@ def _apply_one_attempt_trace(
     _store_setup(state, replace(existing, **field_updates), is_invalidated=is_invalidated, target_status=target_status)
 
 
-def _predates_last_clear(state: Any, setup: Any) -> bool:
-    """True if this setup's own resolution timestamp is at or before the last
-    manual history clear (see setup_history_store.clear_setup_history) - it
-    existed before that clear and must never be (re-)written into
-    completed_setups/invalidated_setups, even though the live detection
-    funnel keeps re-deriving a COMPLETED/INVALIDATED row for this exact swing
-    every later poll for as long as it stays in the rolling candle buffer.
-    Without this, the next poll cycle after a manual clear silently
-    re-hydrates exactly what an operator just cleared.
+def _append_resolved_setup(state: Any, store: list[Any], setup: Any) -> None:
+    """The one and only way a setup ever enters completed_setups or
+    invalidated_setups (Fix 2/3 - Setup Radar journey): prepend to the front
+    (index 0), then drop anything past MAX_TRACKED_SETUP_ATTEMPTS (the
+    oldest, now at the end) - never re-sorted, never rebuilt, so the list is
+    byte-for-byte identical between polls unless a new entry was just added
+    right here. setup.setup_id is also added to state.resolved_setup_ids,
+    permanently (never evicted, unlike the capped list itself) - see
+    _apply_one_attempt_trace's check at the top, which is what stops the live
+    detection funnel from recreating a setup_id that has already resolved
+    once, even after it ages out of the visible, capped list.
 
-    getattr (not state.history_cleared_at directly) because several tests
-    drive this code with a lightweight SimpleNamespace state that has no such
-    attribute at all - that must mean "no clear has ever happened", not raise.
+    A no-op if setup_id has already resolved (defensive - by construction,
+    every caller already checked this first, but a setup_id must never be
+    written twice regardless).
     """
-    cleared_at = getattr(state, "history_cleared_at", None)
-    if cleared_at is None:
-        return False
-    timestamp = setup.completed_at or setup.invalidated_at
-    return timestamp is not None and timestamp <= cleared_at
+    if setup.setup_id in state.resolved_setup_ids:
+        return
+    store.insert(0, setup)
+    del store[MAX_TRACKED_SETUP_ATTEMPTS:]
+    state.resolved_setup_ids.add(setup.setup_id)
 
 
 def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status: SetupStatus) -> None:
-    """Route a setup to the one store matching its current status, removing
-    it from the other two first - a setup that resolves (invalidated or
-    completed) leaves the uncapped in-progress pool and lands in its own
-    capped-at-100 history; one that resolves *favorably* after a prior
-    invalidation (see the stale invalidation_reason handling above this
-    function) moves back out of invalidated_setups into the live pool.
-    """
+    """Route a setup to the one store matching its current status. A setup
+    that resolves (invalidated or completed) leaves the uncapped in-progress
+    pool and lands in its own append-only, capped-at-100 history - for good;
+    there is no path back (see _append_resolved_setup / resolved_setup_ids)."""
     state.setups.pop(setup.setup_id, None)
-    state.invalidated_setups.pop(setup.setup_id, None)
-    state.completed_setups.pop(setup.setup_id, None)
-    if is_invalidated or target_status is SetupStatus.COMPLETED:
-        if _predates_last_clear(state, setup):
-            state.setup_history.pop(setup.setup_id, None)
-            return
     if is_invalidated:
-        state.invalidated_setups[setup.setup_id] = setup
-        _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
+        _append_resolved_setup(state, state.invalidated_setups, setup)
         save_setup_history_store(state)
     elif target_status is SetupStatus.COMPLETED:
-        state.completed_setups[setup.setup_id] = setup
-        _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
+        _append_resolved_setup(state, state.completed_setups, setup)
         save_setup_history_store(state)
     else:
         state.setups[setup.setup_id] = setup
@@ -761,11 +766,7 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     same way an attempt-trace COMPLETED row does.
     """
     state.setups.pop(setup.setup_id, None)
-    if _predates_last_clear(state, setup):
-        state.setup_history.pop(setup.setup_id, None)
-        return
-    state.completed_setups[setup.setup_id] = setup
-    _evict_oldest(state.completed_setups, state.setup_history, key=lambda s: s.updated_at)
+    _append_resolved_setup(state, state.completed_setups, setup)
     save_setup_history_store(state)
 
 
@@ -776,10 +777,12 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
     could still submit an order against an entry zone the market has likely
     moved away from.
 
-    invalidation_reason is intentionally left unset - Setup._validate()
-    forbids a >=100%-progress setup from also carrying an invalidation_reason,
-    and this setup legitimately did reach ENTRY_READY/100% before going
-    stale; current_state/status=EXPIRED is itself the terminal marker.
+    invalidation_reason=SETUP_EXPIRED records the exact reason this setup
+    left IN PROGRESS, per the Setup Radar journey's exit-path rule (Fix 1) -
+    Setup._validate() now allows this specifically for current_state=EXPIRED
+    (see setup_models.py), the one deliberate exception to "100%-complete
+    setups never carry an invalidation_reason", since this setup legitimately
+    did reach ENTRY_READY/100% before going stale.
     """
     expired = replace(
         setup,
@@ -787,32 +790,14 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
         status=SetupStatus.EXPIRED,
         updated_at=expired_at,
         invalidated_at=expired_at,
+        invalidation_reason=InvalidationReason.SETUP_EXPIRED,
         last_valid_stage="ENTRY_READY",
         execution_status="expired",
     )
     state.setups.pop(setup.setup_id, None)
-    if _predates_last_clear(state, expired):
-        state.setup_history.pop(setup.setup_id, None)
-        return expired
-    state.invalidated_setups[setup.setup_id] = expired
-    _evict_oldest(state.invalidated_setups, state.setup_history, key=lambda s: s.invalidated_at or s.created_at)
+    _append_resolved_setup(state, state.invalidated_setups, expired)
     save_setup_history_store(state)
     return expired
-
-
-def _evict_oldest(
-    store: dict[str, Any],
-    setup_history: dict[str, list[dict[str, object]]],
-    *,
-    key: Any,
-    max_count: int = MAX_TRACKED_SETUP_ATTEMPTS,
-) -> None:
-    overflow = len(store) - max_count
-    if overflow <= 0:
-        return
-    for setup in sorted(store.values(), key=key)[:overflow]:
-        store.pop(setup.setup_id, None)
-        setup_history.pop(setup.setup_id, None)
 
 
 def _suppress_redundant_attempt_trace(state: Any, swing_16m_id: str | None) -> None:
@@ -826,14 +811,19 @@ def _suppress_redundant_attempt_trace(state: Any, swing_16m_id: str | None) -> N
     Setup Radar's Completed tab (same symbol, direction, 100% progress, and
     near-identical timestamp, since both are produced moments apart within
     the same poll) which looks like a duplicate-completion bug even though
-    the two setup_ids are never actually equal.
+    the two setup_ids are never actually equal. A narrow, documented
+    exception to "append-only" (Fix 2/3) - this removes a genuine duplicate
+    of the same real-world event, not a poll-cycle reorder, and is normally
+    a no-op now that _find_tracked_setup_by_swing lets the real trade take
+    over the tracer row's own setup_id instead of minting a second one.
     """
     if not swing_16m_id:
         return
-    for setup_id, setup in list(state.completed_setups.items()):
+    for setup in list(state.completed_setups):
         if setup.swing_16m_id == swing_16m_id and setup.metadata.get("source") != "LIVE_PROFILE_EVALUATOR":
-            state.completed_setups.pop(setup_id, None)
-            state.setup_history.pop(setup_id, None)
+            state.completed_setups.remove(setup)
+            state.setup_history.pop(setup.setup_id, None)
+            state.resolved_setup_ids.discard(setup.setup_id)
 
 
 def _fresh_trade_candidate(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> dict[str, object] | None:

@@ -7,7 +7,6 @@ from fastapi import APIRouter
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.schemas.common import ok
 from arjiobot.backtesting.research_profiles import DEFAULT_PROFILE_ID, get_profile
-from arjiobot.setup_tracker.setup_history_store import filter_and_cap_history
 
 router = APIRouter(prefix="/api/radar", tags=["radar"])
 
@@ -208,11 +207,9 @@ def radar_record(setup) -> dict[str, object]:
 
 def _all_setups(state) -> tuple:
     """Every tracked setup across all three stores - in-progress (uncapped),
-    invalidated (age-filtered + capped at 100), completed (age-filtered +
-    capped at 100). filter_and_cap_history is read-only - applied here
-    defensively, since wall-clock time alone can push a setup past the
-    1-hour age limit between writes."""
-    return (*state.setups.values(), *filter_and_cap_history(state.invalidated_setups).values(), *filter_and_cap_history(state.completed_setups).values())
+    invalidated (append-only, capped at 100), completed (append-only, capped
+    at 100) - see live_setup_detection.py's _append_resolved_setup."""
+    return (*state.setups.values(), *state.invalidated_setups, *state.completed_setups)
 
 
 @router.get("")

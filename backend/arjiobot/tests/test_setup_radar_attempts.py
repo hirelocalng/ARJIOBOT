@@ -46,8 +46,9 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
             "max_leverage": "20",
         },
         setups={},
-        invalidated_setups={},
-        completed_setups={},
+        invalidated_setups=[],
+        completed_setups=[],
+        resolved_setup_ids=set(),
         setup_history={},
         stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},
@@ -57,7 +58,7 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
 
 def _all_tracked(state) -> list:
     """Every setup across all three stores - mirrors radar.py's _all_setups."""
-    return [*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values()]
+    return [*state.setups.values(), *state.invalidated_setups, *state.completed_setups]
 
 
 def test_swing_only_attempt_is_logged_and_visible_with_its_symbol() -> None:
@@ -84,7 +85,7 @@ def test_failed_expansion_attempt_is_retained_with_invalidation_reason() -> None
     # A failed/invalidated attempt now lives in invalidated_setups, not setups.
     expansion_failures = [
         setup
-        for setup in state.invalidated_setups.values()
+        for setup in state.invalidated_setups
         if setup.invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
     ]
     assert expansion_failures, "expected at least one swing whose expansion never confirmed"
@@ -158,7 +159,7 @@ def test_invalidated_history_is_capped_at_100_independently_of_in_progress() -> 
     assert len(state.invalidated_setups) == 100
     assert state.setups == {}, "invalidated setups must never land in the in-progress store"
     # Oldest 5 (swing_inv_0..4) were evicted; the most recent must survive.
-    remaining_ids = {setup.swing_16m_id for setup in state.invalidated_setups.values()}
+    remaining_ids = {setup.swing_16m_id for setup in state.invalidated_setups}
     assert "swing_inv_104" in remaining_ids
     assert "swing_inv_0" not in remaining_ids
 
@@ -170,21 +171,23 @@ def test_completed_history_is_capped_at_100_independently_of_in_progress() -> No
 
     assert len(state.completed_setups) == 100
     assert state.setups == {}, "completed setups must never land in the in-progress store"
-    remaining_ids = {setup.swing_16m_id for setup in state.completed_setups.values()}
+    remaining_ids = {setup.swing_16m_id for setup in state.completed_setups}
     assert "swing_done_104" in remaining_ids
     assert "swing_done_0" not in remaining_ids
 
 
 def test_completed_and_invalidated_mutations_persist_to_disk_in_progress_does_not(monkeypatch, tmp_path) -> None:
     """A setup landing in completed_setups or invalidated_setups must be
-    persisted (see setup_history_store.py - this is what lets both tabs
-    survive a restart now); a setup that stays in IN PROGRESS must never be
-    written to disk. Redirects the persisted file to a tmp_path so this
-    never touches the real backend/data/ files."""
+    written to setup_history_store.json (so an operator/log can see it
+    without reading process memory); IN PROGRESS must never be written there
+    at all - see setup_history_store.save_setup_history_store. Redirects the
+    persisted file to a tmp_path so this never touches the real
+    backend/data/ files."""
+    import json
+
     from arjiobot.setup_tracker import setup_history_store
 
     monkeypatch.setattr(setup_history_store, "STORE_PATH", tmp_path / "setup_history_store.json")
-    monkeypatch.setattr(setup_history_store, "HISTORY_CLEARED_MARKER_PATH", tmp_path / ".history_cleared")
     state = _fake_state("ADAUSDT", ())
 
     invalidated_trace = _swing_trace("swing_inv_persist_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
@@ -194,12 +197,11 @@ def test_completed_and_invalidated_mutations_persist_to_disk_in_progress_does_no
     in_progress_trace = _swing_trace("swing_active_persist_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0)
     _apply_attempt_traces(state, "ADAUSDT", (in_progress_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    reloaded_state = _fake_state("ADAUSDT", ())
-    completed_count, invalidated_count = setup_history_store.load_setup_history_store(reloaded_state)
+    payload = json.loads(setup_history_store.STORE_PATH.read_text(encoding="utf-8"))
 
-    assert completed_count == 1
-    assert invalidated_count == 1
-    assert reloaded_state.setups == {}, "IN PROGRESS must never be persisted/reloaded"
+    assert len(payload["completed"]) == 1
+    assert len(payload["invalidated"]) == 1
+    assert "swing_active_persist_1" not in json.dumps(payload), "IN PROGRESS must never be persisted"
 
 
 def test_in_progress_pool_has_no_cap() -> None:
@@ -211,8 +213,8 @@ def test_in_progress_pool_has_no_cap() -> None:
     _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
     assert len(state.setups) == 150
-    assert state.invalidated_setups == {}
-    assert state.completed_setups == {}
+    assert state.invalidated_setups == []
+    assert state.completed_setups == []
 
 
 def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
@@ -244,12 +246,15 @@ def test_eviction_never_removes_a_pending_entry_ready_setup() -> None:
     assert len(state.completed_setups) == 100, "the flood of unrelated completions must still respect its own cap"
 
 
-def test_invalidation_reason_clears_when_a_later_poll_resolves_favorably() -> None:
-    """A swing that fails on one poll (e.g. expansion not confirmed yet) but
-    resolves favorably on a later poll (more candles arrived) must not keep
-    displaying its old invalidation reason once it is ACTIVE/COMPLETED again -
-    that stale combination ("100% complete" or "still active" next to a leftover
-    invalidation reason) is the literal Setup Radar bug being fixed here."""
+def test_invalidated_setup_is_permanently_done_and_never_resurrected_by_a_later_poll() -> None:
+    """Setup Radar journey rule (Fix 4): once a setup_id is invalidated, it is
+    permanently done - the funnel re-deriving the exact same swing as
+    ENTRY_READY on a later poll (the underlying check genuinely turning
+    favorable, e.g. an expansion that takes more bars to confirm) must NOT
+    un-invalidate or move it anywhere. This is also what keeps the
+    append-only invalidated/completed lists stable between polls (Fix 2/3) -
+    allowing a resurrection would mean removing and re-adding list entries
+    instead of writing each one exactly once, ever."""
     state = _fake_state("ADAUSDT", ())
     base_trace = {
         "symbol": "ADAUSDT",
@@ -268,20 +273,20 @@ def test_invalidation_reason_clears_when_a_later_poll_resolves_favorably() -> No
     failed_trace = {**base_trace, "stage": "SWING_16M_CONFIRMED", "progress_percent": 20.0, "invalidation_reason": "EXPANSION_NOT_CONFIRMED", "is_terminal": True}
 
     _apply_attempt_traces(state, "ADAUSDT", (failed_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
-    [setup] = state.invalidated_setups.values()
+    [setup] = state.invalidated_setups
     assert setup.status is SetupStatus.INVALIDATED
     assert setup.invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
     assert setup.invalidated_at is not None
     assert state.setups == {}
+    assert setup.setup_id in state.resolved_setup_ids
 
     resolved_trace = {**base_trace, "stage": "ENTRY_READY", "progress_percent": 100.0, "invalidation_reason": None, "is_terminal": True}
     _apply_attempt_traces(state, "ADAUSDT", (resolved_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
-    assert state.invalidated_setups == {}, "must move out of invalidated_setups once it resolves favorably"
-    [setup] = state.completed_setups.values()
-    assert setup.progress_percent == 100.0
-    assert setup.status is SetupStatus.COMPLETED
-    assert setup.invalidation_reason is None, "stale invalidation reason must not survive onto a resolved attempt"
-    assert setup.invalidated_at is None
+    # Byte-for-byte unchanged: still exactly the one invalidated entry, never
+    # touched, and nothing was created in completed_setups or state.setups.
+    assert state.invalidated_setups == [setup]
+    assert state.completed_setups == []
+    assert state.setups == {}
 
 
 def test_live_automation_only_acts_on_entry_ready_setups() -> None:
@@ -326,7 +331,7 @@ def test_live_automation_only_acts_on_entry_ready_setups() -> None:
         _swing_trace("swing_completed_2", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),
     )
     _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
-    tracked = [*state.setups.values(), *state.invalidated_setups.values(), *state.completed_setups.values()]
+    tracked = [*state.setups.values(), *state.invalidated_setups, *state.completed_setups]
     assert tracked, "expected attempt rows to exist"
     assert not any(setup.current_state is SetupState.ENTRY_READY for setup in tracked), (
         "none of these synthetic traces is a real trade-detection ENTRY_READY setup"
@@ -560,11 +565,11 @@ def test_suppress_redundant_attempt_trace_removes_only_the_attempt_tracer_row_fo
     state = _fake_state("ADAUSDT", ())
     traces = (_swing_trace("swing_shared_0", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True),)
     _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
-    assert any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups.values())
+    assert any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups)
 
     _suppress_redundant_attempt_trace(state, "swing_shared_0")
 
-    assert not any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups.values())
+    assert not any(setup.swing_16m_id == "swing_shared_0" for setup in state.completed_setups)
 
 
 def test_suppress_redundant_attempt_trace_never_removes_the_real_trade_row_itself() -> None:
@@ -585,11 +590,11 @@ def test_suppress_redundant_attempt_trace_never_removes_the_real_trade_row_itsel
         "source_16m_fvg_id": "fvg16_real",
     }
     real_setup = _setup_from_trade(trade, state=state, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
-    state.completed_setups[real_setup.setup_id] = real_setup
+    state.completed_setups.insert(0, real_setup)
 
     _suppress_redundant_attempt_trace(state, "swing_shared_real")
 
-    assert real_setup.setup_id in state.completed_setups
+    assert any(setup.setup_id == real_setup.setup_id for setup in state.completed_setups)
 
 
 def test_real_entry_ready_setup_takes_over_the_attempt_tracers_setup_id() -> None:
@@ -634,7 +639,7 @@ def test_attempt_tracer_setup_completing_on_first_poll_is_recorded_in_in_progres
     trace = {**_swing_trace("swing_instant_complete_1", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    [setup] = state.completed_setups.values()
+    [setup] = state.completed_setups
     assert setup.status is SetupStatus.COMPLETED
     assert setup.setup_id not in state.setups, "it must have moved on to completed_setups, not stayed in IN PROGRESS"
     history = state.setup_history[setup.setup_id]
@@ -653,7 +658,7 @@ def test_attempt_tracer_setup_invalidating_on_first_poll_is_recorded_in_in_progr
     trace = _swing_trace("swing_instant_invalid_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    [setup] = state.invalidated_setups.values()
+    [setup] = state.invalidated_setups
     assert setup.status is SetupStatus.INVALIDATED
     assert setup.setup_id not in state.setups, "it must have moved on to invalidated_setups, not stayed in IN PROGRESS"
     history = state.setup_history[setup.setup_id]
@@ -703,7 +708,7 @@ def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing(
     for real in real_trades:
         matching_completed = [
             setup
-            for setup in state.completed_setups.values()
+            for setup in state.completed_setups
             if setup.swing_16m_id == real.swing_16m_id and setup.setup_id != real.setup_id
         ]
         assert matching_completed == [], (
@@ -786,7 +791,7 @@ def test_invalidated_setup_carries_reason_and_last_valid_stage() -> None:
     trace = _swing_trace("swing_lvs_1", stage="FVG_16M_CONFIRMED", progress_percent=50.0, invalidation_reason="FVG_12M_NOT_FOUND", is_terminal=True)
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    [setup] = state.invalidated_setups.values()
+    [setup] = state.invalidated_setups
     assert setup.status is SetupStatus.INVALIDATED
     assert setup.invalidation_reason is InvalidationReason.FVG_12M_NOT_FOUND
     assert setup.last_valid_stage == "FVG_16M_CONFIRMED"
@@ -809,7 +814,7 @@ def test_completed_setup_moves_to_completed_with_completed_at_set() -> None:
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
     assert state.setups == {}
-    [setup] = state.completed_setups.values()
+    [setup] = state.completed_setups
     assert setup.status is SetupStatus.COMPLETED
     assert setup.completed_at is not None
     assert setup.completed_at.isoformat() == "2026-06-16T03:45:00+00:00"
@@ -835,7 +840,7 @@ def test_only_entry_ready_setup_allowed_into_execution_flow_not_in_progress_or_i
         return setup.status in (SetupStatus.ENTRY_READY, SetupStatus.COMPLETED) and setup.current_state is SetupState.ENTRY_READY
 
     [active_setup] = state.setups.values()
-    [invalidated_setup] = state.invalidated_setups.values()
+    [invalidated_setup] = state.invalidated_setups
     assert not executable(active_setup), "IN_PROGRESS setups must never be eligible for execution"
     assert not executable(invalidated_setup), "INVALIDATED setups must never be eligible for execution"
 
@@ -858,3 +863,54 @@ def test_only_entry_ready_setup_allowed_into_execution_flow_not_in_progress_or_i
     )
     assert entry_ready.status is SetupStatus.ENTRY_READY
     assert executable(entry_ready), "a real ENTRY_READY setup must be eligible for execution"
+
+
+# --- Setup Radar journey: append-only stability, seen-setups dedup --------
+
+
+def test_invalidated_list_at_cap_drops_only_the_oldest_order_of_others_unchanged() -> None:
+    """Explicit scenario: INVALIDATED list at exactly 100 -> one new entry
+    added -> the oldest is dropped and every other entry's relative order is
+    completely unchanged (no re-sort, no rebuild - see _append_resolved_setup)."""
+    state = _fake_state("ADAUSDT", ())
+    traces = tuple(
+        _swing_trace(f"swing_cap_{i}", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+        for i in range(100)
+    )
+    _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    assert len(state.invalidated_setups) == 100
+    before = list(state.invalidated_setups)  # newest-first: [swing_99, swing_98, ..., swing_0]
+
+    one_more = _swing_trace("swing_cap_100", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+    _apply_attempt_traces(state, "ADAUSDT", (one_more,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert len(state.invalidated_setups) == 100
+    assert state.invalidated_setups[0].swing_16m_id == "swing_cap_100", "the new entry is prepended to the front"
+    assert state.invalidated_setups[1:] == before[:-1], "every other entry's relative order is byte-for-byte unchanged"
+    assert before[-1] not in state.invalidated_setups, "only the oldest (now evicted) entry is gone"
+
+
+def test_two_polls_with_no_new_events_leave_both_lists_byte_for_byte_identical() -> None:
+    """Stability test: re-running the exact same poll (the swing already
+    resolved into invalidated_setups on the first pass) must not change
+    invalidated_setups/completed_setups at all on the second pass - not even
+    re-create the same object - because resolved_setup_ids short-circuits
+    _apply_one_attempt_trace entirely for an already-resolved setup_id."""
+    state = _fake_state("ADAUSDT", ())
+    invalidated_trace = _swing_trace("swing_stable_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
+    completed_trace = {**_swing_trace("swing_stable_2", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
+    _apply_attempt_traces(state, "ADAUSDT", (invalidated_trace, completed_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    invalidated_after_poll_1 = list(state.invalidated_setups)
+    completed_after_poll_1 = list(state.completed_setups)
+    assert len(invalidated_after_poll_1) == 1
+    assert len(completed_after_poll_1) == 1
+
+    # Second poll: the exact same traces again - nothing new happened.
+    _apply_attempt_traces(state, "ADAUSDT", (invalidated_trace, completed_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert state.invalidated_setups == invalidated_after_poll_1
+    assert state.completed_setups == completed_after_poll_1
+    # Not just equal - the identical objects, never replaced or re-appended.
+    assert state.invalidated_setups[0] is invalidated_after_poll_1[0]
+    assert state.completed_setups[0] is completed_after_poll_1[0]

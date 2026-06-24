@@ -54,11 +54,6 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
         current_state=SetupState.COMPLETED,
         status=SetupStatus.COMPLETED,
         progress_percent=100.0,
-        # completed_at must be recent - completed_setups/invalidated_setups
-        # are filtered by a 1-hour age rule (filter_and_cap_history) on every
-        # API response, unlike state.setups (IN PROGRESS), which is never
-        # age-filtered. created_at/updated_at's fixed 2026-01-01 default from
-        # _make_setup would otherwise make this row vanish from /completed.
         completed_at=datetime.now(timezone.utc),
     )
     invalidated = _make_setup(
@@ -70,17 +65,17 @@ def test_setup_radar_tabs_each_show_only_their_own_category() -> None:
         invalidated_at=datetime.now(timezone.utc),
         invalidation_reason=InvalidationReason.RETRACE_WINDOW_EXPIRED,
     )
-    # Mirrors how _store_setup/move_setup_to_completed actually route a real
-    # setup: ACTIVE and pending ENTRY_READY stay in the uncapped in-progress
-    # pool, COMPLETED and INVALIDATED live in their own capped-at-100 stores.
-    # entry_ready is "pending execution" - still in state.setups because
-    # live_automation has not yet resolved it (no execution_status set) - so
-    # it belongs in IN PROGRESS, not COMPLETED, until it actually does (see
-    # should_leave_in_progress / live_automation.py's _process_setup).
+    # Mirrors how _append_resolved_setup actually routes a real setup: ACTIVE
+    # and pending ENTRY_READY stay in the uncapped in-progress pool,
+    # COMPLETED and INVALIDATED live in their own append-only, capped-at-100
+    # lists. entry_ready is "pending execution" - still in state.setups
+    # because live_automation has not yet resolved it (no execution_status
+    # set) - so it belongs in IN PROGRESS, not COMPLETED, until it actually
+    # does (see should_leave_in_progress / live_automation.py's _process_setup).
     state.setups[active.setup_id] = active
     state.setups[entry_ready.setup_id] = entry_ready
-    state.completed_setups[completed.setup_id] = completed
-    state.invalidated_setups[invalidated.setup_id] = invalidated
+    state.completed_setups.insert(0, completed)
+    state.invalidated_setups.insert(0, invalidated)
 
     in_progress = api.get("/api/setups/in-progress").json()["data"]
     completed_rows = api.get("/api/setups/completed").json()["data"]

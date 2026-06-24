@@ -32,11 +32,13 @@ def test_clear_setup_history_endpoint_clears_completed_and_invalidated() -> None
         profile_id="PROFILE_2",
         timeframe_profile_id="DEFAULT_16_12_8",
     )
-    state.completed_setups[trade.setup_id] = trade
+    state.completed_setups.insert(0, trade)
+    state.resolved_setup_ids.add(trade.setup_id)
     state.setup_history[trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
 
     result = api.post("/api/admin/clear-setup-history").json()["data"]
 
     assert result["cleared_completed_count"] == 1
-    assert state.completed_setups == {}
+    assert state.completed_setups == []
     assert trade.setup_id not in state.setup_history
+    assert trade.setup_id not in state.resolved_setup_ids, "a manual clear must also reset the seen-setups dedup cache"

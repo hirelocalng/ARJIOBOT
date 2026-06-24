@@ -10,22 +10,25 @@ from fastapi import APIRouter
 
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.schemas.common import ok
-from arjiobot.setup_tracker.setup_history_store import clear_setup_history
+from arjiobot.setup_tracker.setup_history_store import wipe_setup_history
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
 @router.post("/clear-setup-history")
 def clear_setup_history_endpoint():
-    """Manually clear completed_setups/invalidated_setups in memory AND
-    delete the persisted setup_history_store.json from disk, simultaneously -
-    for an operator to trigger on demand (e.g. from the Railway console)
-    without waiting for a restart. IN PROGRESS (state.setups) is never
-    touched, and this has no effect on adapter_mode/live_trading_enabled/
-    trading_mode/live_armed or any risk/margin/lock check - it only clears
-    Setup Radar's COMPLETED/INVALIDATED display history.
+    """Manually clear completed_setups/invalidated_setups in memory, clear
+    the seen-setups dedup cache, and overwrite the persisted
+    setup_history_store.json with the empty fresh-start shape, simultaneously
+    - for an operator to trigger on demand (e.g. from the Railway console)
+    without waiting for a restart. The same operation main.py runs once on
+    every process boot (see wipe_setup_history). IN PROGRESS (state.setups)
+    is never touched, and this has no effect on adapter_mode/
+    live_trading_enabled/trading_mode/live_armed or any risk/margin/lock
+    check - it only clears Setup Radar's COMPLETED/INVALIDATED display
+    history.
     """
-    completed_count, invalidated_count = clear_setup_history(get_state())
+    completed_count, invalidated_count = wipe_setup_history(get_state())
     return ok(
         {
             "cleared_completed_count": completed_count,

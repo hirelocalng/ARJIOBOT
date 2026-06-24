@@ -11,10 +11,7 @@ from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.api.routes.monitoring import resume_monitoring_if_enabled
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
-from arjiobot.setup_tracker.setup_history_store import (
-    load_setup_history_store,
-    run_one_time_history_clear_migration,
-)
+from arjiobot.setup_tracker.setup_history_store import wipe_setup_history
 
 
 logger = logging.getLogger(__name__)
@@ -46,13 +43,10 @@ def create_app() -> FastAPI:
         app.include_router(router)
     bootstrap_live_trading_from_env(get_state())
     resume_monitoring_if_enabled(get_state())
-    # Exactly once (tracked by backend/data/.history_cleared, not repeated on
-    # every restart): clear any existing completed/invalidated setup history
-    # - in memory and on disk, overwriting whatever setup_history_store.json
-    # already contains - so both tabs start at 0 on the deploy that
-    # introduces this. Every later restart instead loads whatever has
-    # genuinely accumulated since then - see setup_history_store.py's module
-    # docstring. IN PROGRESS (state.setups) is never touched by either step.
-    run_one_time_history_clear_migration(get_state())
-    load_setup_history_store(get_state())
+    # Every deploy starts with zero Setup Radar history, on purpose - clears
+    # completed_setups/invalidated_setups in memory, clears the seen-setups
+    # dedup cache, and overwrites setup_history_store.json with the empty
+    # fresh-start shape. Old history from a previous deployment session never
+    # loads. IN PROGRESS (state.setups) is never touched by this.
+    wipe_setup_history(get_state())
     return app
