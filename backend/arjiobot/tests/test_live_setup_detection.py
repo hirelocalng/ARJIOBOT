@@ -30,6 +30,7 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
         invalidated_setups=[],
         completed_setups=[],
         resolved_setup_ids=set(),
+        resolved_swing_keys=set(),
         setup_history={},
         stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},

@@ -51,6 +51,7 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
         invalidated_setups=[],
         completed_setups=[],
         resolved_setup_ids=set(),
+        resolved_swing_keys=set(),
         setup_history={},
         stale_trade_skips={},
         live_setup_detection={"processed_trade_keys": []},
@@ -1013,25 +1014,31 @@ def test_invalidated_list_at_cap_drops_only_the_oldest_order_of_others_unchanged
     assert before[-1] not in state.invalidated_setups, "only the oldest (now evicted) entry is gone"
 
 
-def test_two_polls_with_no_new_events_leave_invalidated_list_byte_for_byte_identical() -> None:
+def test_two_polls_with_no_new_events_leave_all_three_stores_byte_for_byte_identical() -> None:
     """Stability test: re-running the exact same poll (both swings already
     resolved into invalidated_setups on the first pass - one a genuine
     strategy failure, one a structural-match-only/NO_EXECUTION_ATTEMPTED row)
-    must not change invalidated_setups at all on the second pass - not even
-    re-create the same object - because resolved_setup_ids short-circuits
-    _apply_one_attempt_trace entirely for an already-resolved setup_id."""
+    must not change IN PROGRESS, COMPLETED, or INVALIDATED at all on the
+    second pass - not even re-create the same object - because the
+    swing-level dedup cache (resolved_swing_keys) stops the funnel from
+    re-deriving either swing at all, and resolved_setup_ids additionally
+    short-circuits _apply_one_attempt_trace for an already-resolved
+    setup_id."""
     state = _fake_state("ADAUSDT", ())
     strategy_failed_trace = _swing_trace("swing_stable_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0, invalidation_reason="EXPANSION_NOT_CONFIRMED", is_terminal=True)
     structural_match_trace = {**_swing_trace("swing_stable_2", stage="ENTRY_READY", progress_percent=100.0, is_terminal=True), "entry_timestamp": "2026-06-16T01:30:00+00:00"}
     _apply_attempt_traces(state, "ADAUSDT", (strategy_failed_trace, structural_match_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
+    in_progress_after_poll_1 = dict(state.setups)
     invalidated_after_poll_1 = list(state.invalidated_setups)
+    assert in_progress_after_poll_1 == {}
     assert len(invalidated_after_poll_1) == 2
     assert state.completed_setups == []
 
     # Second poll: the exact same traces again - nothing new happened.
     _apply_attempt_traces(state, "ADAUSDT", (strategy_failed_trace, structural_match_trace), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
+    assert state.setups == in_progress_after_poll_1
     assert state.invalidated_setups == invalidated_after_poll_1
     assert state.completed_setups == []
     # Not just equal - the identical objects, never replaced or re-appended.

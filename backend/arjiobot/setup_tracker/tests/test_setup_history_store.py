@@ -9,13 +9,21 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from arjiobot.live_setup_detection import _setup_from_trade, move_setup_to_completed
+from arjiobot.live_setup_detection import _filter_resolved_swings, _setup_from_trade, move_setup_to_completed
 from arjiobot.setup_tracker import setup_history_store
-from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus
+from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus, build_swing_dedup_key
 
 
 def _fake_state() -> SimpleNamespace:
-    return SimpleNamespace(setups={}, invalidated_setups=[], completed_setups=[], resolved_setup_ids=set(), setup_history={}, history_cleared_at=None)
+    return SimpleNamespace(
+        setups={},
+        invalidated_setups=[],
+        completed_setups=[],
+        resolved_setup_ids=set(),
+        resolved_swing_keys=set(),
+        setup_history={},
+        history_cleared_at=None,
+    )
 
 
 def _redirect_paths(monkeypatch, tmp_path) -> None:
@@ -188,3 +196,35 @@ def test_wipe_setup_history_clears_the_dedup_cache_so_a_fresh_session_can_rewrit
 
     move_setup_to_completed(state, trade)
     assert state.completed_setups == [trade], "after a wipe, the same setup_id must be writable again, not permanently blocked"
+
+
+def test_wipe_setup_history_seeds_swing_cache_from_previous_session_then_starts_visible_lists_empty(monkeypatch, tmp_path) -> None:
+    """Fix 3 (Setup Radar swing-level dedup): a previous deployment
+    session's persisted history seeds the permanent swing dedup cache before
+    the visible completed/invalidated lists are wiped empty - so a swing
+    already resolved in that earlier session stays permanently blocked from
+    re-entering the live detection funnel, even though the UI starts clean."""
+    _redirect_paths(monkeypatch, tmp_path)
+    previous_session_state = _fake_state()
+    trade = _make_completed_trade(previous_session_state, suffix="prev_session1", entry_timestamp="2026-06-20T00:00:00+00:00")
+    move_setup_to_completed(previous_session_state, trade)
+    assert setup_history_store.STORE_PATH.exists()
+
+    # Simulates the process restarting: a brand new ApiState, but STORE_PATH
+    # on disk still holds exactly what the previous session wrote.
+    new_session_state = _fake_state()
+    completed_count, invalidated_count = setup_history_store.wipe_setup_history(new_session_state)
+
+    assert (completed_count, invalidated_count) == (0, 0), "the new session's own in-memory lists start empty, by construction"
+    assert new_session_state.completed_setups == []
+    assert new_session_state.invalidated_setups == []
+    expected_key = build_swing_dedup_key(symbol=trade.symbol, direction=trade.direction, swing_timestamp=trade.created_at)
+    assert expected_key in new_session_state.resolved_swing_keys
+
+    payload = json.loads(setup_history_store.STORE_PATH.read_text(encoding="utf-8"))
+    assert payload == {"completed": [], "invalidated": [], "cleared_at": new_session_state.history_cleared_at.isoformat(), "setup_history": {}}
+
+    # And the swing is actually blocked on the very next poll, before the
+    # funnel ever runs on it - not just present in the cache in theory.
+    swing = SimpleNamespace(symbol=trade.symbol, swing_id="whatever", right_candle=SimpleNamespace(timestamp=trade.created_at))
+    assert _filter_resolved_swings(new_session_state, [swing], direction=trade.direction.value) == []

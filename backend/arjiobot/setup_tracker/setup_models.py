@@ -242,6 +242,29 @@ def build_setup_id(
     return f"set_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]}"
 
 
+def build_swing_dedup_key(
+    *,
+    symbol: str,
+    direction: SetupDirection | str,
+    swing_timestamp: datetime | str,
+) -> str:
+    """Permanent swing-level dedup key: symbol + direction + the swing's own
+    16M candle timestamp - deliberately NOT setup_id (build_setup_id above),
+    which a fresh live-detection poll can mint differently for the exact
+    same real-world swing (e.g. if anything feeding it - the htf_fvg_id
+    component, or the live candle data itself - varies poll to poll even
+    though the underlying swing did not). Once this key is recorded as
+    resolved, the live detection funnel must never evaluate that swing
+    again, for the life of the process - see live_setup_detection.py's
+    detect_live_setups_for_symbol (checked before the funnel runs) and
+    _append_resolved_setup (where it is recorded, atomically with the
+    COMPLETED/INVALIDATED write).
+    """
+    direction_value = direction.value if isinstance(direction, SetupDirection) else str(direction)
+    timestamp_value = datetime.fromisoformat(swing_timestamp.replace("Z", "+00:00")) if isinstance(swing_timestamp, str) else swing_timestamp
+    return f"{symbol.upper()}_{direction_value.upper()}_{ensure_utc(timestamp_value).isoformat()}"
+
+
 def setup_to_record(setup: Setup) -> dict[str, Any]:
     """Return a storage-friendly setup record."""
     return {

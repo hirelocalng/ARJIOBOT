@@ -31,6 +31,7 @@ from arjiobot.setup_tracker.setup_models import (
     SetupStatus,
     StateHistoryEntry,
     build_setup_id,
+    build_swing_dedup_key,
 )
 from arjiobot.swings.swing_models import SwingType
 from arjiobot.swings.swings import SwingDetectionEngine
@@ -103,6 +104,24 @@ def _fvg_engine_for(state: Any, symbol: str, minutes: int) -> FVGDetectionEngine
     return engine
 
 
+def _filter_resolved_swings(state: Any, swings: list[Any], *, direction: str) -> list[Any]:
+    """Setup Radar swing-level dedup (Fix 1/5): drop any swing whose
+    permanent dedup key (see setup_models.build_swing_dedup_key) already
+    resolved into COMPLETED/INVALIDATED/EXPIRED on an earlier poll - logged
+    at DEBUG only, since this is the expected, common case once a symbol has
+    been monitored for a while, not something worth surfacing at INFO every
+    poll.
+    """
+    fresh: list[Any] = []
+    for swing in swings:
+        key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=swing.right_candle.timestamp)
+        if key in state.resolved_swing_keys:
+            logger.debug("Swing %s (%s) already resolved; skipping re-evaluation this poll (key=%s)", swing.swing_id, direction, key)
+            continue
+        fresh.append(swing)
+    return fresh
+
+
 def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MONITORING_POLL") -> dict[str, Any]:
     symbol = symbol.upper()
     detector_state = state.live_setup_detection
@@ -146,8 +165,25 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             return _finish(detector_state, "WAITING", "not enough aligned candles for selected timeframe profile", source=source)
 
         swing_results = SwingDetectionEngine().detect_all_swings(profiles[timeframe_profile.swing_timeframe])
-        bearish_swing_highs = [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH]
-        bullish_swing_lows = [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW]
+        # Swing-level dedup (Fix 1/5): drop any swing already permanently
+        # resolved (COMPLETED/INVALIDATED/EXPIRED on an earlier poll) right
+        # here, straight out of swing detection, before it is ever passed to
+        # the funnel below - the earliest point its own timestamp exists,
+        # and before any setup_id is minted for it this poll. The funnel
+        # only ever walks the candidate lists passed in here for both
+        # attempt-trace tracking and real trade detection, so filtering them
+        # here is sufficient to stop a resolved swing from being
+        # re-evaluated by either path at all.
+        bearish_swing_highs = _filter_resolved_swings(
+            state,
+            [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH],
+            direction="BEARISH",
+        )
+        bullish_swing_lows = _filter_resolved_swings(
+            state,
+            [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW],
+            direction="BULLISH",
+        )
         expansions_main = runner._research_expansions(swing_results.all_swings)
         fvg_results = {
             minutes: _fvg_engine_for(state, symbol, minutes).detect_fvgs(
@@ -753,6 +789,20 @@ def _append_resolved_setup(state: Any, store: list[Any], setup: Any) -> None:
     detection funnel from recreating a setup_id that has already resolved
     once, even after it ages out of the visible, capped list.
 
+    Setup Radar swing-level dedup (Fix 1): setup.created_at is always the
+    swing's own original detection timestamp (the right-candle timestamp
+    _attempt_traces_for_direction reports as swing_timestamp - see
+    _apply_one_attempt_trace, and _setup_from_trade's tracked-row handoff),
+    so the permanent swing dedup key (symbol + direction + that timestamp -
+    see setup_models.build_swing_dedup_key) is derived from it and added to
+    state.resolved_swing_keys in this exact same step - atomically with the
+    COMPLETED/INVALIDATED write below, never after, never as a separate
+    step. This is what is actually checked BEFORE the funnel ever runs for a
+    swing (detect_live_setups_for_symbol's _filter_resolved_swings), which
+    stops the swing from being re-evaluated at all on a later poll,
+    regardless of what setup_id a fresh funnel run would otherwise mint for
+    it.
+
     A no-op if setup_id has already resolved (defensive - by construction,
     every caller already checked this first, but a setup_id must never be
     written twice regardless).
@@ -762,20 +812,32 @@ def _append_resolved_setup(state: Any, store: list[Any], setup: Any) -> None:
     store.insert(0, setup)
     del store[MAX_TRACKED_SETUP_ATTEMPTS:]
     state.resolved_setup_ids.add(setup.setup_id)
+    state.resolved_swing_keys.add(build_swing_dedup_key(symbol=setup.symbol, direction=setup.direction, swing_timestamp=setup.created_at))
 
 
 def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status: SetupStatus) -> None:
     """Route a setup to the one store matching its current status. A setup
     that resolves (invalidated or completed) leaves the uncapped in-progress
     pool and lands in its own append-only, capped-at-100 history - for good;
-    there is no path back (see _append_resolved_setup / resolved_setup_ids)."""
-    state.setups.pop(setup.setup_id, None)
+    there is no path back (see _append_resolved_setup / resolved_setup_ids).
+
+    Fix 2/4 (Setup Radar swing-level dedup): for a resolving setup, the
+    terminal store write (and its swing key, both inside
+    _append_resolved_setup) happens FIRST, while the setup is still also
+    sitting in state.setups - only once that has fully succeeded does it
+    leave IN PROGRESS. This non-negotiable ordering means a setup is never
+    silently dropped: it cannot exist in neither store, not even for the
+    instant between two statements, so an exception raised mid-write can
+    never lose it.
+    """
     if is_invalidated:
         _append_resolved_setup(state, state.invalidated_setups, setup)
         save_setup_history_store(state)
+        state.setups.pop(setup.setup_id, None)
     elif target_status is SetupStatus.COMPLETED:
         _append_resolved_setup(state, state.completed_setups, setup)
         save_setup_history_store(state)
+        state.setups.pop(setup.setup_id, None)
     else:
         state.setups[setup.setup_id] = setup
 
@@ -787,10 +849,15 @@ def move_setup_to_completed(state: Any, setup: Any) -> None:
     that point (it is now a live trade, visible on the Execution page via the
     matching Bitget order), so it leaves the uncapped in-progress pool the
     same way an attempt-trace COMPLETED row does.
+
+    Fix 2/4 ordering (Setup Radar swing-level dedup): written into
+    completed_setups (and its swing key) before being removed from
+    state.setups - never the other way around, so a crash between the two
+    statements can never leave this setup recorded nowhere.
     """
-    state.setups.pop(setup.setup_id, None)
     _append_resolved_setup(state, state.completed_setups, setup)
     save_setup_history_store(state)
+    state.setups.pop(setup.setup_id, None)
 
 
 def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
@@ -806,6 +873,11 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
     (see setup_models.py), the one deliberate exception to "100%-complete
     setups never carry an invalidation_reason", since this setup legitimately
     did reach ENTRY_READY/100% before going stale.
+
+    Fix 2 ordering (non-negotiable): written into invalidated_setups (and
+    its swing key) and persisted to disk BEFORE being removed from
+    state.setups - the setup must be recorded before it is removed, not
+    after, not silently dropped.
     """
     expired = replace(
         setup,
@@ -817,9 +889,9 @@ def expire_stale_setup(state: Any, setup: Any, *, expired_at: datetime) -> Any:
         last_valid_stage="ENTRY_READY",
         execution_status="expired",
     )
-    state.setups.pop(setup.setup_id, None)
     _append_resolved_setup(state, state.invalidated_setups, expired)
     save_setup_history_store(state)
+    state.setups.pop(setup.setup_id, None)
     return expired
 
 

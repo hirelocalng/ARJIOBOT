@@ -7,10 +7,16 @@ MAX_TRACKED_SETUP_ATTEMPTS (the oldest, at the end of the list). This module
 mirrors that list, in that same order, to a JSON file under backend/data/, so
 the lists are visible without needing to read process memory directly.
 
-Every deploy starts with zero history (see wipe_setup_history, called once at
-process boot from main.py): IN PROGRESS (state.setups) is never written here
-either way - it always reflects only currently-active setups, with nothing
-that needs to survive a restart, by design.
+Every deploy starts with zero *visible* history (see wipe_setup_history,
+called once at process boot from main.py): the completed/invalidated lists
+the UI reads are always wiped empty. The swing-level dedup cache
+(state.resolved_swing_keys) is the one exception - it is seeded from this
+same file's previous content before the wipe overwrites it (Fix 3), so a
+swing already resolved in an earlier deployment session stays permanently
+blocked from re-entering the live detection funnel even though the visible
+lists start empty. IN PROGRESS (state.setups) is never written here either
+way - it always reflects only currently-active setups, with nothing that
+needs to survive a restart, by design.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus
+from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus, build_swing_dedup_key
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +85,37 @@ def save_setup_history_store(state: Any) -> None:
         logger.exception("Failed to persist completed/invalidated setup history to %s", STORE_PATH)
 
 
+def _seed_swing_cache_from_disk(state: Any) -> int:
+    """Fix 3 (Setup Radar swing-level dedup): read whatever the *previous*
+    deployment session actually persisted to STORE_PATH - before
+    wipe_setup_history below overwrites it with the empty fresh-start shape
+    - and seed state.resolved_swing_keys from every completed/invalidated
+    entry in it. A swing the previous session already resolved must stay
+    permanently blocked from re-entering the live detection funnel, even
+    though the visible completed/invalidated lists the UI reads start empty
+    on every deploy.
+
+    Order matters here: this must run before the file is overwritten, never
+    after - see wipe_setup_history's call site.
+
+    Returns the number of swing keys seeded (0 for a brand new deploy with
+    no existing file, or one with no readable content yet)."""
+    try:
+        previous = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    seeded = 0
+    for record in (*(previous.get("completed") or ()), *(previous.get("invalidated") or ())):
+        symbol = record.get("symbol")
+        direction = record.get("direction")
+        swing_timestamp = record.get("created_at")
+        if not symbol or not direction or not swing_timestamp:
+            continue
+        state.resolved_swing_keys.add(build_swing_dedup_key(symbol=symbol, direction=direction, swing_timestamp=swing_timestamp))
+        seeded += 1
+    return seeded
+
+
 def wipe_setup_history(state: Any) -> tuple[int, int]:
     """Fresh start: clear completed_setups/invalidated_setups in memory,
     clear the seen-setups dedup cache (resolved_setup_ids), record
@@ -86,15 +123,25 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     shape - all in this one synchronous call, so no request in between can
     ever observe a partially-cleared state. Called unconditionally on every
     process boot (see main.py's create_app) - every deploy starts with zero
-    history, and old history from a previous deployment session never loads
-    - and on demand for a manual operator clear (see api/routes/admin.py's
-    POST /api/admin/clear-setup-history).
+    *visible* history - and on demand for a manual operator clear (see
+    api/routes/admin.py's POST /api/admin/clear-setup-history).
+
+    Fix 3 (Setup Radar swing-level dedup): before any of that happens, the
+    permanent swing dedup cache is seeded from the file's previous content
+    (_seed_swing_cache_from_disk) - so a swing already resolved in an
+    earlier deployment session (or earlier in this same session, for a
+    manual clear) stays permanently blocked from re-entering the live
+    detection funnel even though the visible lists this call empties out
+    start fresh. Unlike resolved_setup_ids, resolved_swing_keys is never
+    cleared here (or anywhere) - it is permanent for the life of the
+    process, by design.
 
     IN PROGRESS (state.setups) is never touched by this.
 
     Returns (completed_count, invalidated_count) cleared."""
     completed_count = len(state.completed_setups)
     invalidated_count = len(state.invalidated_setups)
+    seeded_swing_keys = _seed_swing_cache_from_disk(state)
     for setup in (*state.completed_setups, *state.invalidated_setups):
         state.setup_history.pop(setup.setup_id, None)
     state.completed_setups.clear()
@@ -108,10 +155,12 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     except Exception:
         logger.exception("Failed to overwrite %s with the empty fresh-start state", STORE_PATH)
     logger.warning(
-        "Setup history wiped: cleared %d completed setup(s) and %d invalidated setup(s), cleared the seen-setups "
-        "dedup cache, and recorded history_cleared_at=%s - %s starts with zero history.",
+        "Setup history wiped: cleared %d completed setup(s) and %d invalidated setup(s) (seeded %d swing key(s) into "
+        "the permanent dedup cache from the previous session's history first), cleared the seen-setups dedup cache, "
+        "and recorded history_cleared_at=%s - %s starts with zero visible history.",
         completed_count,
         invalidated_count,
+        seeded_swing_keys,
         state.history_cleared_at.isoformat(),
         STORE_PATH,
     )
