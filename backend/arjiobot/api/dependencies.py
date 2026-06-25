@@ -335,16 +335,11 @@ class ApiState:
     # Permanent swing-level dedup cache (symbol+direction+swing timestamp -
     # see setup_models.build_swing_dedup_key), checked BEFORE the live
     # detection funnel ever runs for a swing (live_setup_detection.py's
-    # detect_live_setups_for_symbol) - unlike resolved_setup_ids above, this
-    # is never cleared by anything, including a manual admin history clear
-    # (setup_history_store.wipe_setup_history), because a setup_id can be
-    # re-minted differently for the same real-world swing across polls, but
-    # the swing itself - and the fact that it already reached a terminal
-    # outcome - never changes. Seeded from the previous deployment session's
-    # persisted history on every process boot, before that history is wiped
-    # (see wipe_setup_history), so a swing already resolved in a prior
-    # session stays permanently blocked even though the visible
-    # completed/invalidated lists start empty every deploy.
+    # detect_live_setups_for_symbol). Cleared on every process boot and on
+    # every manual admin history clear (setup_history_store.wipe_setup_history)
+    # so the funnel re-evaluates all current swings from scratch on the first
+    # poll after each deploy - fresh signal is never silently blocked by a
+    # prior session's resolved keys.
     resolved_swing_keys: set[str] = field(default_factory=set)
     # Set by setup_tracker.setup_history_store on every fresh start (process
     # boot) and on a manual admin clear - see setup_history_store.

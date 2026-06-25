@@ -192,9 +192,21 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     """Gate against executing a setup whose entry zone is likely long stale.
 
     Returns the skipped attempt record (and marks the setup EXPIRED in Setup
-    Radar via expire_stale_setup) if completed_at is missing or older than
-    STALE_ENTRY_READY_MAX_AGE; returns None if the setup is fresh enough to
-    proceed to _process_setup unchanged.
+    Radar via expire_stale_setup) if the setup has been sitting unsubmitted
+    longer than STALE_ENTRY_READY_MAX_AGE; returns None if the setup is fresh
+    enough to proceed to _process_setup unchanged.
+
+    Freshness is measured from detected_at_wallclock (stamped by
+    _setup_from_trade at the exact moment detection created this setup in the
+    current process) - NOT from completed_at (the trade's entry-candle
+    timestamp, which is a historical candle time and can be many hours or days
+    old even for a setup detected for the first time this poll, e.g. on a
+    restart catching up on a large rolling candle buffer). Using completed_at
+    was silently expiring every real ENTRY_READY setup the instant it was
+    detected, because the entry candle from the rolling buffer is always far
+    older than STALE_ENTRY_READY_MAX_AGE even when the market conditions that
+    triggered it are current. Falls back to completed_at only for setups that
+    predate the detected_at_wallclock metadata field.
 
     Minimum dwell time: even once staleness is confirmed, the move to
     INVALIDATED waits for MIN_DWELL_SECONDS since the setup's own created_at
@@ -207,7 +219,15 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     poll regardless of dwell.
     """
     now = datetime.now(timezone.utc)
-    age = (now - setup.completed_at) if setup.completed_at is not None else None
+    detected_at_raw = (setup.metadata or {}).get("detected_at_wallclock")
+    if detected_at_raw:
+        try:
+            detected_at = datetime.fromisoformat(str(detected_at_raw).replace("Z", "+00:00"))
+            age: timedelta | None = now - detected_at
+        except ValueError:
+            age = (now - setup.completed_at) if setup.completed_at is not None else None
+    else:
+        age = (now - setup.completed_at) if setup.completed_at is not None else None
     if age is not None and age <= STALE_ENTRY_READY_MAX_AGE:
         return None
     time_in_progress = (now - setup.created_at).total_seconds()
@@ -221,9 +241,9 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     # generated-signal marker for it would otherwise persist for no reason.
     state.strategy_engine.clear_generated_signal_for_setup(setup.setup_id)
     reason = (
-        f"setup expired before execution - completed_at is {age} old, exceeds the {STALE_ENTRY_READY_MAX_AGE} staleness limit (2 closed 12M candles)"
+        f"setup expired before execution - unsubmitted for {age} (detected_at_wallclock or completed_at), exceeds the {STALE_ENTRY_READY_MAX_AGE} staleness limit"
         if age is not None
-        else "setup expired before execution - completed_at missing, cannot verify freshness"
+        else "setup expired before execution - no detected_at_wallclock or completed_at, cannot verify freshness"
     )
     record = {
         "source": source,

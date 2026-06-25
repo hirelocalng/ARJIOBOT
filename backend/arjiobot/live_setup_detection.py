@@ -185,26 +185,6 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW],
             direction="BULLISH",
         )
-        # TEMPORARY DIAGNOSTIC (remove once root-caused): distinguishes "the
-        # market genuinely isn't forming swings right now" from "the
-        # permanent swing dedup cache is filtering out a real backlog" -
-        # candidate_16m_swing_highs/lows further down the funnel only ever
-        # show the post-dedup count, so without this there is no visibility
-        # into how many raw swings detect_all_swings() found before
-        # filtering. INFO, not DEBUG: this deployment's LOG_LEVEL is INFO
-        # (no LOG_LEVEL env var set), so a DEBUG line here would never reach
-        # Railway's logs at all. One line per symbol per poll is negligible
-        # next to the swing-detection-log flood this is not a repeat of.
-        logger.info(
-            "[SWING DEDUP DIAGNOSTIC] %s raw_swing_highs=%s raw_swing_lows=%s "
-            "after_dedup_highs=%s after_dedup_lows=%s resolved_swing_keys_total=%s",
-            symbol,
-            len(swing_results.swing_highs),
-            len(swing_results.swing_lows),
-            len(bearish_swing_highs),
-            len(bullish_swing_lows),
-            len(state.resolved_swing_keys),
-        )
         expansions_main = runner._research_expansions(swing_results.all_swings)
         fvg_results = {
             minutes: _fvg_engine_for(state, symbol, minutes).detect_fvgs(

@@ -9,12 +9,11 @@ the lists are visible without needing to read process memory directly.
 
 Every deploy starts with zero *visible* history (see wipe_setup_history,
 called once at process boot from main.py): the completed/invalidated lists
-the UI reads are always wiped empty. The swing-level dedup cache
-(state.resolved_swing_keys) is the one exception - it is seeded from this
-same file's previous content before the wipe overwrites it (Fix 3), so a
-swing already resolved in an earlier deployment session stays permanently
-blocked from re-entering the live detection funnel even though the visible
-lists start empty. IN PROGRESS (state.setups) is never written here either
+the UI reads are always wiped empty, and the swing-level dedup cache
+(state.resolved_swing_keys) is also cleared rather than seeded from the
+previous session - so the funnel re-evaluates all current swings from
+scratch on the first poll after each deploy and Setup Radar picks up fresh
+signal immediately. IN PROGRESS (state.setups) is never written here either
 way - it always reflects only currently-active setups, with nothing that
 needs to survive a restart, by design.
 """
@@ -118,35 +117,36 @@ def _seed_swing_cache_from_disk(state: Any) -> int:
 
 def wipe_setup_history(state: Any) -> tuple[int, int]:
     """Fresh start: clear completed_setups/invalidated_setups in memory,
-    clear the seen-setups dedup cache (resolved_setup_ids), record
-    history_cleared_at, and overwrite the persisted file with the empty
-    shape - all in this one synchronous call, so no request in between can
-    ever observe a partially-cleared state. Called unconditionally on every
-    process boot (see main.py's create_app) - every deploy starts with zero
-    *visible* history - and on demand for a manual operator clear (see
-    api/routes/admin.py's POST /api/admin/clear-setup-history).
+    clear both dedup caches (resolved_setup_ids and resolved_swing_keys),
+    record history_cleared_at, and overwrite the persisted file with the
+    empty shape - all in this one synchronous call, so no request in between
+    can ever observe a partially-cleared state. Called unconditionally on
+    every process boot (see main.py's create_app) - every deploy starts with
+    zero *visible* history AND a fully-cleared swing dedup cache, so the live
+    detection funnel re-evaluates all current swings from scratch on the first
+    poll and Setup Radar picks up fresh signal immediately.
 
-    Fix 3 (Setup Radar swing-level dedup): before any of that happens, the
-    permanent swing dedup cache is seeded from the file's previous content
-    (_seed_swing_cache_from_disk) - so a swing already resolved in an
-    earlier deployment session (or earlier in this same session, for a
-    manual clear) stays permanently blocked from re-entering the live
-    detection funnel even though the visible lists this call empties out
-    start fresh. Unlike resolved_setup_ids, resolved_swing_keys is never
-    cleared here (or anywhere) - it is permanent for the life of the
-    process, by design.
+    resolved_swing_keys is cleared (not seeded from disk) because carrying
+    over the previous session's dedup cache was silently blocking every swing
+    that ever resolved in any prior session from re-entering the funnel on
+    subsequent deploys - including genuinely fresh real-time swings whose
+    conditions may have just re-aligned. A clean slate on each deploy lets the
+    staleness gate (live_automation.py's _expire_if_stale, now gated on
+    detected_at_wallclock rather than completed_at) handle age correctly
+    instead of the funnel never seeing the swing at all.
 
     IN PROGRESS (state.setups) is never touched by this.
 
     Returns (completed_count, invalidated_count) cleared."""
     completed_count = len(state.completed_setups)
     invalidated_count = len(state.invalidated_setups)
-    seeded_swing_keys = _seed_swing_cache_from_disk(state)
+    swing_keys_cleared = len(state.resolved_swing_keys)
     for setup in (*state.completed_setups, *state.invalidated_setups):
         state.setup_history.pop(setup.setup_id, None)
     state.completed_setups.clear()
     state.invalidated_setups.clear()
     state.resolved_setup_ids.clear()
+    state.resolved_swing_keys.clear()
     state.history_cleared_at = datetime.now(timezone.utc)
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -155,13 +155,10 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     except Exception:
         logger.exception("Failed to overwrite %s with the empty fresh-start state", STORE_PATH)
     logger.warning(
-        "Setup history wiped: cleared %d completed setup(s) and %d invalidated setup(s) (seeded %d swing key(s) into "
-        "the permanent dedup cache from the previous session's history first), cleared the seen-setups dedup cache, "
-        "and recorded history_cleared_at=%s - %s starts with zero visible history.",
+        "Setup history wiped: cleared %d completed setup(s), %d invalidated setup(s), and %d resolved swing key(s) - "
+        "Setup Radar starts from zero visible history with a fresh funnel on the first poll after this deploy.",
         completed_count,
         invalidated_count,
-        seeded_swing_keys,
-        state.history_cleared_at.isoformat(),
-        STORE_PATH,
+        swing_keys_cleared,
     )
     return completed_count, invalidated_count

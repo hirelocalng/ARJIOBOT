@@ -198,12 +198,12 @@ def test_wipe_setup_history_clears_the_dedup_cache_so_a_fresh_session_can_rewrit
     assert state.completed_setups == [trade], "after a wipe, the same setup_id must be writable again, not permanently blocked"
 
 
-def test_wipe_setup_history_seeds_swing_cache_from_previous_session_then_starts_visible_lists_empty(monkeypatch, tmp_path) -> None:
-    """Fix 3 (Setup Radar swing-level dedup): a previous deployment
-    session's persisted history seeds the permanent swing dedup cache before
-    the visible completed/invalidated lists are wiped empty - so a swing
-    already resolved in that earlier session stays permanently blocked from
-    re-entering the live detection funnel, even though the UI starts clean."""
+def test_wipe_setup_history_clears_swing_cache_so_previous_session_swings_can_reenter_funnel(monkeypatch, tmp_path) -> None:
+    """wipe_setup_history clears resolved_swing_keys entirely on every deploy
+    so the funnel re-evaluates all current swings from scratch on the first
+    poll - a swing resolved in a prior session is NOT permanently blocked from
+    re-entering, because the staleness gate (_expire_if_stale, now using
+    detected_at_wallclock) handles age correctly once detection runs."""
     _redirect_paths(monkeypatch, tmp_path)
     previous_session_state = _fake_state()
     trade = _make_completed_trade(previous_session_state, suffix="prev_session1", entry_timestamp="2026-06-20T00:00:00+00:00")
@@ -218,13 +218,14 @@ def test_wipe_setup_history_seeds_swing_cache_from_previous_session_then_starts_
     assert (completed_count, invalidated_count) == (0, 0), "the new session's own in-memory lists start empty, by construction"
     assert new_session_state.completed_setups == []
     assert new_session_state.invalidated_setups == []
-    expected_key = build_swing_dedup_key(symbol=trade.symbol, direction=trade.direction, swing_timestamp=trade.created_at)
-    assert expected_key in new_session_state.resolved_swing_keys
+    # resolved_swing_keys must be EMPTY after wipe - prior session keys are not
+    # carried over, so the funnel re-evaluates all swings on the first poll.
+    assert len(new_session_state.resolved_swing_keys) == 0
 
     payload = json.loads(setup_history_store.STORE_PATH.read_text(encoding="utf-8"))
     assert payload == {"completed": [], "invalidated": [], "cleared_at": new_session_state.history_cleared_at.isoformat(), "setup_history": {}}
 
-    # And the swing is actually blocked on the very next poll, before the
-    # funnel ever runs on it - not just present in the cache in theory.
+    # And with an empty cache the swing passes _filter_resolved_swings and
+    # reaches the detection funnel normally on the next poll.
     swing = SimpleNamespace(symbol=trade.symbol, swing_id="whatever", right_candle=SimpleNamespace(timestamp=trade.created_at))
-    assert _filter_resolved_swings(new_session_state, [swing], direction=trade.direction.value) == []
+    assert _filter_resolved_swings(new_session_state, [swing], direction=trade.direction.value) == [swing]
