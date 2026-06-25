@@ -494,8 +494,12 @@ def test_place_order_sets_leverage_on_bitget_before_submitting_the_order() -> No
 
     order = service.place_order(_order(), required_mode=TradeMode.LIVE)
 
-    assert [path for _, path, _ in calls] == ["/api/v2/mix/account/set-leverage", "/api/v2/mix/order/place-order"], (
+    order_paths = [path for _, path, _ in calls]
+    assert order_paths[:2] == ["/api/v2/mix/account/set-leverage", "/api/v2/mix/order/place-order"], (
         "set-leverage must be called once, and before the order itself is placed"
+    )
+    assert "/api/v2/mix/position/all-position" in order_paths, (
+        "position fetch must be called after order placement to read margin for add-margin"
     )
     leverage_call = calls[0]
     assert leverage_call[0] == "POST"
@@ -507,6 +511,86 @@ def test_place_order_sets_leverage_on_bitget_before_submitting_the_order() -> No
     assert leverage_call[2]["leverage"] == order["effective_max_leverage"] == "61"
     assert order["leverage_set_to"] == "61"
     assert order["leverage_set_response_code"] == "00000"
+
+
+def test_add_margin_is_called_with_margin_from_position_after_order_confirmed() -> None:
+    """After a live order is confirmed, _add_margin_after_open fetches the
+    actual margin Bitget reserved for the position (marginSize field) and
+    immediately POSTs /api/v2/mix/position/add-margin with that exact amount -
+    never a hardcoded value. The order dict records add_margin_status=success
+    and the amount added."""
+    service = BitgetEnvironmentService()
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.fetch_contract_config = lambda symbol, product_type="USDT-FUTURES": _contract(symbol)
+    service.fetch_ticker = lambda symbol, product_type="USDT-FUTURES": _ticker(symbol)
+    service.fetch_candles = lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol)
+
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def recording_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        calls.append((method, path, dict(kwargs.get("body") or {})))
+        if path == "/api/v2/mix/position/all-position":
+            # Return a position with a real marginSize so add-margin is triggered.
+            return {
+                "code": "00000",
+                "msg": "success",
+                "data": [{"symbol": "BTCUSDT", "holdSide": "short", "marginSize": "12.34"}],
+            }
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_add_margin_test"}}
+
+    service._private_request = recording_private_request
+
+    order = service.place_order(_order(), required_mode=TradeMode.LIVE)
+
+    order_paths = [path for _, path, _ in calls]
+    assert "/api/v2/mix/position/all-position" in order_paths
+    assert "/api/v2/mix/position/add-margin" in order_paths
+    add_margin_call = next(c for c in calls if c[1] == "/api/v2/mix/position/add-margin")
+    assert add_margin_call[0] == "POST"
+    assert add_margin_call[2]["symbol"] == "BTCUSDT"
+    assert add_margin_call[2]["holdSide"] == "short"
+    assert add_margin_call[2]["amount"] == "12.34"
+    assert add_margin_call[2]["productType"] == "USDT-FUTURES"
+    assert order["add_margin_status"] == "success"
+    assert order["add_margin_amount"] == "12.34"
+    assert order["bitget_order_id"] == "ord_add_margin_test"
+
+
+def test_add_margin_failure_does_not_cancel_trade() -> None:
+    """If the add-margin call raises (e.g. Bitget API error), the trade must
+    still be in service.orders - the order is never cancelled. The order dict
+    records add_margin_status=failed and a reason, but the trade stays open."""
+    service = BitgetEnvironmentService()
+    service.runtime_credentials = BitgetCredentialConfig(api_key="key", api_secret="secret", passphrase="pass")
+    service.mode = TradeMode.LIVE
+    service.live_armed = True
+    service.fetch_contract_config = lambda symbol, product_type="USDT-FUTURES": _contract(symbol)
+    service.fetch_ticker = lambda symbol, product_type="USDT-FUTURES": _ticker(symbol)
+    service.fetch_candles = lambda symbol, granularity="1m", limit=100, product_type="USDT-FUTURES": _candles(symbol)
+
+    from arjiobot.exchange.bitget_environment import EnvironmentLockError
+
+    def failing_private_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        if path == "/api/v2/mix/position/all-position":
+            return {
+                "code": "00000",
+                "msg": "success",
+                "data": [{"symbol": "BTCUSDT", "holdSide": "short", "marginSize": "55.00"}],
+            }
+        if path == "/api/v2/mix/position/add-margin":
+            raise EnvironmentLockError("Bitget rejected add-margin: insufficient balance")
+        return {"code": "00000", "msg": "success", "data": {"orderId": "ord_add_margin_failure"}}
+
+    service._private_request = failing_private_request
+
+    order = service.place_order(_order(), required_mode=TradeMode.LIVE)
+
+    assert len(service.orders) == 1, "trade must remain open even when add-margin fails"
+    assert order["bitget_order_id"] == "ord_add_margin_failure"
+    assert order["add_margin_status"] == "failed"
+    assert "add-margin" in order["add_margin_reason"].lower() or "rejected" in order["add_margin_reason"].lower()
 
 
 def _service() -> BitgetEnvironmentService:

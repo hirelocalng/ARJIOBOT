@@ -583,6 +583,7 @@ class BitgetEnvironmentService:
             self.orders.append(order)
             self.trades_today += 1
             self.open_positions += 1
+            self._add_margin_after_open(order)
             return order
         except Exception as exc:
             blocked = {
@@ -980,6 +981,77 @@ class BitgetEnvironmentService:
             raise EnvironmentLockError("max open positions reached")
         if str(payload.get("profile_lock_status", "PASSED")).upper() != "PASSED":
             raise EnvironmentLockError("profile lock failed")
+
+
+    def _add_margin_after_open(self, order: dict[str, object]) -> None:
+        """After a trade is confirmed open, fetch the actual margin Bitget reserved
+        for the position from the position response and immediately add that same
+        amount as additional margin via POST /api/v2/mix/position/add-margin.
+
+        Failure of either the position fetch or the add-margin call is logged but
+        never raised - the trade stays open regardless of whether this step
+        succeeds, per the ArjioBot non-blocking margin-top-up policy.
+        """
+        symbol = str(order.get("symbol", ""))
+        side = str(order.get("side", "")).upper()
+        product_type = str(order.get("product_type", DEFAULT_PRODUCT_TYPE))
+        hold_side = "long" if side == "BUY" else "short"
+        try:
+            positions_result = self.fetch_positions(symbol, product_type)
+            positions = positions_result.get("positions") or ()
+            position = next(
+                (p for p in positions if str(p.get("holdSide", "")).lower() == hold_side),
+                None,
+            )
+            if position is None:
+                logger.warning(
+                    "[ADD_MARGIN] %s | margin_used=N/A | added=0 | status=failed | reason=position not found after open",
+                    symbol,
+                )
+                order["add_margin_status"] = "failed"
+                order["add_margin_reason"] = "position not found after open"
+                return
+            margin_raw = position.get("marginSize") or position.get("margin") or "0"
+            try:
+                margin_amount = Decimal(str(margin_raw))
+            except (InvalidOperation, ValueError):
+                margin_amount = Decimal("0")
+            if margin_amount <= 0:
+                logger.warning(
+                    "[ADD_MARGIN] %s | margin_used=%s | added=0 | status=failed | reason=margin field is zero or missing",
+                    symbol,
+                    margin_raw,
+                )
+                order["add_margin_status"] = "failed"
+                order["add_margin_reason"] = "margin field is zero or missing"
+                return
+            self._private_request(
+                "POST",
+                "/api/v2/mix/position/add-margin",
+                body={
+                    "symbol": symbol,
+                    "holdSide": hold_side,
+                    "amount": str(margin_amount),
+                    "productType": product_type,
+                },
+            )
+            logger.warning(
+                "[ADD_MARGIN] %s | margin_used=%s | added=%s | status=success",
+                symbol,
+                str(margin_amount),
+                str(margin_amount),
+            )
+            order["add_margin_status"] = "success"
+            order["add_margin_amount"] = str(margin_amount)
+        except Exception as exc:
+            reason = str(exc)
+            logger.warning(
+                "[ADD_MARGIN] %s | margin_used=N/A | added=0 | status=failed | reason=%s",
+                symbol,
+                reason,
+            )
+            order["add_margin_status"] = "failed"
+            order["add_margin_reason"] = reason
 
 
 def credentials_from_env() -> BitgetCredentialConfig | None:
