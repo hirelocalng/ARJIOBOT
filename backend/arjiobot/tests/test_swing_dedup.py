@@ -55,11 +55,12 @@ def _fake_state(symbol: str, candles) -> SimpleNamespace:
 
 
 def _swing_trace(swing_id: str, *, stage: str, progress_percent: float, invalidation_reason: str | None = None, is_terminal: bool = False) -> dict[str, object]:
+    offset_seconds = int(swing_id.split("_")[-1]) if swing_id.split("_")[-1].isdigit() else 0
     return {
         "symbol": "ADAUSDT",
         "direction": "BEARISH",
         "swing_16m_id": swing_id,
-        "swing_timestamp": (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=int(swing_id.split("_")[-1]))).isoformat(),
+        "swing_timestamp": (datetime.now(timezone.utc) - timedelta(minutes=2) + timedelta(milliseconds=offset_seconds)).isoformat(),
         "swing_price": "100",
         "expansion_16m_id": None,
         "fvg_16m_id": None,

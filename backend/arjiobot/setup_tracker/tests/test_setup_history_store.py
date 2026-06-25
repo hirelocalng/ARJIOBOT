@@ -110,8 +110,8 @@ def test_wipe_setup_history_clears_memory_and_overwrites_file_with_empty_shape(m
     invalidated_setups in memory, clear the seen-setups dedup cache, record
     history_cleared_at, and overwrite the persisted file with the exact
     empty shape {"completed": [], "invalidated": [], "cleared_at": ...} -
-    regardless of what the file contained before this call. Used both by the
-    admin clear endpoint and once, unconditionally, on every process boot."""
+    regardless of what the file contained before this call. Used by the admin
+    clear endpoint; process boot loads history for UI display only."""
     _redirect_paths(monkeypatch, tmp_path)
     state = _fake_state()
     completed_trade = _make_completed_trade(state, suffix="manual_completed1", entry_timestamp="2026-06-24T00:00:00+00:00")
@@ -235,12 +235,11 @@ def test_wipe_setup_history_clears_swing_cache_so_previous_session_swings_can_re
 # load_setup_history_for_display (new startup path - Fix 5)
 # ---------------------------------------------------------------------------
 
-def test_load_setup_history_for_display_populates_lists_and_seeds_setup_ids(monkeypatch, tmp_path) -> None:
+def test_load_setup_history_for_display_populates_lists_and_leaves_dedup_caches_empty(monkeypatch, tmp_path) -> None:
     """Fix 5: load_setup_history_for_display reads the JSON file and populates
-    completed_setups/invalidated_setups for UI display. resolved_setup_ids is
-    seeded (to prevent duplicate writes for the same setup_id on the first
-    poll), but resolved_swing_keys starts EMPTY - the pre-funnel staleness
-    filter handles old swings on the first poll."""
+    completed_setups/invalidated_setups for UI display only. Both dedup
+    caches start EMPTY - the pre-funnel staleness filter handles old swings
+    on the first poll."""
     _redirect_paths(monkeypatch, tmp_path)
     # Simulate a previous session that wrote history to disk.
     prev_state = _fake_state()
@@ -257,9 +256,9 @@ def test_load_setup_history_for_display_populates_lists_and_seeds_setup_ids(monk
     assert new_state.completed_setups[0].setup_id == trade.setup_id
     assert new_state.completed_setups[0].symbol == trade.symbol
     assert new_state.completed_setups[0].direction == SetupDirection.BEARISH
-    # resolved_setup_ids seeded so no duplicate is created for this setup.
-    assert trade.setup_id in new_state.resolved_setup_ids
-    # resolved_swing_keys MUST be empty - staleness filter handles old swings.
+    # Dedup caches MUST be empty - they are session-only and the staleness
+    # filter handles old swings on first encounter.
+    assert len(new_state.resolved_setup_ids) == 0
     assert len(new_state.resolved_swing_keys) == 0
 
 

@@ -11,10 +11,10 @@ On every process boot load_setup_history_for_display (called from main.py)
 reads whatever the previous session persisted here and populates
 completed_setups / invalidated_setups in memory for immediate UI display -
 without seeding the swing-level dedup cache (state.resolved_swing_keys),
-which starts empty on every deploy. The pre-funnel staleness filter in
+and state.resolved_setup_ids), which start empty on every deploy. The pre-funnel staleness filter in
 live_setup_detection.py (_filter_stale_swings) catches any historical swing
 from the rolling candle buffer on the first poll and permanently dedupes it
-there, so the cache stays small and fresh. IN PROGRESS (state.setups) is
+there for the current process, so the cache stays small and fresh. IN PROGRESS (state.setups) is
 never written here - it only reflects currently-active setups, by design.
 
 wipe_setup_history is called only by the manual Clear History admin button
@@ -33,7 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus, build_swing_dedup_key, StateHistoryEntry
+from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus
 
 logger = logging.getLogger(__name__)
 
@@ -149,15 +149,12 @@ def load_setup_history_for_display(state: Any) -> tuple[int, int]:
     Behaviour:
     - state.completed_setups and state.invalidated_setups are populated from
       the JSON in their persisted order (newest-first).
-    - state.resolved_setup_ids is seeded from every loaded setup so that a
-      fresh swing whose setup_id collides with a previously-resolved one is
-      not written twice (the existing _find_tracked_setup_by_swing + discard
-      path handles the take-over case correctly even with seeded ids).
-    - state.resolved_swing_keys is deliberately left EMPTY so the pre-funnel
-      staleness filter in live_setup_detection.py (_filter_stale_swings)
-      classifies each swing independently on the first poll - fresh swings
+    - state.resolved_setup_ids and state.resolved_swing_keys are deliberately
+      left EMPTY. The dedup caches are session-only; the pre-funnel staleness
+      filter in live_setup_detection.py (_filter_stale_swings) classifies each
+      swing independently on the first poll - fresh swings
       (<STALENESS_WINDOW_MINUTES) proceed through the funnel, stale ones are
-      permanently deduped there without ever entering IN PROGRESS.
+      cached there without ever entering IN PROGRESS.
     - history_cleared_at is restored from the JSON if present.
     - If the file is absent, corrupt, or empty the function is a no-op and
       the bot starts with zero visible history (same as a fresh deploy).
@@ -184,7 +181,6 @@ def load_setup_history_for_display(state: Any) -> tuple[int, int]:
         if setup is None:
             continue
         state.completed_setups.append(setup)
-        state.resolved_setup_ids.add(setup.setup_id)
         completed_count += 1
 
     invalidated_count = 0
@@ -195,47 +191,15 @@ def load_setup_history_for_display(state: Any) -> tuple[int, int]:
         if setup is None:
             continue
         state.invalidated_setups.append(setup)
-        state.resolved_setup_ids.add(setup.setup_id)
         invalidated_count += 1
 
     logger.warning(
         "Setup Radar history loaded from disk: %d completed, %d invalidated - "
-        "resolved_swing_keys starts empty; pre-funnel staleness filter handles old swings on first poll.",
+        "dedup caches start empty; pre-funnel staleness filter handles old swings on first poll.",
         completed_count,
         invalidated_count,
     )
     return completed_count, invalidated_count
-
-
-def _seed_swing_cache_from_disk(state: Any) -> int:
-    """Fix 3 (Setup Radar swing-level dedup): read whatever the *previous*
-    deployment session actually persisted to STORE_PATH - before
-    wipe_setup_history below overwrites it with the empty fresh-start shape
-    - and seed state.resolved_swing_keys from every completed/invalidated
-    entry in it. A swing the previous session already resolved must stay
-    permanently blocked from re-entering the live detection funnel, even
-    though the visible completed/invalidated lists the UI reads start empty
-    on every deploy.
-
-    Order matters here: this must run before the file is overwritten, never
-    after - see wipe_setup_history's call site.
-
-    Returns the number of swing keys seeded (0 for a brand new deploy with
-    no existing file, or one with no readable content yet)."""
-    try:
-        previous = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return 0
-    seeded = 0
-    for record in (*(previous.get("completed") or ()), *(previous.get("invalidated") or ())):
-        symbol = record.get("symbol")
-        direction = record.get("direction")
-        swing_timestamp = record.get("created_at")
-        if not symbol or not direction or not swing_timestamp:
-            continue
-        state.resolved_swing_keys.add(build_swing_dedup_key(symbol=symbol, direction=direction, swing_timestamp=swing_timestamp))
-        seeded += 1
-    return seeded
 
 
 def wipe_setup_history(state: Any) -> tuple[int, int]:
@@ -243,11 +207,9 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     clear both dedup caches (resolved_setup_ids and resolved_swing_keys),
     record history_cleared_at, and overwrite the persisted file with the
     empty shape - all in this one synchronous call, so no request in between
-    can ever observe a partially-cleared state. Called unconditionally on
-    every process boot (see main.py's create_app) - every deploy starts with
-    zero *visible* history AND a fully-cleared swing dedup cache, so the live
-    detection funnel re-evaluates all current swings from scratch on the first
-    poll and Setup Radar picks up fresh signal immediately.
+    can ever observe a partially-cleared state. Called by the manual Clear
+    History endpoint; process boot loads JSON history for display only and
+    also starts with empty dedup caches.
 
     resolved_swing_keys is cleared (not seeded from disk) because carrying
     over the previous session's dedup cache was silently blocking every swing

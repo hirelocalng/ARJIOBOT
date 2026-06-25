@@ -137,9 +137,11 @@ def _filter_resolved_swings(state: Any, swings: list[Any], *, direction: str) ->
     return fresh
 
 
-def _is_fresh_swing(swing_timestamp: datetime, now: datetime) -> bool:
+def is_fresh_swing(swing_timestamp: datetime, now: datetime | None = None) -> bool:
     """Return True if the swing's right-candle is within STALENESS_WINDOW_MINUTES."""
-    return (now - swing_timestamp).total_seconds() / 60 <= STALENESS_WINDOW_MINUTES
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return _swing_age_minutes(swing_timestamp, now) <= STALENESS_WINDOW_MINUTES
 
 
 def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: datetime) -> list[Any]:
@@ -152,13 +154,13 @@ def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: 
     result: list[Any] = []
     for swing in swings:
         ts = swing.right_candle.timestamp
-        if _is_fresh_swing(ts, now):
+        if is_fresh_swing(ts, now):
             result.append(swing)
         else:
-            age_min = (now - ts).total_seconds() / 60
+            age_min = _swing_age_minutes(ts, now)
             key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
             state.resolved_swing_keys.add(key)
-            logger.debug("[STALE SKIP] %s %s swing %s age=%.1fmin - outside %smin window, deduped permanently", swing.symbol, direction, ts, age_min, STALENESS_WINDOW_MINUTES)
+            logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", swing.symbol, _as_utc(ts).isoformat(), age_min)
     return result
 
 
@@ -298,11 +300,13 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             detector_state.setdefault("latest_funnel", {}).setdefault(symbol, {})[direction.lower()] = _compact_funnel(funnel, **compact_kwargs)
             _log_retrace_diagnostics(symbol, funnel, direction=direction)
 
+            raw_attempt_traces = funnel.get("attempt_traces", ())
+            trace_swing_timestamps = _trace_swing_timestamps(raw_attempt_traces)
             try:
                 _apply_attempt_traces(
                     state,
                     symbol,
-                    funnel.get("attempt_traces", ()),
+                    raw_attempt_traces,
                     profile_id=profile.profile_id,
                     timeframe_profile_id=timeframe_profile.profile_id,
                     selected_tp_model=selected_tp_model,
@@ -313,83 +317,77 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 # trade flow below - that flow is untouched and runs regardless.
                 logger.exception("Failed to apply Setup Radar attempt traces for %s (%s); entry-ready detection continues", symbol, direction)
 
-            fresh = _fresh_trade_candidate(funnel.get("trade_list", ()), candles, detector_state)
-            if fresh is None:
+            stale = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state, now=now, swing_timestamps=trace_swing_timestamps)
+            if stale:
+                _record_stale_skip(symbol, stale, detector_state)
+                _record_stale_skips_for_radar(state, stale)
+                _mark_trade_candidates_processed(detector_state, stale)
+
+            fresh_trades = _fresh_trade_candidates(funnel.get("trade_list", ()), candles, detector_state, now=now, swing_timestamps=trace_swing_timestamps)
+            if not fresh_trades:
                 waiting_reasons.append(f"{direction}: no fresh live trade candidate found")
                 continue
 
-            # Any other never-seen candidate this same poll besides the one just
-            # picked - this only happens when more than one swing resolves to
-            # ENTRY_READY in the same poll (e.g. a genuine restart/outage backlog
-            # surfacing at once). It is purely a visibility diagnostic now: each
-            # one will still be picked up and acted on, one per poll, on a
-            # subsequent pass - nothing here blocks execution.
-            queued = _stale_trade_candidates(funnel.get("trade_list", ()), candles, detector_state, exclude=fresh)
-            if queued:
-                _record_stale_skip(symbol, queued, detector_state)
-                _record_stale_skips_for_radar(state, queued)
-
-            setup = _setup_from_trade(
-                fresh,
-                state=state,
-                profile_id=profile.profile_id,
-                timeframe_profile_id=timeframe_profile.profile_id,
-                selected_tp_model=selected_tp_model,
-                time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
-            )
-            # A swing whose very first poll ever observed already produces a
-            # real, tradable ENTRY_READY trade (no earlier attempt-tracer
-            # history for it yet) must still be recorded in IN PROGRESS
-            # before this real setup is stored - otherwise it would go
-            # straight from never-seen to ENTRY_READY/COMPLETED without ever
-            # appearing in IN PROGRESS history.
-            _record_in_progress_before_terminal_move(
-                state,
-                setup_id=setup.setup_id,
-                symbol=setup.symbol,
-                direction=setup.direction,
-                created_at=setup.created_at,
-                current_state=SetupState.FVG_8M_CONFIRMED,
-                progress_percent=80.0,
-                swing_16m_id=setup.swing_16m_id,
-                expansion_16m_id=setup.expansion_16m_id,
-                fvg_16m_id=setup.fvg_16m_id,
-                fvg_12m_id=setup.fvg_12m_id,
-                metadata=setup.metadata,
-                now=setup.updated_at,
-                source=source,
-            )
-            # setup.setup_id may already be tracked - the attempt-tracer's row
-            # for this exact swing (see _find_tracked_setup_by_swing), which
-            # can itself already be resolved (COMPLETED this same poll, or
-            # INVALIDATED/COMPLETED from an earlier poll if this trade was
-            # queued behind another candidate and only picked up now - see
-            # _stale_trade_candidates) - so remove it from whichever store
-            # currently holds it, and un-resolve its setup_id (it is about to
-            # become a real, freshly-tracked IN PROGRESS row again, taking
-            # over its own tracked identity instead of appearing as a second,
-            # separate row next to it).
-            state.setups.pop(setup.setup_id, None)
-            state.invalidated_setups[:] = [tracked for tracked in state.invalidated_setups if tracked.setup_id != setup.setup_id]
-            state.completed_setups[:] = [tracked for tracked in state.completed_setups if tracked.setup_id != setup.setup_id]
-            state.resolved_setup_ids.discard(setup.setup_id)
-            _suppress_redundant_attempt_trace(state, setup.swing_16m_id)  # defensive backstop; normally a no-op now
-            state.setups[setup.setup_id] = setup
-            _cap_in_progress(state)
-            state.setup_history.setdefault(setup.setup_id, []).append(
-                {
-                    "from_state": None,
-                    "to_state": SetupState.ENTRY_READY.value,
-                    "changed_at": setup.updated_at.isoformat(),
-                    "reason": "live profile evaluator created entry-ready setup",
-                    "source": source,
-                }
-            )
-            detector_state.setdefault("processed_trade_keys", []).append(_trade_key(fresh))
-            del detector_state["processed_trade_keys"][:-200]
-            detector_state["created_setup_count"] = int(detector_state.get("created_setup_count") or 0) + 1
-            detector_state["latest_trade_candidate"] = {key: str(fresh.get(key, "")) for key in ("trade_id", "symbol", "direction", "entry_timestamp", "entry_price", "stop_loss", "take_profit", "source_12m_fvg_id")}
-            created_setup_ids.append(setup.setup_id)
+            for fresh in fresh_trades:
+                setup = _setup_from_trade(
+                    fresh,
+                    state=state,
+                    profile_id=profile.profile_id,
+                    timeframe_profile_id=timeframe_profile.profile_id,
+                    selected_tp_model=selected_tp_model,
+                    time_exit_minutes=str(state.settings.get("time_exit_minutes") or "30"),
+                )
+                # A swing whose very first poll ever observed already produces a
+                # real, tradable ENTRY_READY trade (no earlier attempt-tracer
+                # history for it yet) must still be recorded in IN PROGRESS
+                # before this real setup is stored - otherwise it would go
+                # straight from never-seen to ENTRY_READY/COMPLETED without ever
+                # appearing in IN PROGRESS history.
+                _record_in_progress_before_terminal_move(
+                    state,
+                    setup_id=setup.setup_id,
+                    symbol=setup.symbol,
+                    direction=setup.direction,
+                    created_at=setup.created_at,
+                    current_state=SetupState.FVG_8M_CONFIRMED,
+                    progress_percent=80.0,
+                    swing_16m_id=setup.swing_16m_id,
+                    expansion_16m_id=setup.expansion_16m_id,
+                    fvg_16m_id=setup.fvg_16m_id,
+                    fvg_12m_id=setup.fvg_12m_id,
+                    metadata=setup.metadata,
+                    now=setup.updated_at,
+                    source=source,
+                )
+                # setup.setup_id may already be tracked - the attempt-tracer's row
+                # for this exact swing (see _find_tracked_setup_by_swing), which
+                # can itself already be resolved (COMPLETED this same poll, or
+                # INVALIDATED/COMPLETED from an earlier poll if this trade was
+                # skipped as stale on an earlier pass) - so remove it from
+                # whichever store currently holds it, and un-resolve its setup_id
+                # (it is about to become a real, freshly-tracked IN PROGRESS row
+                # again, taking over its own tracked identity instead of appearing
+                # as a second, separate row next to it).
+                state.setups.pop(setup.setup_id, None)
+                state.invalidated_setups[:] = [tracked for tracked in state.invalidated_setups if tracked.setup_id != setup.setup_id]
+                state.completed_setups[:] = [tracked for tracked in state.completed_setups if tracked.setup_id != setup.setup_id]
+                state.resolved_setup_ids.discard(setup.setup_id)
+                _suppress_redundant_attempt_trace(state, setup.swing_16m_id)  # defensive backstop; normally a no-op now
+                state.setups[setup.setup_id] = setup
+                _cap_in_progress(state)
+                state.setup_history.setdefault(setup.setup_id, []).append(
+                    {
+                        "from_state": None,
+                        "to_state": SetupState.ENTRY_READY.value,
+                        "changed_at": setup.updated_at.isoformat(),
+                        "reason": "live profile evaluator created entry-ready setup",
+                        "source": source,
+                    }
+                )
+                _mark_trade_candidates_processed(detector_state, (fresh,))
+                detector_state["created_setup_count"] = int(detector_state.get("created_setup_count") or 0) + 1
+                detector_state["latest_trade_candidate"] = {key: str(fresh.get(key, "")) for key in ("trade_id", "symbol", "direction", "entry_timestamp", "entry_price", "stop_loss", "take_profit", "source_12m_fvg_id")}
+                created_setup_ids.append(setup.setup_id)
 
         if created_setup_ids:
             return _finish(detector_state, "SETUP_CREATED", f"created ENTRY_READY setup(s): {', '.join(created_setup_ids)}", source=source)
@@ -673,6 +671,11 @@ def _apply_one_attempt_trace(
     swing_timestamp = datetime.fromisoformat(str(trace["swing_timestamp"]).replace("Z", "+00:00"))
     swing_id = str(trace["swing_16m_id"])
     setup_id = build_setup_id(symbol=str(trace["symbol"]), direction=direction, created_at=swing_timestamp, htf_fvg_id=swing_id)
+    if not is_fresh_swing(swing_timestamp):
+        age_min = _swing_age_minutes(swing_timestamp, datetime.now(timezone.utc))
+        state.resolved_swing_keys.add(build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp))
+        logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", str(trace["symbol"]), _as_utc(swing_timestamp).isoformat(), age_min)
+        return
 
     # Fix 4 (Setup Radar journey): once a setup_id has ever resolved into
     # completed_setups or invalidated_setups, it is permanently done - the
@@ -1028,38 +1031,56 @@ def _suppress_redundant_attempt_trace(state: Any, swing_16m_id: str | None) -> N
             state.resolved_setup_ids.discard(setup.setup_id)
 
 
-def _fresh_trade_candidate(trades: object, candles: tuple[Candle, ...], detector_state: dict[str, Any]) -> dict[str, object] | None:
-    """The most recently-confirmed trade candidate that has never been
-    processed before.
+def _fresh_trade_candidate(
+    trades: object,
+    candles: tuple[Candle, ...],
+    detector_state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    swing_timestamps: dict[str, datetime] | None = None,
+) -> dict[str, object] | None:
+    """Return a fresh swing trade candidate, if one exists.
 
-    "Fresh" here means "discovered for the first time this poll" - not
-    "its own entry candle is chronologically the latest 1m candle", which is
-    what this used to require. That requirement made a candidate's entry
-    timestamp equal to candles[-1]/candles[-2] - but the shared strategy
-    funnel only confirms ENTRY_READY once the *entire* retrace window
-    (profile.retrace_window_8m_candles worth of 8M candles) has fully
-    elapsed since the 16M FVG confirmed, and then searches that window
-    front-to-back for the first qualifying retrace+tap. The tap that
-    satisfies entry is therefore very often found near the START of an
-    already-elapsed window, not its end - meaning a structurally valid,
-    freshly-confirmed completion was being discovered "too old" by this
-    measure on virtually every occurrence, restart/outage or not.
-    _trade_key/processed_trade_keys already guarantee a given trade is only
-    ever picked up once - that is the freshness signal that actually applies
-    here, not chronological age of the entry candle.
+    Compatibility wrapper for tests/callers that expect one candidate. The
+    live detector itself uses _fresh_trade_candidates so multiple setups whose
+    swing timestamps are inside the staleness window can all be handed to
+    automation in the same poll.
+    """
+    fresh = _fresh_trade_candidates(trades, candles, detector_state, now=now, swing_timestamps=swing_timestamps)
+    return fresh[-1] if fresh else None
+
+
+def _fresh_trade_candidates(
+    trades: object,
+    candles: tuple[Candle, ...],
+    detector_state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    swing_timestamps: dict[str, datetime] | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Never-seen trade candidates whose swing timestamp is still fresh.
+
+    The real-time gate is the originating swing's right-candle timestamp, not
+    the 1M entry candle. A fresh swing can legitimately resolve to an entry
+    candle earlier in its retrace window; rejecting it for not being the
+    latest 1M candle would drop real current setups.
     """
     if not isinstance(trades, (tuple, list)) or not candles:
-        return None
+        return ()
+    reference_now = now or _candidate_now(candles)
     seen = set(str(key) for key in detector_state.get("processed_trade_keys", []))
-    for trade in reversed([trade for trade in trades if isinstance(trade, dict)]):
+    fresh: list[dict[str, object]] = []
+    for trade in [trade for trade in trades if isinstance(trade, dict)]:
         if str(trade.get("outcome")) == "RISK_REJECTED":
             continue
         if _trade_key(trade) in seen:
             continue
-        if "entry_timestamp" not in trade:
+        swing_time = _trade_swing_time(trade, swing_timestamps=swing_timestamps)
+        if swing_time is None:
             continue
-        return trade
-    return None
+        if is_fresh_swing(swing_time, reference_now):
+            fresh.append(trade)
+    return tuple(fresh)
 
 
 def _stale_trade_candidates(
@@ -1067,68 +1088,65 @@ def _stale_trade_candidates(
     candles: tuple[Candle, ...],
     detector_state: dict[str, Any],
     *,
-    exclude: dict[str, object] | None = None,
+    exclude: object = None,
+    now: datetime | None = None,
+    swing_timestamps: dict[str, datetime] | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Diagnostics only - never changes what gets traded.
+    """Never-seen trade candidates whose swing timestamp is outside the
+    staleness window.
 
-    Other never-seen trade candidates the shared strategy funnel found this
-    same poll, besides the single one `_fresh_trade_candidate` already
-    picked (passed as `exclude`). This only has entries when more than one
-    swing resolves to ENTRY_READY in the very same poll - typically a
-    restart/outage backlog surfacing at once. Each one will still be picked
-    up and acted on automatically, one per poll, on a later pass; this is
-    purely visibility into "more than one showed up at once", not a list of
-    things that will never be traded.
-
-    Each returned trade dict carries two added keys describing how old the
-    entry candle already was relative to the latest live candle when found:
-    candles_past_window (0 means right at the latest/second-latest candle,
-    1 means one candle further gone, etc.) and seconds_past_window
-    (candles_past_window * 60).
+    These are recorded as skipped and then marked processed by the caller so
+    old chart/backfill candidates cannot be executed later.
     """
     if not isinstance(trades, (tuple, list)) or not candles:
         return ()
-    latest = candles[-1].timestamp
-    latest_allowed = {latest, candles[-2].timestamp if len(candles) > 1 else latest}
+    reference_now = now or _candidate_now(candles)
     seen = set(str(key) for key in detector_state.get("processed_trade_keys", []))
-    exclude_key = _trade_key(exclude) if exclude is not None else None
+    exclude_keys = _exclude_trade_keys(exclude)
     stale: list[dict[str, object]] = []
     for trade in trades:
         if not isinstance(trade, dict) or str(trade.get("outcome")) == "RISK_REJECTED":
             continue
         if _trade_key(trade) in seen:
             continue
-        if exclude_key is not None and _trade_key(trade) == exclude_key:
+        if _trade_key(trade) in exclude_keys:
             continue
-        try:
-            entry_time = datetime.fromisoformat(str(trade["entry_timestamp"]).replace("Z", "+00:00"))
-        except (KeyError, ValueError):
+        swing_time = _trade_swing_time(trade, swing_timestamps=swing_timestamps)
+        if swing_time is None:
             continue
-        if entry_time not in latest_allowed:
-            candles_after_entry = sum(1 for candle in candles if candle.timestamp > entry_time)
-            candles_past_window = max(0, candles_after_entry - 1)
-            stale.append({**trade, "candles_past_window": candles_past_window, "seconds_past_window": candles_past_window * 60})
+        age_minutes = _swing_age_minutes(swing_time, reference_now)
+        if age_minutes > STALENESS_WINDOW_MINUTES:
+            stale.append(
+                {
+                    **trade,
+                    "swing_timestamp": swing_time.isoformat(),
+                    "age_minutes": age_minutes,
+                    "seconds_past_window": int((age_minutes - STALENESS_WINDOW_MINUTES) * 60),
+                }
+            )
     return tuple(stale)
 
 
 def _record_stale_skip(symbol: str, stale: tuple[dict[str, object], ...], detector_state: dict[str, Any]) -> None:
-    timestamps = sorted(str(trade.get("entry_timestamp") or "") for trade in stale)
+    timestamps = sorted(str(trade.get("swing_timestamp") or trade.get("entry_timestamp") or "") for trade in stale)
     detector_state["stale_trade_candidates_skipped_total"] = int(detector_state.get("stale_trade_candidates_skipped_total") or 0) + len(stale)
     detector_state["last_stale_skip"] = {
         "symbol": symbol,
         "count": len(stale),
-        "oldest_entry_timestamp": timestamps[0],
-        "newest_entry_timestamp": timestamps[-1],
+        "oldest_swing_timestamp": timestamps[0],
+        "newest_swing_timestamp": timestamps[-1],
+        "max_age_minutes": max(float(trade.get("age_minutes") or 0.0) for trade in stale),
         "detected_at": _now(),
     }
-    logger.warning(
+    logger.debug(
         "Live detection for %s found %s additional never-seen trade candidate(s) via the shared strategy funnel "
-        "this same poll, beyond the one just picked up - entry_timestamp range %s..%s. These are queued, not "
-        "dropped: each will still be picked up automatically, one per poll, on a later pass. More than one at "
-        "once usually means a monitoring gap (restart/outage) let several swings resolve before detection caught "
-        "up, rather than something wrong with any individual candidate.",
+        "with swing timestamps outside the %s minute Setup Radar staleness window - swing timestamp range %s..%s. These are "
+        "recorded as skipped and marked processed so old chart/backfill candidates cannot be submitted later. "
+        "More than one at once usually means a monitoring gap (restart/outage) let several swings resolve before "
+        "detection caught up, rather than something wrong with any individual candidate.",
         symbol,
         len(stale),
+        STALENESS_WINDOW_MINUTES,
         timestamps[0],
         timestamps[-1],
     )
@@ -1173,6 +1191,8 @@ def _record_stale_skips_for_radar(state: Any, stale: tuple[dict[str, object], ..
             "symbol": str(trade.get("symbol") or ""),
             "direction": str(trade.get("direction") or ""),
             "entry_timestamp": str(trade.get("entry_timestamp") or ""),
+            "swing_timestamp": str(trade.get("swing_timestamp") or ""),
+            "age_minutes": float(trade.get("age_minutes") or 0.0),
             "candles_past_window": int(trade.get("candles_past_window") or 0),
             "seconds_past_window": int(trade.get("seconds_past_window") or 0),
             "skipped_at": now,
@@ -1189,6 +1209,89 @@ def _evict_oldest_stale_skips(state: Any, *, max_count: int = MAX_TRACKED_SETUP_
     oldest_first = sorted(state.stale_trade_skips.items(), key=lambda item: item[1].get("skipped_at") or "")
     for swing_id, _ in oldest_first[:overflow]:
         state.stale_trade_skips.pop(swing_id, None)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _swing_age_minutes(swing_timestamp: datetime, now: datetime) -> float:
+    return (_as_utc(now) - _as_utc(swing_timestamp)).total_seconds() / 60
+
+
+def _candidate_now(candles: tuple[Candle, ...]) -> datetime:
+    return candles[-1].timestamp if candles else datetime.now(timezone.utc)
+
+
+def _parse_dt(raw: object) -> datetime | None:
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _as_utc(parsed)
+
+
+def _trade_entry_time(trade: dict[str, object]) -> datetime | None:
+    return _parse_dt(trade.get("entry_timestamp"))
+
+
+def _trace_swing_timestamps(traces: object) -> dict[str, datetime]:
+    if not isinstance(traces, (tuple, list)):
+        return {}
+    result: dict[str, datetime] = {}
+    for trace in traces:
+        if not isinstance(trace, dict):
+            continue
+        swing_id = str(trace.get("swing_16m_id") or "")
+        swing_time = _parse_dt(trace.get("swing_timestamp"))
+        if swing_id and swing_time is not None:
+            result[swing_id] = swing_time
+    return result
+
+
+def _trade_swing_time(trade: dict[str, object], *, swing_timestamps: dict[str, datetime] | None = None) -> datetime | None:
+    swing_id = str(trade.get("source_16m_swing_id") or "")
+    if swing_id and swing_timestamps and swing_id in swing_timestamps:
+        return swing_timestamps[swing_id]
+    direct = _parse_dt(trade.get("source_16m_swing_timestamp") or trade.get("swing_timestamp"))
+    if direct is not None:
+        return direct
+    snapshot = trade.get("setup_snapshot") if isinstance(trade.get("setup_snapshot"), dict) else {}
+    swing_record = snapshot.get("swing_16m") if isinstance(snapshot.get("swing_16m"), dict) else {}
+    recorded = _parse_dt(swing_record.get("right_candle_timestamp") or swing_record.get("confirmed_at") or swing_record.get("timestamp"))
+    if recorded is not None:
+        return recorded
+    return _trade_entry_time(trade)
+
+
+def _exclude_trade_keys(exclude: object) -> set[str]:
+    if exclude is None:
+        return set()
+    if isinstance(exclude, dict):
+        return {_trade_key(exclude)}
+    if isinstance(exclude, (tuple, list, set)):
+        return {_trade_key(trade) for trade in exclude if isinstance(trade, dict)}
+    return set()
+
+
+def _mark_trade_candidates_processed(detector_state: dict[str, Any], trades: object) -> None:
+    if not isinstance(trades, (tuple, list)):
+        return
+    processed = detector_state.setdefault("processed_trade_keys", [])
+    existing = set(str(key) for key in processed)
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        key = _trade_key(trade)
+        if key in existing:
+            continue
+        processed.append(key)
+        existing.add(key)
+    del processed[:-200]
 
 
 def _trade_key(trade: dict[str, object]) -> str:

@@ -21,8 +21,7 @@ def clear_setup_history_endpoint():
     the seen-setups dedup cache, and overwrite the persisted
     setup_history_store.json with the empty fresh-start shape, simultaneously
     - for an operator to trigger on demand (e.g. from the Railway console)
-    without waiting for a restart. The same operation main.py runs once on
-    every process boot (see wipe_setup_history). IN PROGRESS (state.setups)
+    without waiting for a restart. IN PROGRESS (state.setups)
     is never touched, and this has no effect on adapter_mode/
     live_trading_enabled/trading_mode/live_armed or any risk/margin/lock
     check - it only clears Setup Radar's COMPLETED/INVALIDATED display

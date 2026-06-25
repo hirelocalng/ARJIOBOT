@@ -26,10 +26,9 @@ def create_app() -> FastAPI:
     # polling session right here if monitoring_enabled was persisted from a
     # previous deploy - the history must be loaded before that starts so the
     # UI already shows prior context on the very first request after restart).
-    # Loads completed/invalidated history from disk for UI display; leaves
-    # resolved_swing_keys EMPTY so the pre-funnel staleness filter classifies
-    # each swing fresh on the first poll. Seeds resolved_setup_ids from
-    # loaded history to prevent duplicate writes for the same setup_id.
+    # Loads completed/invalidated history from disk for UI display only;
+    # leaves resolved_setup_ids and resolved_swing_keys EMPTY so the
+    # pre-funnel staleness filter classifies each swing on the first poll.
     # IN PROGRESS (state.setups) is never touched by this.
     load_setup_history_for_display(get_state())
     assert_profile_freeze()

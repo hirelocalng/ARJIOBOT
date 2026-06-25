@@ -307,11 +307,11 @@ class ApiState:
     monitored_pairs: dict[str, dict[str, object]] = field(default_factory=load_pairs)
     settings: dict[str, object] = field(default_factory=load_settings)
     # In-progress (ACTIVE) and pending-execution (ENTRY_READY) setups only -
-    # not capped, per the Setup Radar spec ("IN PROGRESS: no cap, show all
-    # currently being tracked"). A setup leaves this dict the moment it
-    # resolves: into invalidated_setups, into completed_setups, or (for a
-    # real ENTRY_READY trade) into completed_setups once live automation
-    # actually submits it (see live_automation.py _process_setup).
+    # capped at MAX_IN_PROGRESS_SETUPS by live_setup_detection.py. A setup
+    # leaves this dict the moment it resolves: into invalidated_setups, into
+    # completed_setups, or (for a real ENTRY_READY trade) into completed_setups
+    # once live automation actually submits it (see live_automation.py
+    # _process_setup).
     setups: dict[str, object] = field(default_factory=dict)
     # Append-only, newest-first ordered lists (see live_setup_detection.py's
     # _append_resolved_setup) - a setup is only ever inserted once (index 0),
@@ -325,7 +325,7 @@ class ApiState:
     completed_setups: list[object] = field(default_factory=list)
     # Every setup_id that has ever resolved (moved into completed_setups or
     # invalidated_setups) for the life of this process - never shrinks except
-    # via the startup fresh-start wipe (setup_history_store.wipe_setup_history).
+    # via the manual Clear History endpoint (setup_history_store.wipe_setup_history).
     # Deliberately NOT capped at 100 like the visible lists above: once a
     # setup_id is evicted from the visible list it must still be permanently
     # blocked from being re-created by the live detection funnel re-deriving
@@ -335,16 +335,13 @@ class ApiState:
     # Permanent swing-level dedup cache (symbol+direction+swing timestamp -
     # see setup_models.build_swing_dedup_key), checked BEFORE the live
     # detection funnel ever runs for a swing (live_setup_detection.py's
-    # detect_live_setups_for_symbol). Cleared on every process boot and on
-    # every manual admin history clear (setup_history_store.wipe_setup_history)
-    # so the funnel re-evaluates all current swings from scratch on the first
-    # poll after each deploy - fresh signal is never silently blocked by a
-    # prior session's resolved keys.
+    # detect_live_setups_for_symbol). Starts empty on every process boot and
+    # is cleared on every manual admin history clear
+    # (setup_history_store.wipe_setup_history), so fresh signal is never
+    # silently blocked by a prior session's resolved keys.
     resolved_swing_keys: set[str] = field(default_factory=set)
-    # Set by setup_tracker.setup_history_store on every fresh start (process
-    # boot) and on a manual admin clear - see setup_history_store.
-    # wipe_setup_history. None only ever briefly, before the very first
-    # startup wipe has run.
+    # Restored from setup_history_store.json on process boot when present, and
+    # set by the manual Clear History endpoint.
     history_cleared_at: datetime | None = None
     setup_history: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     # Keyed by swing_16m_id so Setup Radar can correlate a COMPLETED attempt
@@ -377,10 +374,9 @@ class ApiState:
             "latest_funnel": {},
             "latest_trade_candidate": {},
             # Observability for trade candidates the shared strategy funnel
-            # found but the live freshness gate discarded as stale (older
-            # than the newest 1-2 live candles) - e.g. after a monitoring
-            # outage. Execution behavior is unchanged; this only makes the
-            # gap visible instead of silent.
+            # found but the live freshness gate discarded as stale (swing
+            # timestamp older than STALENESS_WINDOW_MINUTES) - e.g. after a
+            # monitoring outage. This makes the gap visible instead of silent.
             "stale_trade_candidates_skipped_total": 0,
             "last_stale_skip": {},
         }
