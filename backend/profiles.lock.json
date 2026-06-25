@@ -548,7 +548,7 @@
     "arjiobot/setup_tracker/setup_invalidation.py": "2b3c5e5d23fa7cb4cfb28fefec96b8dd391340ea60e89fb5fa1552a0b5b7fd2b",
     "arjiobot/strategy/strategy_engine.py": "269a960d6d62a511ad45cadb9869a13cb13ea3ca7d6095f0ff41c09bc163faed",
     "arjiobot/swings/swings.py": "7589500f6d33255d44aa521dfb89b7bb18b260f68481a130e2bb063fc6b547f3",
-    "scripts/backtest_csv.py": "fcccec5a4e067fe789e06e2d8124b39cd0804f0529e63f07189ac247ec13409c"
+    "scripts/backtest_csv.py": "69d541cb0589eb3d8b76a359edd98625443c8e38b15ef80f4af18e1bff588327"
   },
   "runtime_warning": "Profile freeze active: strategy logic locked.",
   "schema_version": 1
