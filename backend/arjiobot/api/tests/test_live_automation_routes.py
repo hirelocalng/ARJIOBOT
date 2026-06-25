@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from decimal import Decimal
 
+import arjiobot.live_setup_detection as live_setup_detection
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.tests.helpers import client
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig, TradeMode
@@ -797,7 +798,7 @@ def test_risk_rejected_entry_ready_setup_moves_to_completed_with_rejected_status
     assert completed_rows[setup.setup_id]["execution_status"] == "no_margin"
 
 
-def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_order() -> None:
+def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_order(monkeypatch) -> None:
     """End-to-end proof that execution is actually taking trades after this
     session's freshness-window fix: real candle data, fed through the real
     detect_live_setups_for_symbol pipeline (not a hand-built setup like
@@ -813,6 +814,7 @@ def test_real_detection_produces_a_setup_that_live_automation_submits_as_an_orde
     from arjiobot.backtesting.historical_replay import load_ohlcv_csv
     from arjiobot.live_setup_detection import detect_live_setups_for_symbol
 
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     api = client()
     state = get_state()
     service = state.bitget_environment

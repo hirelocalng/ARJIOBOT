@@ -7,15 +7,20 @@ MAX_TRACKED_SETUP_ATTEMPTS (the oldest, at the end of the list). This module
 mirrors that list, in that same order, to a JSON file under backend/data/, so
 the lists are visible without needing to read process memory directly.
 
-Every deploy starts with zero *visible* history (see wipe_setup_history,
-called once at process boot from main.py): the completed/invalidated lists
-the UI reads are always wiped empty, and the swing-level dedup cache
-(state.resolved_swing_keys) is also cleared rather than seeded from the
-previous session - so the funnel re-evaluates all current swings from
-scratch on the first poll after each deploy and Setup Radar picks up fresh
-signal immediately. IN PROGRESS (state.setups) is never written here either
-way - it always reflects only currently-active setups, with nothing that
-needs to survive a restart, by design.
+On every process boot load_setup_history_for_display (called from main.py)
+reads whatever the previous session persisted here and populates
+completed_setups / invalidated_setups in memory for immediate UI display -
+without seeding the swing-level dedup cache (state.resolved_swing_keys),
+which starts empty on every deploy. The pre-funnel staleness filter in
+live_setup_detection.py (_filter_stale_swings) catches any historical swing
+from the rolling candle buffer on the first poll and permanently dedupes it
+there, so the cache stays small and fresh. IN PROGRESS (state.setups) is
+never written here - it only reflects currently-active setups, by design.
+
+wipe_setup_history is called only by the manual Clear History admin button
+(POST /api/admin/clear-setup-history): it empties both in-memory lists, both
+dedup caches, the JSON file, and records history_cleared_at so the bot
+starts from a fully blank slate on the next poll.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus, build_swing_dedup_key
+from arjiobot.setup_tracker.setup_models import InvalidationReason, Setup, SetupDirection, SetupState, SetupStatus, build_swing_dedup_key, StateHistoryEntry
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,124 @@ def save_setup_history_store(state: Any) -> None:
         # requirement for the current process - a write failure (e.g. a
         # read-only filesystem) must never break Setup Radar tracking itself.
         logger.exception("Failed to persist completed/invalidated setup history to %s", STORE_PATH)
+
+
+def _json_to_setup(record: dict[str, Any]) -> Setup | None:
+    """Reconstruct a Setup from a persisted JSON record for display.
+    Returns None and logs a warning if any field is missing or unrecognisable.
+    state_history is intentionally omitted (empty tuple) - it is not used by
+    the radar display layer and avoids importing StateHistoryEntry subfields."""
+    try:
+        def _dt(s: Any) -> datetime | None:
+            if not s:
+                return None
+            return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+
+        def _dec(s: Any) -> Decimal | None:
+            return Decimal(str(s)) if s is not None else None
+
+        return Setup(
+            setup_id=record["setup_id"],
+            symbol=record["symbol"],
+            direction=SetupDirection(record["direction"]),
+            current_state=SetupState(record["current_state"]),
+            progress_percent=float(record.get("progress_percent") or 0.0),
+            status=SetupStatus(record["status"]),
+            created_at=_dt(record.get("created_at")) or datetime.now(timezone.utc),
+            updated_at=_dt(record.get("updated_at")) or datetime.now(timezone.utc),
+            invalidated_at=_dt(record.get("invalidated_at")),
+            invalidation_reason=InvalidationReason(record["invalidation_reason"]) if record.get("invalidation_reason") else None,
+            last_valid_stage=record.get("last_valid_stage"),
+            completed_at=_dt(record.get("completed_at")),
+            htf_fvg_id=record.get("htf_fvg_id"),
+            swing_16m_id=record.get("swing_16m_id"),
+            expansion_16m_id=record.get("expansion_16m_id"),
+            fvg_16m_id=record.get("fvg_16m_id"),
+            fvg_12m_id=record.get("fvg_12m_id"),
+            fvg_8m_id=record.get("fvg_8m_id"),
+            retrace_tap_candle_id=record.get("retrace_tap_candle_id"),
+            one_minute_swing_id=record.get("one_minute_swing_id"),
+            one_minute_fvg_ids=tuple(record.get("one_minute_fvg_ids") or []),
+            entry_fvg_id=record.get("entry_fvg_id"),
+            stop_reference_price=_dec(record.get("stop_reference_price")),
+            target_a_price=_dec(record.get("target_a_price")),
+            target_b_price=_dec(record.get("target_b_price")),
+            final_target_price=_dec(record.get("final_target_price")),
+            time_remaining=record.get("time_remaining"),
+            state_history=(),
+            watched_timeframes=tuple(record.get("watched_timeframes") or ("30M", "1H", "16M", "12M", "8M", "1M")),
+            execution_status=record.get("execution_status"),
+            metadata=dict(record.get("metadata") or {}),
+        )
+    except Exception:
+        logger.warning("Skipping unreadable setup record from disk (setup_id=%r)", record.get("setup_id"))
+        return None
+
+
+def load_setup_history_for_display(state: Any) -> tuple[int, int]:
+    """On process startup: load whatever completed/invalidated history the
+    previous session persisted to STORE_PATH into memory so the UI shows
+    prior context immediately after a restart.
+
+    Behaviour:
+    - state.completed_setups and state.invalidated_setups are populated from
+      the JSON in their persisted order (newest-first).
+    - state.resolved_setup_ids is seeded from every loaded setup so that a
+      fresh swing whose setup_id collides with a previously-resolved one is
+      not written twice (the existing _find_tracked_setup_by_swing + discard
+      path handles the take-over case correctly even with seeded ids).
+    - state.resolved_swing_keys is deliberately left EMPTY so the pre-funnel
+      staleness filter in live_setup_detection.py (_filter_stale_swings)
+      classifies each swing independently on the first poll - fresh swings
+      (<STALENESS_WINDOW_MINUTES) proceed through the funnel, stale ones are
+      permanently deduped there without ever entering IN PROGRESS.
+    - history_cleared_at is restored from the JSON if present.
+    - If the file is absent, corrupt, or empty the function is a no-op and
+      the bot starts with zero visible history (same as a fresh deploy).
+
+    Returns (completed_count, invalidated_count) loaded."""
+    try:
+        previous = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.info("No prior setup history found at %s - starting with empty visible lists.", STORE_PATH)
+        return 0, 0
+
+    cleared_at_raw = previous.get("cleared_at")
+    if cleared_at_raw:
+        try:
+            state.history_cleared_at = datetime.fromisoformat(str(cleared_at_raw).replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    completed_count = 0
+    for record in previous.get("completed") or []:
+        if not isinstance(record, dict):
+            continue
+        setup = _json_to_setup(record)
+        if setup is None:
+            continue
+        state.completed_setups.append(setup)
+        state.resolved_setup_ids.add(setup.setup_id)
+        completed_count += 1
+
+    invalidated_count = 0
+    for record in previous.get("invalidated") or []:
+        if not isinstance(record, dict):
+            continue
+        setup = _json_to_setup(record)
+        if setup is None:
+            continue
+        state.invalidated_setups.append(setup)
+        state.resolved_setup_ids.add(setup.setup_id)
+        invalidated_count += 1
+
+    logger.warning(
+        "Setup Radar history loaded from disk: %d completed, %d invalidated - "
+        "resolved_swing_keys starts empty; pre-funnel staleness filter handles old swings on first poll.",
+        completed_count,
+        invalidated_count,
+    )
+    return completed_count, invalidated_count
 
 
 def _seed_swing_cache_from_disk(state: Any) -> int:

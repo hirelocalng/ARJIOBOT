@@ -20,7 +20,9 @@ from arjiobot.api.tests.helpers import client
 from arjiobot.backtesting.historical_replay import load_ohlcv_csv
 from arjiobot.exchange.bitget_environment import BitgetCredentialConfig, TradeMode
 from arjiobot.live_automation import run_live_automation_once
+import arjiobot.live_setup_detection as live_setup_detection
 from arjiobot.live_setup_detection import (
+    MAX_IN_PROGRESS_SETUPS,
     RESTART_CATCHUP_WINDOW_SECONDS,
     _apply_attempt_traces,
     _fresh_trade_candidate,
@@ -64,7 +66,8 @@ def _all_tracked(state) -> list:
     return [*state.setups.values(), *state.invalidated_setups, *state.completed_setups]
 
 
-def test_swing_only_attempt_is_logged_and_visible_with_its_symbol() -> None:
+def test_swing_only_attempt_is_logged_and_visible_with_its_symbol(monkeypatch) -> None:
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
     state = _fake_state("ADAUSDT", candles_1m[:5000])
 
@@ -79,7 +82,8 @@ def test_swing_only_attempt_is_logged_and_visible_with_its_symbol() -> None:
     assert all(setup.progress_percent >= 20.0 for setup in tracked)
 
 
-def test_failed_expansion_attempt_is_retained_with_invalidation_reason() -> None:
+def test_failed_expansion_attempt_is_retained_with_invalidation_reason(monkeypatch) -> None:
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
     state = _fake_state("ADAUSDT", candles_1m[:5000])
 
@@ -267,15 +271,15 @@ def test_completed_and_invalidated_mutations_persist_to_disk_in_progress_does_no
     assert "swing_active_persist_1" not in json.dumps(payload), "IN PROGRESS must never be persisted"
 
 
-def test_in_progress_pool_has_no_cap() -> None:
-    """IN PROGRESS is explicitly uncapped per the Setup Radar spec - unlike
-    invalidated/completed, it must hold every currently-active attempt with
-    no eviction at all, however many there are."""
+def test_in_progress_pool_is_capped_at_max_in_progress_setups() -> None:
+    """IN PROGRESS is capped at MAX_IN_PROGRESS_SETUPS (20) - the oldest
+    entries are evicted when the cap is exceeded, keeping the pool bounded
+    so the UI never floods with hundreds of backlog attempts."""
     state = _fake_state("ADAUSDT", ())
     traces = tuple(_swing_trace(f"swing_active_{i}", stage="SWING_16M_CONFIRMED", progress_percent=20.0) for i in range(150))
     _apply_attempt_traces(state, "ADAUSDT", traces, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
-    assert len(state.setups) == 150
+    assert len(state.setups) == MAX_IN_PROGRESS_SETUPS
     assert state.invalidated_setups == []
     assert state.completed_setups == []
 
@@ -734,7 +738,7 @@ def test_attempt_tracer_setup_invalidating_on_first_poll_is_recorded_in_in_progr
     assert history[1]["to_state"] == SetupState.INVALIDATED.value
 
 
-def test_real_trade_on_first_poll_is_recorded_in_in_progress_before_entry_ready() -> None:
+def test_real_trade_on_first_poll_is_recorded_in_in_progress_before_entry_ready(monkeypatch) -> None:
     """Mirror of the attempt-tracer fix for the _setup_from_trade path: a
     swing whose very first poll already produces a real, tradable
     ENTRY_READY trade must still be recorded in IN PROGRESS before
@@ -745,6 +749,7 @@ def test_real_trade_on_first_poll_is_recorded_in_in_progress_before_entry_ready(
     COMPLETED (attempt-tracer's own terminal marker) -> ENTRY_READY (the
     real trade taking over that same id) - all under one setup_id, with the
     IN PROGRESS entry always first."""
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
     state = _fake_state("ADAUSDT", candles_1m[:150])
 
@@ -760,10 +765,11 @@ def test_real_trade_on_first_poll_is_recorded_in_in_progress_before_entry_ready(
         assert history[-1]["to_state"] == SetupState.ENTRY_READY.value
 
 
-def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing() -> None:
+def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing(monkeypatch) -> None:
     """End-to-end proof against real strategy data: the swing behind the real
     ENTRY_READY trade this window produces must not also still have its own
     separate attempt-tracer COMPLETED row sitting in completed_setups."""
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
     state = _fake_state("ADAUSDT", candles_1m[:150])
 
@@ -782,13 +788,14 @@ def test_real_csv_window_produces_no_duplicate_completed_row_for_the_same_swing(
         )
 
 
-def test_locked_tp_model_metadata_matches_what_was_actually_traded_not_a_stale_saved_setting() -> None:
+def test_locked_tp_model_metadata_matches_what_was_actually_traded_not_a_stale_saved_setting(monkeypatch) -> None:
     """PROFILE_2's tp_model (LEG_TARGET_RESEARCH) always wins over the
     operator's saved selected_rr_profile setting when actually computing
     stop/target (scripts/backtest_csv.py hardwires tp_model=profile.tp_model
     at the real trade-construction call site) - Setup.metadata's
     selected_tp_model/applied_tp_model must reflect that same reality,
     not echo back a stale/unrelated saved setting like RR_1_5."""
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
     state = _fake_state("ADAUSDT", candles_1m[:150])
     state.settings["selected_rr_profile"] = "RR_1_5"

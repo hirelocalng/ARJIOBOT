@@ -45,6 +45,20 @@ _RUNNER: ModuleType | None = None
 
 MAX_TRACKED_SETUP_ATTEMPTS = 100
 
+# Pre-funnel swing staleness gate: swings whose right-candle timestamp is
+# older than this many minutes are silently added to the dedup cache and
+# never entered into the strategy funnel or IN PROGRESS at all. This is the
+# primary mechanism that keeps Setup Radar real-time-only, preventing the
+# 31-day rolling candle buffer from flooding the UI with historical backlog.
+# Must match STALE_ENTRY_READY_MAX_AGE in live_automation.py (both are 24
+# minutes = 2 closed 12M candles).
+STALENESS_WINDOW_MINUTES = 24
+
+# Safety cap on the IN PROGRESS pool. With STALENESS_WINDOW_MINUTES=24 active,
+# the funnel can only ever produce a handful of fresh setups at once, so this
+# cap should never fire in practice - it is a backstop, not a design knob.
+MAX_IN_PROGRESS_SETUPS = 20
+
 # A stale skip whose detection happens within this many seconds of the
 # current monitoring session's started_at is classified as catching up on a
 # backlog from before this session started (a restart/outage), rather than a
@@ -123,6 +137,39 @@ def _filter_resolved_swings(state: Any, swings: list[Any], *, direction: str) ->
     return fresh
 
 
+def _is_fresh_swing(swing_timestamp: datetime, now: datetime) -> bool:
+    """Return True if the swing's right-candle is within STALENESS_WINDOW_MINUTES."""
+    return (now - swing_timestamp).total_seconds() / 60 <= STALENESS_WINDOW_MINUTES
+
+
+def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: datetime) -> list[Any]:
+    """Pre-funnel staleness gate: drop any swing whose right-candle timestamp
+    is older than STALENESS_WINDOW_MINUTES, permanently recording its dedup
+    key so it is never re-evaluated. This is what keeps Setup Radar real-time
+    only: historical swings from the 31-day rolling buffer are caught HERE,
+    before the strategy funnel ever runs on them, so they never enter IN
+    PROGRESS at all. Logged at DEBUG - this is the expected common case."""
+    result: list[Any] = []
+    for swing in swings:
+        ts = swing.right_candle.timestamp
+        if _is_fresh_swing(ts, now):
+            result.append(swing)
+        else:
+            age_min = (now - ts).total_seconds() / 60
+            key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
+            state.resolved_swing_keys.add(key)
+            logger.debug("[STALE SKIP] %s %s swing %s age=%.1fmin - outside %smin window, deduped permanently", swing.symbol, direction, ts, age_min, STALENESS_WINDOW_MINUTES)
+    return result
+
+
+def _cap_in_progress(state: Any) -> None:
+    """Evict the oldest IN PROGRESS entry if we're over MAX_IN_PROGRESS_SETUPS.
+    A safety backstop only - should never fire when the pre-funnel staleness
+    filter (_filter_stale_swings) is active and correctly configured."""
+    while len(state.setups) > MAX_IN_PROGRESS_SETUPS:
+        state.setups.pop(next(iter(state.setups)), None)
+
+
 def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MONITORING_POLL") -> dict[str, Any]:
     symbol = symbol.upper()
     detector_state = state.live_setup_detection
@@ -175,15 +222,26 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         # attempt-trace tracking and real trade detection, so filtering them
         # here is sufficient to stop a resolved swing from being
         # re-evaluated by either path at all.
-        bearish_swing_highs = _filter_resolved_swings(
+        now = datetime.now(timezone.utc)
+        bearish_swing_highs = _filter_stale_swings(
             state,
-            [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH],
+            _filter_resolved_swings(
+                state,
+                [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH],
+                direction="BEARISH",
+            ),
             direction="BEARISH",
+            now=now,
         )
-        bullish_swing_lows = _filter_resolved_swings(
+        bullish_swing_lows = _filter_stale_swings(
             state,
-            [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW],
+            _filter_resolved_swings(
+                state,
+                [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW],
+                direction="BULLISH",
+            ),
             direction="BULLISH",
+            now=now,
         )
         expansions_main = runner._research_expansions(swing_results.all_swings)
         fvg_results = {
@@ -317,6 +375,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             state.resolved_setup_ids.discard(setup.setup_id)
             _suppress_redundant_attempt_trace(state, setup.swing_16m_id)  # defensive backstop; normally a no-op now
             state.setups[setup.setup_id] = setup
+            _cap_in_progress(state)
             state.setup_history.setdefault(setup.setup_id, []).append(
                 {
                     "from_state": None,
@@ -564,6 +623,7 @@ def _record_in_progress_before_terminal_move(
         metadata=dict(metadata),
     )
     state.setups[setup_id] = snapshot
+    _cap_in_progress(state)
     state.setup_history[setup_id] = [
         {
             "from_state": None,
@@ -879,6 +939,7 @@ def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status:
         state.setups.pop(setup.setup_id, None)
     else:
         state.setups[setup.setup_id] = setup
+        _cap_in_progress(state)
 
 
 def move_setup_to_completed(state: Any, setup: Any) -> None:

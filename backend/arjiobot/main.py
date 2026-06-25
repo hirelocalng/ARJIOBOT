@@ -11,7 +11,7 @@ from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.api.routes.monitoring import resume_monitoring_if_enabled
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
-from arjiobot.setup_tracker.setup_history_store import wipe_setup_history
+from arjiobot.setup_tracker.setup_history_store import load_setup_history_for_display
 
 
 logger = logging.getLogger(__name__)
@@ -24,14 +24,14 @@ def create_app() -> FastAPI:
     # registered, before bootstrap_live_trading_from_env/
     # resume_monitoring_if_enabled (the latter can synchronously resume a
     # polling session right here if monitoring_enabled was persisted from a
-    # previous deploy - that must never get a chance to write a single setup
-    # before this wipe runs). Every deploy starts with zero Setup Radar
-    # history: clears completed_setups/invalidated_setups in memory, clears
-    # the seen-setups dedup cache, and overwrites setup_history_store.json
-    # with the empty fresh-start shape regardless of what it already
-    # contained. Old history from a previous deployment session never loads.
+    # previous deploy - the history must be loaded before that starts so the
+    # UI already shows prior context on the very first request after restart).
+    # Loads completed/invalidated history from disk for UI display; leaves
+    # resolved_swing_keys EMPTY so the pre-funnel staleness filter classifies
+    # each swing fresh on the first poll. Seeds resolved_setup_ids from
+    # loaded history to prevent duplicate writes for the same setup_id.
     # IN PROGRESS (state.setups) is never touched by this.
-    wipe_setup_history(get_state())
+    load_setup_history_for_display(get_state())
     assert_profile_freeze()
     logger.warning(PROFILE_FREEZE_RUNTIME_WARNING)
     app = FastAPI(title="ArjioBot Backend API", version="1.0.0")

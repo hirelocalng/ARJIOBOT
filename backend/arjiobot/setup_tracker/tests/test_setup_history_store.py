@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from arjiobot.live_setup_detection import _filter_resolved_swings, _setup_from_trade, move_setup_to_completed
 from arjiobot.setup_tracker import setup_history_store
-from arjiobot.setup_tracker.setup_models import SetupState, SetupStatus, build_swing_dedup_key
+from arjiobot.setup_tracker.setup_models import SetupDirection, SetupState, SetupStatus, build_swing_dedup_key
 
 
 def _fake_state() -> SimpleNamespace:
@@ -229,3 +229,79 @@ def test_wipe_setup_history_clears_swing_cache_so_previous_session_swings_can_re
     # reaches the detection funnel normally on the next poll.
     swing = SimpleNamespace(symbol=trade.symbol, swing_id="whatever", right_candle=SimpleNamespace(timestamp=trade.created_at))
     assert _filter_resolved_swings(new_session_state, [swing], direction=trade.direction.value) == [swing]
+
+
+# ---------------------------------------------------------------------------
+# load_setup_history_for_display (new startup path - Fix 5)
+# ---------------------------------------------------------------------------
+
+def test_load_setup_history_for_display_populates_lists_and_seeds_setup_ids(monkeypatch, tmp_path) -> None:
+    """Fix 5: load_setup_history_for_display reads the JSON file and populates
+    completed_setups/invalidated_setups for UI display. resolved_setup_ids is
+    seeded (to prevent duplicate writes for the same setup_id on the first
+    poll), but resolved_swing_keys starts EMPTY - the pre-funnel staleness
+    filter handles old swings on the first poll."""
+    _redirect_paths(monkeypatch, tmp_path)
+    # Simulate a previous session that wrote history to disk.
+    prev_state = _fake_state()
+    trade = _make_completed_trade(prev_state, suffix="load1", entry_timestamp="2026-06-24T01:00:00+00:00")
+    move_setup_to_completed(prev_state, trade)
+    assert setup_history_store.STORE_PATH.exists()
+
+    # New session loads history - starts with empty in-memory state.
+    new_state = _fake_state()
+    completed_count, invalidated_count = setup_history_store.load_setup_history_for_display(new_state)
+
+    assert (completed_count, invalidated_count) == (1, 0)
+    assert len(new_state.completed_setups) == 1
+    assert new_state.completed_setups[0].setup_id == trade.setup_id
+    assert new_state.completed_setups[0].symbol == trade.symbol
+    assert new_state.completed_setups[0].direction == SetupDirection.BEARISH
+    # resolved_setup_ids seeded so no duplicate is created for this setup.
+    assert trade.setup_id in new_state.resolved_setup_ids
+    # resolved_swing_keys MUST be empty - staleness filter handles old swings.
+    assert len(new_state.resolved_swing_keys) == 0
+
+
+def test_load_setup_history_for_display_leaves_swing_cache_empty(monkeypatch, tmp_path) -> None:
+    """The swing-level dedup cache must start empty after load so fresh swings
+    are never blocked by prior session keys."""
+    _redirect_paths(monkeypatch, tmp_path)
+    prev_state = _fake_state()
+    for i in range(5):
+        t = _make_completed_trade(prev_state, suffix=f"s{i}", entry_timestamp=f"2026-06-2{i}T00:00:00+00:00")
+        move_setup_to_completed(prev_state, t)
+
+    new_state = _fake_state()
+    setup_history_store.load_setup_history_for_display(new_state)
+
+    assert len(new_state.completed_setups) == 5
+    assert len(new_state.resolved_swing_keys) == 0
+
+
+def test_load_setup_history_for_display_with_no_file_starts_empty(monkeypatch, tmp_path) -> None:
+    """If no JSON file exists yet (fresh deploy) load returns (0, 0) and
+    leaves all state empty."""
+    _redirect_paths(monkeypatch, tmp_path)
+    state = _fake_state()
+    completed_count, invalidated_count = setup_history_store.load_setup_history_for_display(state)
+
+    assert (completed_count, invalidated_count) == (0, 0)
+    assert state.completed_setups == []
+    assert state.invalidated_setups == []
+    assert len(state.resolved_setup_ids) == 0
+    assert len(state.resolved_swing_keys) == 0
+
+
+def test_load_setup_history_for_display_with_corrupt_file_starts_empty(monkeypatch, tmp_path) -> None:
+    """A corrupt or unreadable JSON file must be silently tolerated - the bot
+    starts with empty visible lists rather than crashing at boot."""
+    _redirect_paths(monkeypatch, tmp_path)
+    setup_history_store.STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    setup_history_store.STORE_PATH.write_text("not valid json {{{", encoding="utf-8")
+    state = _fake_state()
+
+    completed_count, invalidated_count = setup_history_store.load_setup_history_for_display(state)
+
+    assert (completed_count, invalidated_count) == (0, 0)
+    assert state.completed_setups == []

@@ -155,7 +155,9 @@ def test_staleness_gate_stays_in_in_progress_for_dwell_then_invalidates_with_sta
     state = _fake_state("BTCUSDT")
     setup = _setup_from_trade(_real_trade("staleness_dwell_1"), state=state, profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8")
     now = datetime.now(timezone.utc)
-    setup = replace(setup, created_at=now, completed_at=now - timedelta(minutes=30))  # already past STALE_ENTRY_READY_MAX_AGE
+    stale_metadata = dict(setup.metadata)
+    stale_metadata["detected_at_wallclock"] = (now - timedelta(minutes=30)).isoformat()
+    setup = replace(setup, created_at=now, completed_at=now - timedelta(minutes=30), metadata=stale_metadata)  # already past STALE_ENTRY_READY_MAX_AGE
     state.setups[setup.setup_id] = setup
     automation = ensure_live_automation_state(state)
 

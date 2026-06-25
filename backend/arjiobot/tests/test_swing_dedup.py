@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from arjiobot.backtesting.historical_replay import load_ohlcv_csv
+import arjiobot.live_setup_detection as live_setup_detection
 from arjiobot.live_setup_detection import (
     _apply_attempt_traces,
     _filter_resolved_swings,
@@ -107,13 +108,14 @@ def test_filter_resolved_swings_blocks_an_already_resolved_swing_key() -> None:
     assert remaining == [fresh_swing]
 
 
-def test_resolved_swing_stays_out_of_in_progress_and_is_not_reprocessed_on_a_later_poll() -> None:
+def test_resolved_swing_stays_out_of_in_progress_and_is_not_reprocessed_on_a_later_poll(monkeypatch) -> None:
     """Fix 1/5 end-to-end, against real strategy data: once a swing resolves
     into invalidated_setups, the exact same swing being presented again on a
     later poll (the live candle buffer is unchanged - nothing new arrived)
     must be blocked by the permanent swing-key cache before the funnel ever
     runs on it again - invalidated_setups/completed_setups must not grow,
     and the swing must never reappear in IN PROGRESS."""
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
     candles_1m = load_ohlcv_csv(DATA_DIR / "ADAUSDT-1m-2026-04.csv", default_symbol="ADAUSDT")
     state = _fake_state("ADAUSDT", candles_1m[:5000])
 
