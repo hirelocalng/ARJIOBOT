@@ -643,9 +643,17 @@ class SwingDetectionEngine:
 
     @staticmethod
     def _log_swing_detected(swing: Swing) -> None:
-        """Emit a structured swing detection log."""
+        """Emit a structured swing detection log.
+
+        DEBUG, not INFO: detect_all_swings() re-scans the entire rolling live
+        candle buffer every poll with no memory of what it already logged, so
+        every already-known historical swing gets rediscovered and re-logged
+        every single poll, for every monitored pair - this is what was
+        flooding Railway's log rate limit (the same pattern already fixed for
+        FVG detection - see fvg.py's detect_fvgs).
+        """
         message = "Swing High detected" if swing.swing_type is SwingType.HIGH else "Swing Low detected"
-        logger.info(
+        logger.debug(
             message,
             extra={
                 "swing_id": swing.swing_id,

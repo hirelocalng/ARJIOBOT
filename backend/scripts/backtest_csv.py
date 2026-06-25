@@ -511,6 +511,14 @@ def _build_strategy_funnel(
     max_leverage = _required_positive_value(max_leverage, "max_leverage")
     swing_by_id = {swing.swing_id: swing for swing in candidate_16m_swing_highs}
     valid_expansions = _profile_valid_expansions(profile=profile, expansions=expansions_16m, swing_by_id=swing_by_id)
+    # expansions_16m is one shared list covering both swing highs and swing lows
+    # (see _research_expansions), and _profile_valid_expansions only checks the
+    # ratio range when require_expansion_c3 is off (e.g. PROFILE_2) - it never
+    # checks direction. Without this filter, opposite-direction expansions
+    # (built from swing lows, for this bearish funnel) pass straight into
+    # valid_expansions, inflating passed_expansion with candidates that were
+    # always going to be silently dropped, uncounted, at "swing is None" below.
+    valid_expansions = tuple(expansion for expansion in valid_expansions if expansion.swing_id in swing_by_id)
     strategy_16m_fvgs = tuple(fvg for fvg in fvg_16m if _fvg_matches_profile_expansion(fvg, valid_expansions, profile))
     fvg_by_expansion = {
         expansion.expansion_id: next(
@@ -520,6 +528,8 @@ def _build_strategy_funnel(
         for expansion in valid_expansions
     }
 
+    no_fvg16 = 0
+    passed_fvg16 = 0
     no_12m = 0
     no_8m = 0
     retrace_expired = 0
@@ -564,7 +574,9 @@ def _build_strategy_funnel(
     for expansion in valid_expansions:
         fvg16 = fvg_by_expansion.get(expansion.expansion_id)
         if fvg16 is None or fvg16.fvg_completion_candle_low is None:
+            no_fvg16 += 1
             continue
+        passed_fvg16 += 1
         swing = swing_by_id.get(expansion.swing_id)
         if swing is None:
             continue
@@ -686,7 +698,14 @@ def _build_strategy_funnel(
         rejected_entry_window_expired += confirmation["rejected_entry_window_expired"]
         entry_ready += confirmation["entry_ready"]
 
-    passed_16m_fvg = len(strategy_16m_fvgs)
+    # Loop-based, not len(strategy_16m_fvgs): that was a count of unique FVG
+    # objects matching ANY valid expansion, which can both undercount (several
+    # expansions legitimately share one FVG) and - before the same-direction
+    # filter above - overcount (cross-direction noise). passed_fvg16 is the
+    # real per-expansion progression count, so passed_8m_fvg below now always
+    # equals retrace_expired + passed_retrace_count, restoring the funnel's
+    # internal accounting invariant.
+    passed_16m_fvg = passed_fvg16
     unaccounted_after_retrace = _unaccounted_after_retrace(
         passed_retrace=passed_retrace_count,
         rejected_close_above_12m_fvg=close_above,
@@ -845,6 +864,14 @@ def _build_bullish_strategy_funnel(
     max_leverage = _required_positive_value(max_leverage, "max_leverage")
     swing_by_id = {swing.swing_id: swing for swing in candidate_16m_swing_lows}
     valid_expansions = _profile_valid_expansions(profile=profile, expansions=expansions_16m, swing_by_id=swing_by_id)
+    # expansions_16m is one shared list covering both swing highs and swing lows
+    # (see _research_expansions), and _profile_valid_expansions only checks the
+    # ratio range when require_expansion_c3 is off (e.g. PROFILE_2) - it never
+    # checks direction. Without this filter, opposite-direction expansions
+    # (built from swing highs, for this bullish funnel) pass straight into
+    # valid_expansions, inflating passed_expansion with candidates that were
+    # always going to be silently dropped, uncounted, at "swing is None" below.
+    valid_expansions = tuple(expansion for expansion in valid_expansions if expansion.swing_id in swing_by_id)
     strategy_16m_fvgs = tuple(fvg for fvg in fvg_16m if _fvg_matches_profile_expansion(fvg, valid_expansions, profile, direction=FVGDirection.BULLISH))
     fvg_by_expansion = {
         expansion.expansion_id: next(
@@ -854,6 +881,8 @@ def _build_bullish_strategy_funnel(
         for expansion in valid_expansions
     }
 
+    no_fvg16 = 0
+    passed_fvg16 = 0
     no_12m = 0
     no_8m = 0
     retrace_expired = 0
@@ -898,7 +927,9 @@ def _build_bullish_strategy_funnel(
     for expansion in valid_expansions:
         fvg16 = fvg_by_expansion.get(expansion.expansion_id)
         if fvg16 is None or fvg16.fvg_completion_candle_high is None:
+            no_fvg16 += 1
             continue
+        passed_fvg16 += 1
         swing = swing_by_id.get(expansion.swing_id)
         if swing is None:
             continue
@@ -1021,7 +1052,10 @@ def _build_bullish_strategy_funnel(
         rejected_entry_window_expired += confirmation["rejected_entry_window_expired"]
         entry_ready += confirmation["entry_ready"]
 
-    passed_16m_fvg = len(strategy_16m_fvgs)
+    # Loop-based, not len(strategy_16m_fvgs) - see the matching comment in
+    # _build_strategy_funnel above; passed_8m_fvg below now always equals
+    # retrace_expired + passed_retrace_count.
+    passed_16m_fvg = passed_fvg16
     unaccounted_after_retrace = _unaccounted_after_retrace(
         passed_retrace=passed_retrace_count,
         rejected_close_above_12m_fvg=close_above,

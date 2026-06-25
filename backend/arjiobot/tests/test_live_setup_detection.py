@@ -129,7 +129,7 @@ def test_bearish_funnel_failure_does_not_block_bullish_detection(monkeypatch) ->
     result = detect_live_setups_for_symbol(state, "ADAUSDT")
 
     assert result["status"] != "ERROR"
-    latest_funnel = state.live_setup_detection["latest_funnel"]
+    latest_funnel = state.live_setup_detection["latest_funnel"]["ADAUSDT"]
     assert "error" in latest_funnel["bearish"]
     assert "error" not in latest_funnel["bullish"]
     assert "passed_expansion" in latest_funnel["bullish"]
@@ -144,7 +144,7 @@ def test_bullish_funnel_failure_does_not_block_bearish_detection(monkeypatch) ->
     result = detect_live_setups_for_symbol(state, "ADAUSDT")
 
     assert result["status"] != "ERROR"
-    latest_funnel = state.live_setup_detection["latest_funnel"]
+    latest_funnel = state.live_setup_detection["latest_funnel"]["ADAUSDT"]
     assert "error" in latest_funnel["bullish"]
     assert "error" not in latest_funnel["bearish"]
     assert "passed_expansion" in latest_funnel["bearish"]

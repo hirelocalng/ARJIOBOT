@@ -234,10 +234,10 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 funnel = builder(**candidate_swings, **shared_funnel_kwargs)
             except Exception as exc:
                 logger.exception("Live %s funnel evaluation for %s failed; other direction is unaffected", direction, symbol)
-                detector_state.setdefault("latest_funnel", {})[direction.lower()] = {"error": str(exc)}
+                detector_state.setdefault("latest_funnel", {}).setdefault(symbol, {})[direction.lower()] = {"error": str(exc)}
                 direction_errors.append(f"{direction}: {exc}")
                 continue
-            detector_state.setdefault("latest_funnel", {})[direction.lower()] = _compact_funnel(funnel, **compact_kwargs)
+            detector_state.setdefault("latest_funnel", {}).setdefault(symbol, {})[direction.lower()] = _compact_funnel(funnel, **compact_kwargs)
             _log_retrace_diagnostics(symbol, funnel, direction=direction)
 
             try:
