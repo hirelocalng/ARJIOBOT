@@ -126,6 +126,13 @@ class FVGDetectionEngine:
         started_at = perf_counter()
         self._index_relationships(swings=swings, expansions=expansions)
         ordered = self._prepare_candles(candles)
+        # TEMP DEBUG: log candle count so FVG_16M_NOT_FOUND diagnosis can correlate
+        if ordered:
+            logger.debug(
+                "[FVG-DETECT] %s %s: %d candles fetched (linked_swings=%d linked_expansions=%d)",
+                ordered[0].symbol, ordered[0].timeframe.label,
+                len(ordered), len(swings), len(expansions),
+            )
         detected: list[FairValueGap] = []
         rejected_count = 0
         for index in range(1, len(ordered) - 1):

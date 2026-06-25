@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import uuid
 from dataclasses import replace
@@ -8,6 +9,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+
+_logger = logging.getLogger(__name__)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -488,6 +491,39 @@ def _writable_report_dir() -> Path:
     raise PermissionError("No writable backtest report directory is available.")
 
 
+def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile):
+    """TEMP DEBUG: log 16M FVG lookup details for every expansion. Remove when bug diagnosed."""
+    fvg_dir = FVGDirection.BEARISH if direction == "BEARISH" else FVGDirection.BULLISH
+    symbol = valid_expansions[0].symbol if valid_expansions else "?"
+    _logger.debug(
+        "[FVG16M-DIAG] %s %s: fvg_16m_total=%d strategy_fvgs=%d valid_expansions=%d",
+        symbol, direction, len(fvg_16m), len(strategy_16m_fvgs), len(valid_expansions),
+    )
+    for exp in valid_expansions:
+        found = fvg_by_expansion.get(exp.expansion_id)
+        exp_ts = exp.timestamp.isoformat()[:19]
+        if found is None:
+            same_dir = [f for f in fvg_16m if f.direction is fvg_dir]
+            window_end = exp.timestamp + exp.timeframe.duration * profile.main_fvg_match_window_candles
+            in_window = [f for f in same_dir if exp.timestamp <= f.timestamp <= window_end]
+            # Sample up to 5 nearest same-direction FVG timestamps for comparison
+            nearby_ts = [f.timestamp.isoformat()[:19] for f in same_dir[-5:]]
+            _logger.debug(
+                "[FVG16M-DIAG] %s %s exp@%s mode=%s win_candles=%s: NOT_FOUND - "
+                "%d %s_fvgs total, %d in_window=[%s..%s]. Nearest %s_fvg ts: %s",
+                symbol, direction, exp_ts,
+                profile.main_fvg_match_mode, profile.main_fvg_match_window_candles,
+                len(same_dir), direction.lower(), len(in_window),
+                exp_ts, window_end.isoformat()[:19],
+                direction.lower(), nearby_ts,
+            )
+        else:
+            _logger.debug(
+                "[FVG16M-DIAG] %s %s exp@%s: FOUND fvg_id=%s fvg_ts=%s",
+                symbol, direction, exp_ts, found.fvg_id, found.timestamp.isoformat()[:19],
+            )
+
+
 def _build_strategy_funnel(
     *,
     profile: StrategyProfile,
@@ -527,6 +563,8 @@ def _build_strategy_funnel(
         )
         for expansion in valid_expansions
     }
+    # TEMP DEBUG: diagnose FVG_16M_NOT_FOUND — remove when bug is identified
+    _log_fvg16m_diagnostics("BEARISH", valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile)
 
     no_fvg16 = 0
     passed_fvg16 = 0
@@ -880,6 +918,8 @@ def _build_bullish_strategy_funnel(
         )
         for expansion in valid_expansions
     }
+    # TEMP DEBUG: diagnose FVG_16M_NOT_FOUND — remove when bug is identified
+    _log_fvg16m_diagnostics("BULLISH", valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile)
 
     no_fvg16 = 0
     passed_fvg16 = 0
@@ -1247,6 +1287,13 @@ def _attempt_traces_for_direction(
         fvg16 = fvg_by_expansion.get(expansion.expansion_id)
         completion_candle = None if fvg16 is None else (fvg16.fvg_completion_candle_high if is_bullish else fvg16.fvg_completion_candle_low)
         if fvg16 is None or completion_candle is None:
+            _logger.debug(
+                "[FVG16M-TRACE] %s %s swing=%s exp=%s@%s: FVG_16M_NOT_FOUND "
+                "(fvg16=%s completion_candle=%s)",
+                swing.symbol, direction, swing.swing_id,
+                expansion.expansion_id, expansion.timestamp.isoformat()[:19],
+                getattr(fvg16, "fvg_id", None), completion_candle,
+            )
             trace["invalidation_reason"] = "FVG_16M_NOT_FOUND"
             trace["is_terminal"] = True
             traces.append(trace)
