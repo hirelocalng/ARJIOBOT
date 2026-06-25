@@ -550,6 +550,6 @@
     "arjiobot/setup_tracker/setup_invalidation.py": "2b3c5e5d23fa7cb4cfb28fefec96b8dd391340ea60e89fb5fa1552a0b5b7fd2b",
     "arjiobot/strategy/strategy_engine.py": "269a960d6d62a511ad45cadb9869a13cb13ea3ca7d6095f0ff41c09bc163faed",
     "arjiobot/risk/rr_profiles.py": "34d53ddce0b0acfb6cd517f8dbb3ae0c9843eb7d84f773c159021c9b7d3d33b2",
-    "scripts/backtest_csv.py": "4f8674b80a9cf9f390ac45fc8fb1ded5f56e601ef7435ef9f852b188094e9cf5"
+    "scripts/backtest_csv.py": "06bffd1bb2a3c9acc49891ae5682be249debf36baa6815638cf8fde8e00a343a"
   }
 }

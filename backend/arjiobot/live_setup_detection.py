@@ -144,6 +144,22 @@ def is_fresh_swing(swing_timestamp: datetime, now: datetime | None = None) -> bo
     return _swing_age_minutes(swing_timestamp, now) <= STALENESS_WINDOW_MINUTES
 
 
+def _active_setup_exists_for_swing(state: Any, *, symbol: str, direction: str | SetupDirection, swing_timestamp: datetime, swing_id: str | None = None) -> bool:
+    setup_direction = direction if isinstance(direction, SetupDirection) else SetupDirection[str(direction).upper()]
+    expected_id = build_setup_id(symbol=symbol, direction=setup_direction, created_at=swing_timestamp, htf_fvg_id=swing_id or "")
+    if expected_id in state.setups:
+        return True
+    for setup in state.setups.values():
+        if (
+            setup.symbol == symbol
+            and setup.direction is setup_direction
+            and _as_utc(setup.created_at) == _as_utc(swing_timestamp)
+            and (swing_id is None or setup.swing_16m_id == swing_id)
+        ):
+            return True
+    return False
+
+
 def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: datetime) -> list[Any]:
     """Pre-funnel staleness gate: drop any swing whose right-candle timestamp
     is older than STALENESS_WINDOW_MINUTES, permanently recording its dedup
@@ -156,12 +172,57 @@ def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: 
         ts = swing.right_candle.timestamp
         if is_fresh_swing(ts, now):
             result.append(swing)
+        elif _active_setup_exists_for_swing(state, symbol=swing.symbol, direction=direction, swing_timestamp=ts, swing_id=swing.swing_id):
+            result.append(swing)
         else:
             age_min = _swing_age_minutes(ts, now)
             key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
             state.resolved_swing_keys.add(key)
             logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", swing.symbol, _as_utc(ts).isoformat(), age_min)
     return result
+
+
+def _candidate_swing_filter_diagnostics(
+    state: Any,
+    swings: list[Any],
+    *,
+    direction: str,
+    now: datetime,
+) -> tuple[list[Any], dict[str, object]]:
+    resolved_filtered = 0
+    stale_filtered = 0
+    fresh: list[Any] = []
+    newest_ts: datetime | None = None
+    newest_age: float | None = None
+    for swing in swings:
+        ts = _as_utc(swing.right_candle.timestamp)
+        age_min = _swing_age_minutes(ts, now)
+        if newest_ts is None or ts > newest_ts:
+            newest_ts = ts
+            newest_age = age_min
+        key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
+        if key in state.resolved_swing_keys:
+            resolved_filtered += 1
+            logger.debug("Swing %s (%s) already resolved; skipping re-evaluation this poll (key=%s)", swing.swing_id, direction, key)
+            continue
+        if not is_fresh_swing(ts, now):
+            if _active_setup_exists_for_swing(state, symbol=swing.symbol, direction=direction, swing_timestamp=ts, swing_id=swing.swing_id):
+                fresh.append(swing)
+                continue
+            stale_filtered += 1
+            state.resolved_swing_keys.add(key)
+            logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", swing.symbol, ts.isoformat(), age_min)
+            continue
+        fresh.append(swing)
+    return fresh, {
+        "raw_candidate_swings": len(swings),
+        "fresh_candidate_swings": len(fresh),
+        "resolved_filtered_swings": resolved_filtered,
+        "stale_filtered_swings": stale_filtered,
+        "newest_raw_swing_timestamp": newest_ts.isoformat() if newest_ts is not None else None,
+        "newest_raw_swing_age_minutes": round(newest_age, 1) if newest_age is not None else None,
+        "staleness_window_minutes": STALENESS_WINDOW_MINUTES,
+    }
 
 
 def _cap_in_progress(state: Any) -> None:
@@ -225,23 +286,17 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         # here is sufficient to stop a resolved swing from being
         # re-evaluated by either path at all.
         now = datetime.now(timezone.utc)
-        bearish_swing_highs = _filter_stale_swings(
+        raw_bearish_swing_highs = [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH]
+        raw_bullish_swing_lows = [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW]
+        bearish_swing_highs, bearish_filter_diagnostics = _candidate_swing_filter_diagnostics(
             state,
-            _filter_resolved_swings(
-                state,
-                [swing for swing in swing_results.swing_highs if swing.swing_type is SwingType.HIGH],
-                direction="BEARISH",
-            ),
+            raw_bearish_swing_highs,
             direction="BEARISH",
             now=now,
         )
-        bullish_swing_lows = _filter_stale_swings(
+        bullish_swing_lows, bullish_filter_diagnostics = _candidate_swing_filter_diagnostics(
             state,
-            _filter_resolved_swings(
-                state,
-                [swing for swing in swing_results.swing_lows if swing.swing_type is SwingType.LOW],
-                direction="BULLISH",
-            ),
+            raw_bullish_swing_lows,
             direction="BULLISH",
             now=now,
         )
@@ -287,8 +342,8 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         waiting_reasons: list[str] = []
         direction_errors: list[str] = []
         for direction, builder, candidate_swings, compact_kwargs in (
-            ("BEARISH", runner._build_strategy_funnel, {"candidate_16m_swing_highs": bearish_swing_highs}, {}),
-            ("BULLISH", runner._build_bullish_strategy_funnel, {"candidate_16m_swing_lows": bullish_swing_lows}, {"direction": "BULLISH"}),
+            ("BEARISH", runner._build_strategy_funnel, {"candidate_16m_swing_highs": bearish_swing_highs}, {"filter_diagnostics": bearish_filter_diagnostics}),
+            ("BULLISH", runner._build_bullish_strategy_funnel, {"candidate_16m_swing_lows": bullish_swing_lows}, {"direction": "BULLISH", "filter_diagnostics": bullish_filter_diagnostics}),
         ):
             try:
                 funnel = builder(**candidate_swings, **shared_funnel_kwargs)
@@ -671,7 +726,7 @@ def _apply_one_attempt_trace(
     swing_timestamp = datetime.fromisoformat(str(trace["swing_timestamp"]).replace("Z", "+00:00"))
     swing_id = str(trace["swing_16m_id"])
     setup_id = build_setup_id(symbol=str(trace["symbol"]), direction=direction, created_at=swing_timestamp, htf_fvg_id=swing_id)
-    if not is_fresh_swing(swing_timestamp):
+    if not is_fresh_swing(swing_timestamp) and setup_id not in state.setups:
         age_min = _swing_age_minutes(swing_timestamp, datetime.now(timezone.utc))
         state.resolved_swing_keys.add(build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp))
         logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", str(trace["symbol"]), _as_utc(swing_timestamp).isoformat(), age_min)
@@ -1305,11 +1360,18 @@ def _trade_key(trade: dict[str, object]) -> str:
     )
 
 
-def _compact_funnel(funnel: dict[str, object], *, direction: str = "BEARISH") -> dict[str, object]:
+def _compact_funnel(
+    funnel: dict[str, object],
+    *,
+    direction: str = "BEARISH",
+    filter_diagnostics: dict[str, object] | None = None,
+) -> dict[str, object]:
     keys = ("candidate_16m_swing_highs", "passed_expansion", "passed_retrace", "entry_ready", "trades", "risk_rejected_count")
     compact = {key: funnel.get(key) for key in keys if key in funnel}
     if direction == "BULLISH" and "candidate_16m_swing_highs" in compact:
         compact["candidate_16m_swing_lows"] = compact.pop("candidate_16m_swing_highs")
+    if filter_diagnostics:
+        compact["candidate_filter"] = dict(filter_diagnostics)
     return compact
 
 

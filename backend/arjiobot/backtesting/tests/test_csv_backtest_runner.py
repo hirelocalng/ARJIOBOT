@@ -24,6 +24,17 @@ def _load_runner():
     return module
 
 
+def _load_backend_runner():
+    backend_root = Path(__file__).resolve().parents[3]
+    script_path = backend_root / "scripts" / "backtest_csv.py"
+    spec = importlib.util.spec_from_file_location("arjiobot_backend_backtest_csv_runner", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load backend/scripts/backtest_csv.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _risk_kwargs() -> dict[str, Decimal]:
     return {"starting_balance": Decimal("10000"), "max_leverage": Decimal("100")}
 
@@ -633,6 +644,55 @@ def test_profile_f_16m_fvg_must_be_formed_by_same_expansion_c3() -> None:
     assert runner._one_fvg_matches_expansion(unrelated, expansion, runner.PROFILE_F_VOLUME) is False
 
 
+def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_pending",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+    )
+
+    pending_trace = runner._attempt_traces_for_direction(
+        direction="BEARISH",
+        candidate_swings=(swing,),
+        swing_by_id={swing.swing_id: swing},
+        valid_expansions=(expansion,),
+        fvg_by_expansion={expansion.expansion_id: None},
+        fvg_12m=(),
+        fvg_8m=(),
+        candles_8m=(),
+        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(64)),
+        profile=runner.PROFILE_2,
+    )[0]
+
+    assert pending_trace["stage"] == "EXPANSION_16M_CONFIRMED"
+    assert pending_trace["progress_percent"] == 35.0
+    assert pending_trace["invalidation_reason"] is None
+    assert pending_trace["is_terminal"] is False
+
+    expired_trace = runner._attempt_traces_for_direction(
+        direction="BEARISH",
+        candidate_swings=(swing,),
+        swing_by_id={swing.swing_id: swing},
+        valid_expansions=(expansion,),
+        fvg_by_expansion={expansion.expansion_id: None},
+        fvg_12m=(),
+        fvg_8m=(),
+        candles_8m=(),
+        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(81)),
+        profile=runner.PROFILE_2,
+    )[0]
+
+    assert expired_trace["stage"] == "EXPANSION_16M_CONFIRMED"
+    assert expired_trace["progress_percent"] == 35.0
+    assert expired_trace["invalidation_reason"] == "FVG_16M_NOT_FOUND"
+    assert expired_trace["is_terminal"] is True
+
+
 def test_related_12m_and_8m_fvgs_must_be_same_direction_same_leg() -> None:
     runner = _load_runner()
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -1223,4 +1283,3 @@ def _legacy_assert_confirmation_funnel_balances(funnel: dict[str, int]) -> None:
         - funnel["rejected_no_return_to_second_1m_fvg"]
         - funnel["rejected_entry_window_expired"]
     ) == funnel["entry_ready"]
-

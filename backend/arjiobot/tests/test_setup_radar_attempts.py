@@ -25,6 +25,7 @@ from arjiobot.live_setup_detection import (
     MAX_IN_PROGRESS_SETUPS,
     RESTART_CATCHUP_WINDOW_SECONDS,
     _apply_attempt_traces,
+    _candidate_swing_filter_diagnostics,
     _fresh_trade_candidate,
     _record_stale_skips_for_radar,
     _setup_from_trade,
@@ -483,6 +484,51 @@ def test_stale_attempt_trace_is_cached_and_never_enters_setup_radar() -> None:
     assert state.completed_setups == []
     assert state.invalidated_setups == []
     assert len(state.resolved_swing_keys) == 1
+
+
+def test_candidate_swing_filter_diagnostics_explain_zero_funnel_candidates() -> None:
+    state = _fake_state("ADAUSDT", ())
+    now = datetime.now(timezone.utc)
+    stale_swing = SimpleNamespace(
+        symbol="ADAUSDT",
+        swing_id="swg_stale_diag",
+        right_candle=SimpleNamespace(timestamp=now - timedelta(minutes=25)),
+    )
+
+    fresh, diagnostics = _candidate_swing_filter_diagnostics(state, [stale_swing], direction="BEARISH", now=now)
+
+    assert fresh == []
+    assert diagnostics["raw_candidate_swings"] == 1
+    assert diagnostics["fresh_candidate_swings"] == 0
+    assert diagnostics["stale_filtered_swings"] == 1
+    assert diagnostics["resolved_filtered_swings"] == 0
+    assert diagnostics["newest_raw_swing_age_minutes"] == 25.0
+
+
+def test_stale_filter_keeps_already_active_setup_evaluating(monkeypatch) -> None:
+    state = _fake_state("ADAUSDT", ())
+    swing_timestamp = datetime.now(timezone.utc) - timedelta(minutes=40)
+    trace = {
+        **_swing_trace("swing_active_1", stage="EXPANSION_16M_CONFIRMED", progress_percent=35.0),
+        "swing_timestamp": swing_timestamp.isoformat(),
+    }
+
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 999999)
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    assert state.setups, "expected the old trace to be seeded as an active in-progress setup"
+
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 24)
+    swing = SimpleNamespace(
+        symbol="ADAUSDT",
+        swing_id="swing_active_1",
+        right_candle=SimpleNamespace(timestamp=swing_timestamp),
+    )
+    fresh, diagnostics = _candidate_swing_filter_diagnostics(state, [swing], direction="BEARISH", now=datetime.now(timezone.utc))
+
+    assert fresh == [swing]
+    assert diagnostics["fresh_candidate_swings"] == 1
+    assert diagnostics["stale_filtered_swings"] == 0
+    assert state.resolved_swing_keys == set()
 
 
 def test_stale_skip_is_surfaced_on_the_matching_completed_setup_in_setup_radar() -> None:

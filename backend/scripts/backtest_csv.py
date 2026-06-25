@@ -491,19 +491,28 @@ def _writable_report_dir() -> Path:
     raise PermissionError("No writable backtest report directory is available.")
 
 
-def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile):
+def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile, *, source_candle_count: int | None = None):
     """TEMP DEBUG: log 16M FVG lookup details for every expansion. Remove when bug diagnosed."""
     fvg_dir = FVGDirection.BEARISH if direction == "BEARISH" else FVGDirection.BULLISH
     symbol = valid_expansions[0].symbol if valid_expansions else "?"
+    same_dir = [f for f in fvg_16m if f.direction is fvg_dir]
     _logger.debug(
-        "[FVG16M-DIAG] %s %s: fvg_16m_total=%d strategy_fvgs=%d valid_expansions=%d",
-        symbol, direction, len(fvg_16m), len(strategy_16m_fvgs), len(valid_expansions),
+        "[FVG16M-DIAG] %s %s: source_1m_candles=%s fvg_timeframe=16M fvg_16m_total=%d "
+        "direction_matched_candidates=%d strategy_fvgs=%d valid_expansions=%d mode=%s win_candles=%s",
+        symbol,
+        direction,
+        source_candle_count if source_candle_count is not None else "UNKNOWN",
+        len(fvg_16m),
+        len(same_dir),
+        len(strategy_16m_fvgs),
+        len(valid_expansions),
+        profile.main_fvg_match_mode,
+        profile.main_fvg_match_window_candles,
     )
     for exp in valid_expansions:
         found = fvg_by_expansion.get(exp.expansion_id)
         exp_ts = exp.timestamp.isoformat()[:19]
         if found is None:
-            same_dir = [f for f in fvg_16m if f.direction is fvg_dir]
             window_end = exp.timestamp + exp.timeframe.duration * profile.main_fvg_match_window_candles
             in_window = [f for f in same_dir if exp.timestamp <= f.timestamp <= window_end]
             # Sample up to 5 nearest same-direction FVG timestamps for comparison
@@ -517,6 +526,22 @@ def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_1
                 exp_ts, window_end.isoformat()[:19],
                 direction.lower(), nearby_ts,
             )
+            for fvg in same_dir:
+                _logger.debug(
+                    "[FVG16M-DIAG] %s %s exp=%s exp_ts=%s candidate=%s fvg_ts=%s c2=%s c3=%s "
+                    "related_exp=%s related_swing=%s verdict=%s",
+                    symbol,
+                    direction,
+                    exp.expansion_id,
+                    exp_ts,
+                    fvg.fvg_id,
+                    fvg.timestamp.isoformat()[:19],
+                    fvg.c2_timestamp.isoformat()[:19],
+                    fvg.c3_timestamp.isoformat()[:19],
+                    fvg.related_expansion_id,
+                    fvg.related_swing_id,
+                    _fvg_expansion_rejection_reason(fvg, exp, profile, direction=fvg_dir),
+                )
         else:
             _logger.debug(
                 "[FVG16M-DIAG] %s %s exp@%s: FOUND fvg_id=%s fvg_ts=%s",
@@ -564,7 +589,7 @@ def _build_strategy_funnel(
         for expansion in valid_expansions
     }
     # TEMP DEBUG: diagnose FVG_16M_NOT_FOUND — remove when bug is identified
-    _log_fvg16m_diagnostics("BEARISH", valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile)
+    _log_fvg16m_diagnostics("BEARISH", valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile, source_candle_count=len(candles_1m))
 
     no_fvg16 = 0
     passed_fvg16 = 0
@@ -919,7 +944,7 @@ def _build_bullish_strategy_funnel(
         for expansion in valid_expansions
     }
     # TEMP DEBUG: diagnose FVG_16M_NOT_FOUND — remove when bug is identified
-    _log_fvg16m_diagnostics("BULLISH", valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile)
+    _log_fvg16m_diagnostics("BULLISH", valid_expansions, fvg_by_expansion, fvg_16m, strategy_16m_fvgs, profile, source_candle_count=len(candles_1m))
 
     no_fvg16 = 0
     passed_fvg16 = 0
@@ -1287,6 +1312,16 @@ def _attempt_traces_for_direction(
         fvg16 = fvg_by_expansion.get(expansion.expansion_id)
         completion_candle = None if fvg16 is None else (fvg16.fvg_completion_candle_high if is_bullish else fvg16.fvg_completion_candle_low)
         if fvg16 is None or completion_candle is None:
+            if _main_fvg_lookup_still_open(expansion, profile, candles_1m):
+                _logger.debug(
+                    "[FVG16M-TRACE] %s %s swing=%s exp=%s@%s: FVG_16M_PENDING "
+                    "(fvg16=%s completion_candle=%s)",
+                    swing.symbol, direction, swing.swing_id,
+                    expansion.expansion_id, expansion.timestamp.isoformat()[:19],
+                    getattr(fvg16, "fvg_id", None), completion_candle,
+                )
+                traces.append(trace)
+                continue
             _logger.debug(
                 "[FVG16M-TRACE] %s %s swing=%s exp=%s@%s: FVG_16M_NOT_FOUND "
                 "(fvg16=%s completion_candle=%s)",
@@ -2753,6 +2788,45 @@ def _one_fvg_matches_expansion(fvg: FairValueGap, expansion, profile: StrategyPr
         return False
     expected_confirmation_candle = expansion.timestamp + expansion.timeframe.duration * (profile.fvg_delay_16m_candles + 1)
     return fvg.c3_timestamp == expected_confirmation_candle
+
+
+def _main_fvg_lookup_still_open(expansion, profile: StrategyProfile, candles_1m) -> bool:
+    """Return True while a missing main-timeframe FVG is not knowable yet.
+
+    The 16M FVG matcher keys on an FVG's C2 timestamp, but the FVG itself is
+    only confirmed after its C3 candle closes. Live polling can therefore see
+    a valid swing/expansion before the final possible C3 candle in the allowed
+    match window exists. That state is pending, not FVG_16M_NOT_FOUND.
+    """
+    if not candles_1m:
+        return False
+    if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
+        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
+    else:
+        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.fvg_delay_16m_candles
+    required_c3_close = last_possible_c2 + expansion.timeframe.duration * 2
+    latest_source_close = max(candle.end_timestamp for candle in candles_1m)
+    return latest_source_close < required_c3_close
+
+
+def _fvg_expansion_rejection_reason(fvg: FairValueGap, expansion, profile: StrategyProfile, direction: FVGDirection = FVGDirection.BEARISH) -> str:
+    if fvg.direction is not direction:
+        return f"REJECT_DIRECTION expected={direction.value} actual={fvg.direction.value}"
+    if fvg.related_expansion_id and fvg.related_expansion_id != expansion.expansion_id:
+        return f"REJECT_RELATED_EXPANSION expected={expansion.expansion_id} actual={fvg.related_expansion_id}"
+    if fvg.related_swing_id and fvg.related_swing_id != expansion.swing_id:
+        return f"REJECT_RELATED_SWING expected={expansion.swing_id} actual={fvg.related_swing_id}"
+    if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
+        window_end = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
+        if not (expansion.timestamp <= fvg.timestamp <= window_end):
+            return f"REJECT_TIME_WINDOW fvg_ts={fvg.timestamp.isoformat()} window={expansion.timestamp.isoformat()}..{window_end.isoformat()}"
+        return "MATCH"
+    if fvg.c2_timestamp != expansion.timestamp:
+        return f"REJECT_C2_TIMESTAMP expected={expansion.timestamp.isoformat()} actual={fvg.c2_timestamp.isoformat()}"
+    expected_confirmation_candle = expansion.timestamp + expansion.timeframe.duration * (profile.fvg_delay_16m_candles + 1)
+    if fvg.c3_timestamp != expected_confirmation_candle:
+        return f"REJECT_C3_TIMESTAMP expected={expected_confirmation_candle.isoformat()} actual={fvg.c3_timestamp.isoformat()}"
+    return "MATCH"
 
 
 def _second_swing_research_metrics(candidate_swings, expansions, profile: StrategyProfile) -> dict[str, int]:
