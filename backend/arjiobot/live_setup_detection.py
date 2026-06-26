@@ -60,7 +60,10 @@ STALENESS_WINDOW_MINUTES = 60
 # cap should never fire in practice - it is a backstop, not a design knob.
 MAX_IN_PROGRESS_SETUPS = 20
 
-FVG_SCAN_MIN_HTF_CANDLES = 30
+# Minimum expected HTF candle count from 1000 1M candles (used only for the
+# under-synthesis warning below — NOT as a scan-limit; all synthesized candles
+# are always scanned).
+FVG_SCAN_MIN_HTF_CANDLES = {16: 62, 12: 83, 8: 125}
 
 RETRYABLE_TIMING_INVALIDATIONS = {
     InvalidationReason.FVG_16M_NOT_FOUND,
@@ -372,11 +375,33 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             if minutes == 1:
                 continue
             available_candles = profiles[minutes]
-            scan_candles = available_candles[-FVG_SCAN_MIN_HTF_CANDLES:]
+            # Scan ALL synthesized HTF candles. The previous [-30:] slice was silently
+            # truncating the scan window: if 1M data gaps caused build_timeframe_profile
+            # to skip HTF windows, the effective candle count could drop well below 30,
+            # and even with 62+ candles the slice excluded earlier FVG windows that the
+            # expansion matcher still needs (expansion.timestamp <= fvg.c2_timestamp <=
+            # window_end). Scanning all candles is cheap (O(n), deduplicated by the
+            # persistent FVGDetectionEngine store) and eliminates the truncation risk.
+            scan_candles = available_candles
+            _min_expected = FVG_SCAN_MIN_HTF_CANDLES.get(minutes)
+            if _min_expected is not None and len(available_candles) < _min_expected:
+                logger.warning(
+                    "FVG_DEBUG [%s] [%sM] htf_count=%d BELOW expected minimum %d"
+                    " — synthesis under-producing (1m_count=%d); check 1M data gaps",
+                    symbol, minutes, len(available_candles), _min_expected, len(candles),
+                )
             result = _fvg_engine_for(state, symbol, minutes).detect_fvgs(
                 scan_candles,
                 swings=swing_results.all_swings if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
                 expansions=expansions_main if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
+            )
+            _last5 = [
+                {"o": str(c.open), "h": str(c.high), "l": str(c.low), "c": str(c.close)}
+                for c in scan_candles[-5:]
+            ]
+            logger.info(
+                "FVG_DEBUG [%s] [%sM] 1m_count=%d htf_count=%d last5=%s gap_found=%s",
+                symbol, minutes, len(candles), len(available_candles), _last5, len(result.fvgs) > 0,
             )
             logger.info(
                 "[FVG_SCAN] pair=%s timeframe=%s candles_available=%d scanned=%d found=%d",
