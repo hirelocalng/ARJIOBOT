@@ -473,7 +473,7 @@ class BitgetEnvironmentService:
         self,
         symbol: str,
         granularity: str = "1m",
-        total: int = 44_640,
+        total: int = 2_000,
         product_type: str = DEFAULT_PRODUCT_TYPE,
         *,
         page_size: int = 1000,
@@ -678,7 +678,7 @@ class BitgetEnvironmentService:
         max_leverage = _positive_decimal(payload.get("max_allowed_leverage") or payload.get("selected_max_leverage"), "selected_max_leverage")
         contract = self.last_contracts.get(symbol) or self.fetch_contract_config(symbol)
         ticker = self.last_tickers.get(symbol) or self.fetch_ticker(symbol)
-        candles = self.last_candles.get(f"{symbol}:1m") or self.fetch_candles(symbol, "1m", 100)
+        candles = self.last_candles.get(f"{symbol}:1m") or self.fetch_candles(symbol, "1m", 2000)
         if ticker.get("last_price") in {"N/A", ""}:
             raise EnvironmentLockError("live ticker is missing")
         if candles.get("candles_loaded") != "YES":

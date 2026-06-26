@@ -60,6 +60,8 @@ STALENESS_WINDOW_MINUTES = 60
 # cap should never fire in practice - it is a backstop, not a design knob.
 MAX_IN_PROGRESS_SETUPS = 20
 
+FVG_SCAN_MIN_HTF_CANDLES = 30
+
 RETRYABLE_TIMING_INVALIDATIONS = {
     InvalidationReason.FVG_16M_NOT_FOUND,
     InvalidationReason.FVG_12M_NOT_FOUND,
@@ -365,15 +367,26 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             now=now,
         )
         expansions_main = runner._research_expansions(swing_results.all_swings)
-        fvg_results = {
-            minutes: _fvg_engine_for(state, symbol, minutes).detect_fvgs(
-                profiles[minutes],
+        fvg_results = {}
+        for minutes in required_minutes:
+            if minutes == 1:
+                continue
+            available_candles = profiles[minutes]
+            scan_candles = available_candles[-FVG_SCAN_MIN_HTF_CANDLES:]
+            result = _fvg_engine_for(state, symbol, minutes).detect_fvgs(
+                scan_candles,
                 swings=swing_results.all_swings if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
                 expansions=expansions_main if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
             )
-            for minutes in required_minutes
-            if minutes != 1
-        }
+            logger.info(
+                "[FVG_SCAN] pair=%s timeframe=%s candles_available=%d scanned=%d found=%d",
+                symbol,
+                f"{minutes}M",
+                len(available_candles),
+                len(scan_candles),
+                len(result.fvgs),
+            )
+            fvg_results[minutes] = result
         shared_funnel_kwargs = dict(
             profile=profile,
             timeframe_profile=timeframe_profile,
@@ -525,11 +538,15 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
 
 def candles_from_bitget_rows(symbol: str, rows: tuple[tuple[str, ...], ...]) -> tuple[Candle, ...]:
     candles: list[Candle] = []
+    now = datetime.now(timezone.utc)
+    parsed_timestamps = [_parse_bitget_timestamp(row[0]) for row in rows if len(row) >= 6]
+    latest_timestamp = max(parsed_timestamps, default=None)
     for row in rows:
         if len(row) < 6:
             continue
         timestamp = _parse_bitget_timestamp(row[0])
-        if timestamp + Timeframe(1).duration > datetime.now(timezone.utc):
+        is_incomplete_latest = latest_timestamp is not None and timestamp == latest_timestamp and timestamp <= now < timestamp + Timeframe(1).duration
+        if timestamp + Timeframe(1).duration > now and not is_incomplete_latest:
             continue
         candles.append(
             Candle(
@@ -542,6 +559,7 @@ def candles_from_bitget_rows(symbol: str, rows: tuple[tuple[str, ...], ...]) -> 
                 close=Decimal(row[4]),
                 volume=Decimal(row[5]),
                 status=CandleStatus.CLOSED,
+                metadata={"source_status": "INCOMPLETE_LATEST_1M"} if is_incomplete_latest else {},
             )
         )
     return order_historical_candles(candles)

@@ -322,7 +322,7 @@ def _refresh_due_market_polls(settings: dict[str, object]) -> None:
         try:
             contract = state.bitget_environment.fetch_contract_config(symbol)
             ticker = state.bitget_environment.fetch_ticker(symbol)
-            candles = state.bitget_environment.fetch_candles(symbol, "1m", 100)
+            candles = state.bitget_environment.fetch_candles(symbol, "1m", 2000)
             completed = _now()
             poll.update(
                 {

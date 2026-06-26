@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 MIN_POLL_INTERVAL_SECONDS = 5
-LIVE_CANDLE_HISTORY_LIMIT = 44_640
+LIVE_CANDLE_HISTORY_LIMIT = 2_000
 DERIVED_CHART_TIMEFRAMES_MINUTES: tuple[int, ...] = (60, 30, 16, 12, 8)
 
 
@@ -229,13 +229,13 @@ def _run_poll_cycle(state, session_id: str) -> None:
             ticker = state.bitget_environment.fetch_ticker(symbol)
             existing_candle_count = len(state.live_candles.get(symbol, ()))
             if existing_candle_count < LIVE_CANDLE_HISTORY_LIMIT:
-                # Cold start for this symbol: a single fetch_candles call caps at ~1000
-                # rows and can never reach the full buffer on its own, so page backward
-                # once to bootstrap the full lookback before falling back to the cheap
-                # latest-1000 fetch on every later cycle (see backfill_candles).
+                # Cold start for this symbol: page backward to bootstrap the
+                # 2,000-candle rolling lookback. This is enough to synthesize
+                # 30+ closed 16M/12M/8M candles while avoiding the old 31-day
+                # backlog and its polling cost.
                 candles = state.bitget_environment.backfill_candles(symbol, "1m", total=LIVE_CANDLE_HISTORY_LIMIT)
             else:
-                candles = state.bitget_environment.fetch_candles(symbol, "1m", 1000)
+                candles = state.bitget_environment.fetch_candles(symbol, "1m", LIVE_CANDLE_HISTORY_LIMIT)
             rows = _normalize_candle_rows(candles.get("rows", ()))
             fresh_candles = candles_from_bitget_rows(symbol, rows)
             state.live_candles[symbol] = _merge_live_candles(state.live_candles.get(symbol, ()), fresh_candles)
@@ -349,7 +349,20 @@ def _derived_timeframe_candles(candles_1m: tuple[Candle, ...]) -> dict[int, tupl
     timeframes its active timeframe_profile_id specifies (see live_setup_detection.py);
     this does not change strategy behavior.
     """
-    return {minutes: build_timeframe_profile(candles_1m, minutes) for minutes in DERIVED_CHART_TIMEFRAMES_MINUTES}
+    profiles = {minutes: build_timeframe_profile(candles_1m, minutes) for minutes in DERIVED_CHART_TIMEFRAMES_MINUTES}
+    if candles_1m:
+        logger.info(
+            "[HTF_SYNTHESIS] source_1m=%d latest_1m=%s 16M=%d 12M=%d 8M=%d min30_16M=%s min30_12M=%s min30_8M=%s",
+            len(candles_1m),
+            candles_1m[-1].timestamp.isoformat(),
+            len(profiles.get(16, ())),
+            len(profiles.get(12, ())),
+            len(profiles.get(8, ())),
+            len(profiles.get(16, ())) >= 30,
+            len(profiles.get(12, ())) >= 30,
+            len(profiles.get(8, ())) >= 30,
+        )
+    return profiles
 
 
 def _normalize_candle_rows(rows: object) -> tuple[tuple[str, ...], ...]:

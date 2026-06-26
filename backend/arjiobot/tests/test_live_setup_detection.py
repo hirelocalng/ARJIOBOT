@@ -79,6 +79,21 @@ def test_bitget_rows_are_normalized_to_closed_one_minute_candles() -> None:
     assert candles[1].close == 12
 
 
+def test_bitget_rows_keep_latest_incomplete_one_minute_candle() -> None:
+    current = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    closed = current - timedelta(minutes=1)
+    rows = (
+        (str(int(closed.timestamp() * 1000)), "10", "12", "9", "11", "100"),
+        (str(int(current.timestamp() * 1000)), "11", "13", "10", "12", "110"),
+    )
+
+    candles = candles_from_bitget_rows("ETHUSDT", rows)
+
+    assert len(candles) == 2
+    assert candles[-1].timestamp == current
+    assert candles[-1].metadata["source_status"] == "INCOMPLETE_LATEST_1M"
+
+
 def test_live_detector_loads_real_profile_evaluator() -> None:
     runner = _runner()
 
