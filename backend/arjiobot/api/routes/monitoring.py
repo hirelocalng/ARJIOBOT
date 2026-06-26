@@ -14,6 +14,7 @@ from arjiobot.api.errors import api_error
 from arjiobot.api.schemas.common import ok
 from arjiobot.backtesting.historical_replay import build_timeframe_profile
 from arjiobot.exchange.account_vault import CredentialVaultError, decrypt_credentials
+from arjiobot.exchange.bitget_environment import BITGET_CANDLE_REQUEST_LIMIT
 from arjiobot.live_automation import run_live_automation_once
 from arjiobot.live_setup_detection import candles_from_bitget_rows, detect_live_setups_for_symbol
 from arjiobot.market_data.candle_models import Candle
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
 MIN_POLL_INTERVAL_SECONDS = 5
 LIVE_CANDLE_HISTORY_LIMIT = 2_000
+LIVE_CANDLE_FETCH_LIMIT = BITGET_CANDLE_REQUEST_LIMIT
 DERIVED_CHART_TIMEFRAMES_MINUTES: tuple[int, ...] = (60, 30, 16, 12, 8)
 
 
@@ -235,7 +237,7 @@ def _run_poll_cycle(state, session_id: str) -> None:
                 # backlog and its polling cost.
                 candles = state.bitget_environment.backfill_candles(symbol, "1m", total=LIVE_CANDLE_HISTORY_LIMIT)
             else:
-                candles = state.bitget_environment.fetch_candles(symbol, "1m", LIVE_CANDLE_HISTORY_LIMIT)
+                candles = state.bitget_environment.fetch_candles(symbol, "1m", LIVE_CANDLE_FETCH_LIMIT)
             rows = _normalize_candle_rows(candles.get("rows", ()))
             fresh_candles = candles_from_bitget_rows(symbol, rows)
             state.live_candles[symbol] = _merge_live_candles(state.live_candles.get(symbol, ()), fresh_candles)

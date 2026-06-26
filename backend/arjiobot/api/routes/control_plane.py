@@ -11,7 +11,7 @@ from arjiobot.api.dependencies import FROZEN_VISIBLE_PROFILE_ID, get_state
 from arjiobot.api.schemas.common import ok
 from arjiobot.backtesting.research_profiles import get_profile
 from arjiobot.exchange.account_vault import CredentialVaultError, decrypt_credentials
-from arjiobot.exchange.bitget_environment import BITGET_REST_BASE_URL
+from arjiobot.exchange.bitget_environment import BITGET_CANDLE_REQUEST_LIMIT, BITGET_REST_BASE_URL
 from arjiobot.live_automation import live_automation_status
 from arjiobot.live_setup_detection import live_setup_detection_status
 
@@ -322,7 +322,7 @@ def _refresh_due_market_polls(settings: dict[str, object]) -> None:
         try:
             contract = state.bitget_environment.fetch_contract_config(symbol)
             ticker = state.bitget_environment.fetch_ticker(symbol)
-            candles = state.bitget_environment.fetch_candles(symbol, "1m", 2000)
+            candles = state.bitget_environment.fetch_candles(symbol, "1m", BITGET_CANDLE_REQUEST_LIMIT)
             completed = _now()
             poll.update(
                 {

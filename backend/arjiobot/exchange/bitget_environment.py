@@ -41,6 +41,7 @@ DEFAULT_MARGIN_COIN = "USDT"
 DEFAULT_MARGIN_MODE = "isolated"
 LIVE_CONFIRMATION_TEXT = "ENABLE LIVE"
 STALE_DATA_SECONDS = 90
+BITGET_CANDLE_REQUEST_LIMIT = 1000
 
 
 class TradeMode(str, Enum):
@@ -449,7 +450,8 @@ class BitgetEnvironmentService:
         *,
         end_time: str | int | None = None,
     ) -> dict[str, object]:
-        query: dict[str, object] = {"symbol": symbol.upper(), "productType": product_type, "granularity": granularity, "limit": str(limit)}
+        request_limit = min(max(int(limit), 1), BITGET_CANDLE_REQUEST_LIMIT)
+        query: dict[str, object] = {"symbol": symbol.upper(), "productType": product_type, "granularity": granularity, "limit": str(request_limit)}
         if end_time is not None:
             query["endTime"] = str(end_time)
         payload = self._public_request("/api/v2/mix/market/candles", query=query)
@@ -476,7 +478,7 @@ class BitgetEnvironmentService:
         total: int = 2_000,
         product_type: str = DEFAULT_PRODUCT_TYPE,
         *,
-        page_size: int = 1000,
+        page_size: int = BITGET_CANDLE_REQUEST_LIMIT,
     ) -> dict[str, object]:
         """Page backward through Bitget's candle history to assemble up to ``total`` candles.
 
@@ -487,11 +489,12 @@ class BitgetEnvironmentService:
         """
         collected: dict[str, tuple[str, ...]] = {}
         end_time: str | int | None = None
+        page_limit = min(max(int(page_size), 1), BITGET_CANDLE_REQUEST_LIMIT)
         while len(collected) < total:
             page = (
-                self.fetch_candles(symbol, granularity, page_size, product_type)
+                self.fetch_candles(symbol, granularity, page_limit, product_type)
                 if end_time is None
-                else self.fetch_candles(symbol, granularity, page_size, product_type, end_time=end_time)
+                else self.fetch_candles(symbol, granularity, page_limit, product_type, end_time=end_time)
             )
             rows = page["rows"]
             if not rows:
@@ -507,7 +510,7 @@ class BitgetEnvironmentService:
             if end_time is not None and str(next_end_time) == str(end_time):
                 break
             end_time = next_end_time
-            if len(rows) < page_size:
+            if len(rows) < page_limit:
                 break
         ordered_rows = tuple(collected[key] for key in sorted(collected, key=lambda value: int(value)))[-total:]
         record = {
@@ -678,7 +681,7 @@ class BitgetEnvironmentService:
         max_leverage = _positive_decimal(payload.get("max_allowed_leverage") or payload.get("selected_max_leverage"), "selected_max_leverage")
         contract = self.last_contracts.get(symbol) or self.fetch_contract_config(symbol)
         ticker = self.last_tickers.get(symbol) or self.fetch_ticker(symbol)
-        candles = self.last_candles.get(f"{symbol}:1m") or self.fetch_candles(symbol, "1m", 2000)
+        candles = self.last_candles.get(f"{symbol}:1m") or self.fetch_candles(symbol, "1m", BITGET_CANDLE_REQUEST_LIMIT)
         if ticker.get("last_price") in {"N/A", ""}:
             raise EnvironmentLockError("live ticker is missing")
         if candles.get("candles_loaded") != "YES":

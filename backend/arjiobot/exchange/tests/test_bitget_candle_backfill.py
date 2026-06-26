@@ -35,6 +35,20 @@ def test_backfill_candles_pages_backward_past_single_request_cap() -> None:
     assert len(set(timestamps)) == 2000
 
 
+def test_fetch_candles_caps_single_request_at_bitget_limit() -> None:
+    service = BitgetEnvironmentService()
+    limits: list[object] = []
+
+    def fake_public_request(path: str, *, query: dict[str, object]) -> dict[str, object]:
+        limits.append(query["limit"])
+        return {"data": []}
+
+    service._public_request = fake_public_request  # type: ignore[method-assign]
+    service.fetch_candles("BTCUSDT", "1m", 2000)
+
+    assert limits == ["1000"]
+
+
 def test_backfill_candles_stops_when_exchange_has_no_more_history() -> None:
     service = BitgetEnvironmentService()
     only_page = _page(1_000_000_000_000, 500)
