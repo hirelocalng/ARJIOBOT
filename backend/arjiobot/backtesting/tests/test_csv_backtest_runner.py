@@ -587,6 +587,7 @@ def test_profile_f_accepts_only_expansion_that_is_swing_c3() -> None:
         timeframe=swing.timeframe,
         timestamp=swing.right_candle.timestamp,
         direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
     )
     unrelated_expansion = SimpleNamespace(
         expansion_id="exp_unrelated",
@@ -624,6 +625,7 @@ def test_profile_f_16m_fvg_must_be_formed_by_same_expansion_c3() -> None:
         timeframe=swing.timeframe,
         timestamp=swing.right_candle.timestamp,
         direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
     )
     matching = _fvg_with_id(
         "fvg16",
@@ -654,6 +656,7 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
         timeframe=swing.timeframe,
         timestamp=swing.right_candle.timestamp,
         direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
     )
 
     pending_trace = runner._attempt_traces_for_direction(
@@ -661,6 +664,7 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
         candidate_swings=(swing,),
         swing_by_id={swing.swing_id: swing},
         valid_expansions=(expansion,),
+        all_expansions=(expansion,),
         fvg_by_expansion={expansion.expansion_id: None},
         fvg_12m=(),
         fvg_8m=(),
@@ -673,12 +677,14 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
     assert pending_trace["progress_percent"] == 35.0
     assert pending_trace["invalidation_reason"] is None
     assert pending_trace["is_terminal"] is False
+    assert pending_trace["failure_detail"] == "FVG_16M_PENDING_CONFIRMATION_WINDOW_OPEN"
 
     expired_trace = runner._attempt_traces_for_direction(
         direction="BEARISH",
         candidate_swings=(swing,),
         swing_by_id={swing.swing_id: swing},
         valid_expansions=(expansion,),
+        all_expansions=(expansion,),
         fvg_by_expansion={expansion.expansion_id: None},
         fvg_12m=(),
         fvg_8m=(),
@@ -691,6 +697,7 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
     assert expired_trace["progress_percent"] == 35.0
     assert expired_trace["invalidation_reason"] == "FVG_16M_NOT_FOUND"
     assert expired_trace["is_terminal"] is True
+    assert expired_trace["failure_detail"] == "FVG_16M_WINDOW_CLOSED_WITHOUT_MATCH"
 
 
 def test_related_12m_and_8m_fvgs_must_be_same_direction_same_leg() -> None:

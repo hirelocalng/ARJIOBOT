@@ -201,6 +201,20 @@ def radar_record(setup) -> dict[str, object]:
         "source": metadata.get("source"),
         "stale_skip": stale_skip,
         "swing_price": metadata.get("swing_price") or None,
+        "diagnostics": {
+            key: metadata[key]
+            for key in (
+                "failure_detail",
+                "expansion_ratio",
+                "expansion_ratio_min",
+                "expansion_ratio_max",
+                "fvg_12m_candidates_after_16m",
+                "fvg_12m_candidates_inside_leg",
+                "fvg_leg_high",
+                "fvg_leg_low",
+            )
+            if key in metadata
+        },
         "related_execution": related_execution,
     }
 

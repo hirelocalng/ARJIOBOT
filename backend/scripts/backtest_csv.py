@@ -863,6 +863,7 @@ def _build_strategy_funnel(
             candidate_swings=candidate_16m_swing_highs,
             swing_by_id=swing_by_id,
             valid_expansions=valid_expansions,
+            all_expansions=expansions_16m,
             fvg_by_expansion=fvg_by_expansion,
             fvg_12m=fvg_12m,
             fvg_8m=fvg_8m,
@@ -1215,6 +1216,7 @@ def _build_bullish_strategy_funnel(
             candidate_swings=candidate_16m_swing_lows,
             swing_by_id=swing_by_id,
             valid_expansions=valid_expansions,
+            all_expansions=expansions_16m,
             fvg_by_expansion=fvg_by_expansion,
             fvg_12m=fvg_12m,
             fvg_8m=fvg_8m,
@@ -1254,6 +1256,7 @@ def _attempt_traces_for_direction(
     candidate_swings,
     swing_by_id: dict[str, Swing],
     valid_expansions,
+    all_expansions,
     fvg_by_expansion: dict[str, FairValueGap | None],
     fvg_12m: tuple[FairValueGap, ...],
     fvg_8m: tuple[FairValueGap, ...],
@@ -1273,9 +1276,11 @@ def _attempt_traces_for_direction(
     """
     is_bullish = direction == "BULLISH"
     valid_expansion_by_swing_id = {expansion.swing_id: expansion for expansion in valid_expansions}
+    expansion_by_swing_id = {expansion.swing_id: expansion for expansion in all_expansions}
     traces: list[dict[str, object]] = []
 
     for swing in candidate_swings:
+        raw_expansion = expansion_by_swing_id.get(swing.swing_id)
         trace: dict[str, object] = {
             "symbol": swing.symbol,
             "direction": direction,
@@ -1296,16 +1301,30 @@ def _attempt_traces_for_direction(
             "stop_loss": None,
             "take_profit": None,
             "retrace_candle_found": False,
+            "failure_detail": None,
+            "expansion_ratio": str(getattr(raw_expansion, "expansion_ratio", "")) if raw_expansion is not None else None,
+            "expansion_ratio_min": str(profile.expansion_ratio_min),
+            "expansion_ratio_max": str(profile.expansion_ratio_max),
         }
 
         expansion = valid_expansion_by_swing_id.get(swing.swing_id)
         if expansion is None:
+            if raw_expansion is None:
+                trace["failure_detail"] = "NO_DISPLACEMENT_EXPANSION_FOR_SWING_C3"
+            else:
+                trace["expansion_16m_id"] = raw_expansion.expansion_id
+                trace["expansion_timestamp"] = raw_expansion.timestamp.isoformat()
+                trace["failure_detail"] = (
+                    f"EXPANSION_RATIO_OUT_OF_RANGE ratio={float(raw_expansion.expansion_ratio):.4f} "
+                    f"required={profile.expansion_ratio_min:.4f}..{profile.expansion_ratio_max:.4f}"
+                )
             trace["invalidation_reason"] = "EXPANSION_NOT_CONFIRMED"
             trace["is_terminal"] = True
             traces.append(trace)
             continue
         trace["expansion_16m_id"] = expansion.expansion_id
         trace["expansion_timestamp"] = expansion.timestamp.isoformat()
+        trace["expansion_ratio"] = str(expansion.expansion_ratio)
         trace["stage"] = "EXPANSION_16M_CONFIRMED"
         trace["progress_percent"] = 35.0
 
@@ -1313,6 +1332,7 @@ def _attempt_traces_for_direction(
         completion_candle = None if fvg16 is None else (fvg16.fvg_completion_candle_high if is_bullish else fvg16.fvg_completion_candle_low)
         if fvg16 is None or completion_candle is None:
             if _main_fvg_lookup_still_open(expansion, profile, candles_1m):
+                trace["failure_detail"] = "FVG_16M_PENDING_CONFIRMATION_WINDOW_OPEN"
                 _logger.debug(
                     "[FVG16M-TRACE] %s %s swing=%s exp=%s@%s: FVG_16M_PENDING "
                     "(fvg16=%s completion_candle=%s)",
@@ -1329,6 +1349,7 @@ def _attempt_traces_for_direction(
                 expansion.expansion_id, expansion.timestamp.isoformat()[:19],
                 getattr(fvg16, "fvg_id", None), completion_candle,
             )
+            trace["failure_detail"] = "FVG_16M_WINDOW_CLOSED_WITHOUT_MATCH"
             trace["invalidation_reason"] = "FVG_16M_NOT_FOUND"
             trace["is_terminal"] = True
             traces.append(trace)
@@ -1344,6 +1365,23 @@ def _attempt_traces_for_direction(
         )
         related_12m = _fvgs_inside_leg(fvg_12m, direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs)
         if not related_12m:
+            same_direction_after_16m = tuple(
+                fvg
+                for fvg in fvg_12m
+                if fvg.direction is fvg16.direction and fvg.confirmed_at >= fvg16.confirmed_at
+            )
+            trace["fvg_12m_candidates_after_16m"] = len(same_direction_after_16m)
+            trace["fvg_12m_candidates_inside_leg"] = 0
+            if is_bullish:
+                trace["fvg_leg_low"] = str(swing.price)
+                trace["fvg_leg_high"] = str(completion_candle)
+            else:
+                trace["fvg_leg_high"] = str(swing.price)
+                trace["fvg_leg_low"] = str(completion_candle)
+            trace["failure_detail"] = (
+                f"NO_12M_FVG_INSIDE_16M_LEG candidates_after_16m={len(same_direction_after_16m)} "
+                f"direction={fvg16.direction.value}"
+            )
             trace["invalidation_reason"] = "FVG_12M_NOT_FOUND"
             trace["is_terminal"] = True
             traces.append(trace)

@@ -792,6 +792,18 @@ def _apply_one_attempt_trace(
     )
     if trace.get("entry_price"):
         metadata["entry_signal_price"] = str(trace["entry_price"])
+    for key in (
+        "failure_detail",
+        "expansion_ratio",
+        "expansion_ratio_min",
+        "expansion_ratio_max",
+        "fvg_12m_candidates_after_16m",
+        "fvg_12m_candidates_inside_leg",
+        "fvg_leg_high",
+        "fvg_leg_low",
+    ):
+        if trace.get(key) is not None:
+            metadata[key] = str(trace[key])
 
     field_updates: dict[str, object] = {
         "symbol": str(trace["symbol"]),

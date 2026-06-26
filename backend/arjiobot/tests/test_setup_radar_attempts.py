@@ -954,7 +954,14 @@ def test_invalidated_setup_carries_reason_and_last_valid_stage() -> None:
     radar_record() as invalidation_reason/last_valid_stage."""
     state = _fake_state("ADAUSDT", ())
     # Reaches FVG_16M_CONFIRMED (40% on the display scale) then fails to find a 12M FVG.
-    trace = _swing_trace("swing_lvs_1", stage="FVG_16M_CONFIRMED", progress_percent=50.0, invalidation_reason="FVG_12M_NOT_FOUND", is_terminal=True)
+    trace = {
+        **_swing_trace("swing_lvs_1", stage="FVG_16M_CONFIRMED", progress_percent=50.0, invalidation_reason="FVG_12M_NOT_FOUND", is_terminal=True),
+        "failure_detail": "NO_12M_FVG_INSIDE_16M_LEG candidates_after_16m=2 direction=BEARISH",
+        "fvg_12m_candidates_after_16m": 2,
+        "fvg_12m_candidates_inside_leg": 0,
+        "fvg_leg_high": "120",
+        "fvg_leg_low": "80",
+    }
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
 
     [setup] = state.invalidated_setups
@@ -966,6 +973,10 @@ def test_invalidated_setup_carries_reason_and_last_valid_stage() -> None:
     assert record["invalidation_reason"] == "FVG_12M_NOT_FOUND"
     assert record["last_valid_stage"] == "16M_FVG_DETECTED"
     assert record["progress_pct"] == 40.0, "% reached before invalidation must use the last valid stage, not the terminal state"
+    assert record["diagnostics"]["failure_detail"] == "NO_12M_FVG_INSIDE_16M_LEG candidates_after_16m=2 direction=BEARISH"
+    assert record["diagnostics"]["fvg_12m_candidates_after_16m"] == "2"
+    assert record["diagnostics"]["fvg_leg_high"] == "120"
+    assert record["diagnostics"]["fvg_leg_low"] == "80"
 
 
 def test_structural_match_only_setup_lands_in_invalidated_with_no_completed_at() -> None:
