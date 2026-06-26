@@ -700,6 +700,67 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
     assert expired_trace["failure_detail"] == "FVG_16M_WINDOW_CLOSED_WITHOUT_MATCH"
 
 
+def test_12m_fvg_missing_stays_pending_until_retrace_fvg_window_can_close() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_pending_12m",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
+    )
+    fvg16 = _fvg_with_id(
+        "fvg16_pending_12m",
+        Timeframe(16),
+        swing.right_candle.timestamp,
+        related_swing_id=swing.swing_id,
+        related_expansion_id=expansion.expansion_id,
+    )
+
+    pending_trace = runner._attempt_traces_for_direction(
+        direction="BEARISH",
+        candidate_swings=(swing,),
+        swing_by_id={swing.swing_id: swing},
+        valid_expansions=(expansion,),
+        all_expansions=(expansion,),
+        fvg_by_expansion={expansion.expansion_id: fvg16},
+        fvg_12m=(),
+        fvg_8m=(),
+        candles_8m=(),
+        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(80)),
+        profile=runner.PROFILE_2,
+    )[0]
+
+    assert pending_trace["stage"] == "FVG_16M_CONFIRMED"
+    assert pending_trace["progress_percent"] == 50.0
+    assert pending_trace["invalidation_reason"] is None
+    assert pending_trace["is_terminal"] is False
+    assert pending_trace["failure_detail"].startswith("FVG_12M_PENDING_CONFIRMATION_WINDOW_OPEN")
+
+    expired_trace = runner._attempt_traces_for_direction(
+        direction="BEARISH",
+        candidate_swings=(swing,),
+        swing_by_id={swing.swing_id: swing},
+        valid_expansions=(expansion,),
+        all_expansions=(expansion,),
+        fvg_by_expansion={expansion.expansion_id: fvg16},
+        fvg_12m=(),
+        fvg_8m=(),
+        candles_8m=(),
+        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(100)),
+        profile=runner.PROFILE_2,
+    )[0]
+
+    assert expired_trace["stage"] == "FVG_16M_CONFIRMED"
+    assert expired_trace["progress_percent"] == 50.0
+    assert expired_trace["invalidation_reason"] == "FVG_12M_NOT_FOUND"
+    assert expired_trace["is_terminal"] is True
+    assert expired_trace["failure_detail"].startswith("NO_12M_FVG_INSIDE_16M_LEG")
+
+
 def test_related_12m_and_8m_fvgs_must_be_same_direction_same_leg() -> None:
     runner = _load_runner()
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)

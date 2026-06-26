@@ -50,11 +50,12 @@ MAX_TRACKED_SETUP_ATTEMPTS = 100
 # never entered into the strategy funnel or IN PROGRESS at all. This is the
 # primary mechanism that keeps Setup Radar real-time-only, preventing the
 # 31-day rolling candle buffer from flooding the UI with historical backlog.
-# Must match STALE_ENTRY_READY_MAX_AGE in live_automation.py (both are 24
-# minutes = 2 closed 12M candles).
-STALENESS_WINDOW_MINUTES = 24
+# Must match STALE_ENTRY_READY_MAX_AGE in live_automation.py (both are 60
+# 24 minutes was too short for 16M + 12M confirmation; 60 minutes leaves room
+# for the full live confirmation path without admitting historical backlog).
+STALENESS_WINDOW_MINUTES = 60
 
-# Safety cap on the IN PROGRESS pool. With STALENESS_WINDOW_MINUTES=24 active,
+# Safety cap on the IN PROGRESS pool. With STALENESS_WINDOW_MINUTES active,
 # the funnel can only ever produce a handful of fresh setups at once, so this
 # cap should never fire in practice - it is a backstop, not a design knob.
 MAX_IN_PROGRESS_SETUPS = 20

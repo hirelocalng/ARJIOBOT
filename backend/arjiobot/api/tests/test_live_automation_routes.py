@@ -573,8 +573,8 @@ def test_live_automation_blocks_without_entry_ready_setup() -> None:
 
 
 def test_stale_entry_ready_setup_is_expired_not_executed() -> None:
-    """A setup that reached ENTRY_READY more than 24 minutes (2 closed 12M
-    candles) ago and was never submitted - automation paused, Bitget
+    """A setup that reached ENTRY_READY more than 60 minutes
+    ago and was never submitted - automation paused, Bitget
     unreachable, restart, etc. - must never be executed: the current market
     price has very likely moved away from its entry zone. It must be skipped
     and moved into Setup Radar's invalidated_setups as EXPIRED instead."""
@@ -598,7 +598,7 @@ def test_stale_entry_ready_setup_is_expired_not_executed() -> None:
     state.monitoring["active"] = True
     state.market_polls["BTCUSDT"] = {"symbol": "BTCUSDT", "poll_success": "YES", "poll_status": "READY"}
 
-    stale_setup = make_entry_ready_setup(latest_price="90", completed_at=datetime.now(timezone.utc) - timedelta(minutes=30))
+    stale_setup = make_entry_ready_setup(latest_price="90", completed_at=datetime.now(timezone.utc) - timedelta(minutes=65))
     state.setups[stale_setup.setup_id] = stale_setup
 
     result = api.post("/api/live-automation/run-once").json()["data"]
@@ -618,8 +618,8 @@ def test_stale_entry_ready_setup_is_expired_not_executed() -> None:
 
 
 def test_fresh_entry_ready_setup_within_staleness_window_still_executes(monkeypatch) -> None:
-    """The 24-minute staleness gate must not block a setup that is still
-    well within the window - only setups older than 2 closed 12M candles."""
+    """The 60-minute staleness gate must not block a setup that is still
+    well within the window."""
     from datetime import timedelta
 
     api = client()

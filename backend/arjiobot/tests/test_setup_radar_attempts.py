@@ -429,25 +429,25 @@ def _minute_candles(start: datetime, count: int) -> tuple[Candle, ...]:
 
 def test_stale_trade_candidate_reports_swing_age_beyond_staleness_window() -> None:
     start = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    candles = _minute_candles(start, 60)
+    candles = _minute_candles(start, 100)
     trade = {
         "symbol": "ADAUSDT",
         "direction": "BEARISH",
-        "entry_timestamp": (start + timedelta(minutes=58)).isoformat(),
+        "entry_timestamp": (start + timedelta(minutes=98)).isoformat(),
         "source_16m_swing_id": "swing_stale_1",
-        "source_16m_swing_timestamp": (start + timedelta(minutes=30)).isoformat(),
+        "source_16m_swing_timestamp": (start + timedelta(minutes=34)).isoformat(),
     }
 
     stale = _stale_trade_candidates((trade,), candles, {"processed_trade_keys": []})
 
     assert len(stale) == 1
-    assert stale[0]["age_minutes"] == 29
+    assert stale[0]["age_minutes"] == 65
     assert stale[0]["seconds_past_window"] == 300
 
 
 def test_trade_candidate_with_fresh_swing_is_never_reported_as_stale() -> None:
     start = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    candles = _minute_candles(start, 60)
+    candles = _minute_candles(start, 100)
     fresh_old_entry = {
         "symbol": "ADAUSDT",
         "direction": "BEARISH",
@@ -458,21 +458,21 @@ def test_trade_candidate_with_fresh_swing_is_never_reported_as_stale() -> None:
     stale_swing = {
         "symbol": "ADAUSDT",
         "direction": "BEARISH",
-        "entry_timestamp": (start + timedelta(minutes=58)).isoformat(),
+        "entry_timestamp": (start + timedelta(minutes=98)).isoformat(),
         "source_16m_swing_id": "b",
-        "source_16m_swing_timestamp": (start + timedelta(minutes=30)).isoformat(),
+        "source_16m_swing_timestamp": (start + timedelta(minutes=34)).isoformat(),
     }
 
     stale = _stale_trade_candidates((fresh_old_entry, stale_swing), candles, {"processed_trade_keys": []})
 
     assert len(stale) == 1
     assert stale[0]["source_16m_swing_id"] == "b"
-    assert stale[0]["age_minutes"] == 29
+    assert stale[0]["age_minutes"] == 65
 
 
 def test_stale_attempt_trace_is_cached_and_never_enters_setup_radar() -> None:
     state = _fake_state("ADAUSDT", ())
-    stale_timestamp = datetime.now(timezone.utc) - timedelta(minutes=25)
+    stale_timestamp = datetime.now(timezone.utc) - timedelta(minutes=61)
     trace = {
         **_swing_trace("swing_stale_trace_1", stage="SWING_16M_CONFIRMED", progress_percent=20.0),
         "swing_timestamp": stale_timestamp.isoformat(),
@@ -492,7 +492,7 @@ def test_candidate_swing_filter_diagnostics_explain_zero_funnel_candidates() -> 
     stale_swing = SimpleNamespace(
         symbol="ADAUSDT",
         swing_id="swg_stale_diag",
-        right_candle=SimpleNamespace(timestamp=now - timedelta(minutes=25)),
+        right_candle=SimpleNamespace(timestamp=now - timedelta(minutes=61)),
     )
 
     fresh, diagnostics = _candidate_swing_filter_diagnostics(state, [stale_swing], direction="BEARISH", now=now)
@@ -502,7 +502,7 @@ def test_candidate_swing_filter_diagnostics_explain_zero_funnel_candidates() -> 
     assert diagnostics["fresh_candidate_swings"] == 0
     assert diagnostics["stale_filtered_swings"] == 1
     assert diagnostics["resolved_filtered_swings"] == 0
-    assert diagnostics["newest_raw_swing_age_minutes"] == 25.0
+    assert diagnostics["newest_raw_swing_age_minutes"] == 61.0
 
 
 def test_stale_filter_keeps_already_active_setup_evaluating(monkeypatch) -> None:
@@ -517,7 +517,7 @@ def test_stale_filter_keeps_already_active_setup_evaluating(monkeypatch) -> None
     _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
     assert state.setups, "expected the old trace to be seeded as an active in-progress setup"
 
-    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 24)
+    monkeypatch.setattr(live_setup_detection, "STALENESS_WINDOW_MINUTES", 60)
     swing = SimpleNamespace(
         symbol="ADAUSDT",
         swing_id="swing_active_1",
@@ -539,13 +539,13 @@ def test_stale_skip_is_surfaced_on_the_matching_completed_setup_in_setup_radar()
     api = client()
     state = get_state()
     start = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    candles = _minute_candles(start, 60)
+    candles = _minute_candles(start, 100)
     trade = {
         "symbol": "ADAUSDT",
         "direction": "BEARISH",
-        "entry_timestamp": (start + timedelta(minutes=58)).isoformat(),
+        "entry_timestamp": (start + timedelta(minutes=98)).isoformat(),
         "source_16m_swing_id": "swing_completed_1",
-        "source_16m_swing_timestamp": (start + timedelta(minutes=30)).isoformat(),
+        "source_16m_swing_timestamp": (start + timedelta(minutes=34)).isoformat(),
     }
     stale = _stale_trade_candidates((trade,), candles, {"processed_trade_keys": []})
     _record_stale_skips_for_radar(state, stale)
@@ -573,7 +573,7 @@ def test_stale_skip_is_surfaced_on_the_matching_completed_setup_in_setup_radar()
     row = rows[completed.setup_id]
 
     assert row["stale_skip"] is not None
-    assert row["stale_skip"]["age_minutes"] == 29
+    assert row["stale_skip"]["age_minutes"] == 65
     assert row["stale_skip"]["seconds_past_window"] == 300
     assert row["stale_skip"]["swing_16m_id"] == "swing_completed_1"
     assert row["stale_skip"]["skipped_at"]
@@ -613,13 +613,13 @@ def test_stale_skip_soon_after_monitoring_started_is_classified_as_restart_catch
     alone."""
     state = get_state()
     start = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    candles = _minute_candles(start, 60)
+    candles = _minute_candles(start, 100)
     trade = {
         "symbol": "ADAUSDT",
         "direction": "BEARISH",
-        "entry_timestamp": (start + timedelta(minutes=58)).isoformat(),
+        "entry_timestamp": (start + timedelta(minutes=98)).isoformat(),
         "source_16m_swing_id": "swing_restart_test",
-        "source_16m_swing_timestamp": (start + timedelta(minutes=30)).isoformat(),
+        "source_16m_swing_timestamp": (start + timedelta(minutes=34)).isoformat(),
     }
     stale = _stale_trade_candidates((trade,), candles, {"processed_trade_keys": []})
 
@@ -683,9 +683,9 @@ def test_fresh_trade_candidate_picks_fresh_swing_and_reports_stale_swing_backlog
     """Only candidates with fresh swings are executable; older never-seen
     backlog candidates are reported stale instead of queued for later."""
     start = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    candles = _minute_candles(start, 30)
-    older = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=29)).isoformat(), "source_16m_swing_id": "swing_older", "source_16m_swing_timestamp": (start + timedelta(minutes=2)).isoformat()}
-    newer = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=10)).isoformat(), "source_16m_swing_id": "swing_newer", "source_16m_swing_timestamp": (start + timedelta(minutes=29)).isoformat()}
+    candles = _minute_candles(start, 100)
+    older = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=97)).isoformat(), "source_16m_swing_id": "swing_older", "source_16m_swing_timestamp": (start + timedelta(minutes=34)).isoformat()}
+    newer = {"symbol": "ADAUSDT", "direction": "BEARISH", "entry_timestamp": (start + timedelta(minutes=98)).isoformat(), "source_16m_swing_id": "swing_newer", "source_16m_swing_timestamp": (start + timedelta(minutes=90)).isoformat()}
 
     fresh = _fresh_trade_candidate((older, newer), candles, {"processed_trade_keys": []})
     assert fresh["source_16m_swing_id"] == "swing_newer"

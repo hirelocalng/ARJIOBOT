@@ -5,7 +5,7 @@ import logging
 import sys
 import uuid
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1370,6 +1370,16 @@ def _attempt_traces_for_direction(
                 for fvg in fvg_12m
                 if fvg.direction is fvg16.direction and fvg.confirmed_at >= fvg16.confirmed_at
             )
+            _log_retrace_fvg_diagnostics(
+                symbol=swing.symbol,
+                direction=direction,
+                swing=swing,
+                fvg16=fvg16,
+                fvg_12m=fvg_12m,
+                profile=profile,
+                candles_1m=candles_1m,
+                leg_kwargs=leg_kwargs,
+            )
             trace["fvg_12m_candidates_after_16m"] = len(same_direction_after_16m)
             trace["fvg_12m_candidates_inside_leg"] = 0
             if is_bullish:
@@ -1378,6 +1388,13 @@ def _attempt_traces_for_direction(
             else:
                 trace["fvg_leg_high"] = str(swing.price)
                 trace["fvg_leg_low"] = str(completion_candle)
+            if _retrace_fvg_lookup_still_open(fvg16, profile, candles_1m, fvg_12m):
+                trace["failure_detail"] = (
+                    f"FVG_12M_PENDING_CONFIRMATION_WINDOW_OPEN candidates_after_16m={len(same_direction_after_16m)} "
+                    f"direction={fvg16.direction.value}"
+                )
+                traces.append(trace)
+                continue
             trace["failure_detail"] = (
                 f"NO_12M_FVG_INSIDE_16M_LEG candidates_after_16m={len(same_direction_after_16m)} "
                 f"direction={fvg16.direction.value}"
@@ -2845,6 +2862,101 @@ def _main_fvg_lookup_still_open(expansion, profile: StrategyProfile, candles_1m)
     required_c3_close = last_possible_c2 + expansion.timeframe.duration * 2
     latest_source_close = max(candle.end_timestamp for candle in candles_1m)
     return latest_source_close < required_c3_close
+
+
+def _retrace_fvg_lookup_still_open(fvg16: FairValueGap, profile: StrategyProfile, candles_1m, fvg_12m: tuple[FairValueGap, ...]) -> bool:
+    if not candles_1m:
+        return False
+    retrace_duration = timedelta(minutes=8 * profile.retrace_window_8m_candles)
+    retrace_fvg_duration = fvg_12m[0].timeframe.duration if fvg_12m else timedelta(minutes=12)
+    last_relevant_c2 = fvg16.confirmed_at + retrace_duration
+    required_c3_close = last_relevant_c2 + retrace_fvg_duration * 2
+    latest_source_close = max(candle.end_timestamp for candle in candles_1m)
+    return latest_source_close < required_c3_close
+
+
+def _retrace_fvg_search_deadline(fvg16: FairValueGap, profile: StrategyProfile, fvg_12m: tuple[FairValueGap, ...]) -> datetime:
+    retrace_duration = timedelta(minutes=8 * profile.retrace_window_8m_candles)
+    retrace_fvg_duration = fvg_12m[0].timeframe.duration if fvg_12m else timedelta(minutes=12)
+    return fvg16.confirmed_at + retrace_duration + retrace_fvg_duration * 2
+
+
+def _log_retrace_fvg_diagnostics(
+    *,
+    symbol: str,
+    direction: str,
+    swing: Swing,
+    fvg16: FairValueGap,
+    fvg_12m: tuple[FairValueGap, ...],
+    profile: StrategyProfile,
+    candles_1m,
+    leg_kwargs: dict[str, object],
+) -> None:
+    latest_source_close = max((candle.end_timestamp for candle in candles_1m), default=None)
+    deadline = _retrace_fvg_search_deadline(fvg16, profile, fvg_12m)
+    same_direction = tuple(fvg for fvg in fvg_12m if fvg.direction is fvg16.direction and fvg.confirmed_at >= fvg16.confirmed_at)
+    _logger.debug(
+        "[FVG12M-DIAG] %s %s swing=%s stage=FVG_16M_CONFIRMED fvg16=%s fvg16_confirmed=%s "
+        "search_start=%s search_deadline=%s latest_source_close=%s candidates_after_16m=%d "
+        "leg_high=%s leg_low=%s retrace_window_8m_candles=%s",
+        symbol,
+        direction,
+        swing.swing_id,
+        fvg16.fvg_id,
+        fvg16.confirmed_at.isoformat(),
+        fvg16.confirmed_at.isoformat(),
+        deadline.isoformat(),
+        latest_source_close.isoformat() if latest_source_close else "NONE",
+        len(same_direction),
+        leg_kwargs.get("swing_high_price") or leg_kwargs.get("completion_candle_high"),
+        leg_kwargs.get("completion_candle_low") or leg_kwargs.get("swing_low_price"),
+        profile.retrace_window_8m_candles,
+    )
+    for fvg in same_direction:
+        accepted = bool(_fvgs_inside_leg((fvg,), direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs))
+        _logger.debug(
+            "[FVG12M-DIAG] %s %s swing=%s candidate=%s tf=%s c1=%s c2=%s c3=%s confirmed=%s "
+            "upper=%s lower=%s verdict=%s",
+            symbol,
+            direction,
+            swing.swing_id,
+            fvg.fvg_id,
+            fvg.timeframe.label,
+            fvg.c1_timestamp.isoformat(),
+            fvg.c2_timestamp.isoformat(),
+            fvg.c3_timestamp.isoformat(),
+            fvg.confirmed_at.isoformat(),
+            fvg.upper_boundary,
+            fvg.lower_boundary,
+            "ACCEPT" if accepted else _fvg_inside_leg_rejection_reason(fvg, direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs),
+        )
+
+
+def _fvg_inside_leg_rejection_reason(
+    fvg: FairValueGap,
+    *,
+    direction: FVGDirection,
+    swing_high_price=None,
+    completion_candle_low=None,
+    swing_low_price=None,
+    completion_candle_high=None,
+    start_at: datetime,
+) -> str:
+    if fvg.direction is not direction:
+        return f"REJECT_DIRECTION expected={direction.value} actual={fvg.direction.value}"
+    if fvg.confirmed_at < start_at:
+        return f"REJECT_CONFIRMED_BEFORE_16M_FVG confirmed={fvg.confirmed_at.isoformat()} start={start_at.isoformat()}"
+    if direction is FVGDirection.BULLISH:
+        if fvg.lower_boundary < swing_low_price:
+            return f"REJECT_BELOW_SWING_LOW lower={fvg.lower_boundary} swing_low={swing_low_price}"
+        if fvg.upper_boundary > completion_candle_high:
+            return f"REJECT_ABOVE_COMPLETION_HIGH upper={fvg.upper_boundary} completion_high={completion_candle_high}"
+        return "REJECT_NOT_INSIDE_BULLISH_LEG"
+    if fvg.upper_boundary > swing_high_price:
+        return f"REJECT_ABOVE_SWING_HIGH upper={fvg.upper_boundary} swing_high={swing_high_price}"
+    if fvg.lower_boundary < completion_candle_low:
+        return f"REJECT_BELOW_COMPLETION_LOW lower={fvg.lower_boundary} completion_low={completion_candle_low}"
+    return "REJECT_NOT_INSIDE_BEARISH_LEG"
 
 
 def _fvg_expansion_rejection_reason(fvg: FairValueGap, expansion, profile: StrategyProfile, direction: FVGDirection = FVGDirection.BEARISH) -> str:

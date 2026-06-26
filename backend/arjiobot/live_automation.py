@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 # Bitget was unreachable, or the process restarted, an ENTRY_READY setup can
 # sit unsubmitted for a long time. The current market price has very likely
 # moved away from its entry zone by then, so it must not be executed late -
-# 2 closed 12M candles (24 minutes) is the staleness limit.
-STALE_ENTRY_READY_MAX_AGE = timedelta(minutes=24)
+# Live setup staleness limit. Must match live_setup_detection.STALENESS_WINDOW_MINUTES.
+STALE_ENTRY_READY_MAX_AGE = timedelta(minutes=60)
 
 # Minimum IN PROGRESS dwell time fix: if a real ENTRY_READY setup keeps
 # getting blocked at a retryable stage (BITGET_DRY_RUN_PREVIEW/
@@ -211,7 +211,7 @@ def _expire_if_stale(state: Any, automation: dict[str, Any], setup: Any, *, sour
     Minimum dwell time: even once staleness is confirmed, the move to
     INVALIDATED waits for MIN_DWELL_SECONDS since the setup's own created_at
     (same rule as the attempt-tracer's non-execution exits in
-    live_setup_detection.py) - in practice STALE_ENTRY_READY_MAX_AGE (24
+    live_setup_detection.py) - in practice STALE_ENTRY_READY_MAX_AGE (60
     minutes) is always already far past MIN_DWELL_SECONDS (15s) by the time
     this fires, so this only matters defensively if either constant is ever
     reconfigured. Dwell never delays _process_setup itself - only this
@@ -364,7 +364,7 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
             # setup's own fields (direction, stop/target relationship, a
             # missing required field, ...) - retrying the identical setup on
             # a later poll can never resolve it differently, so it leaves
-            # IN PROGRESS now instead of sitting there until the 24-minute
+            # IN PROGRESS now instead of sitting there until the staleness
             # staleness gate eventually catches it.
             _resolve_rejected_setup(state, setup, execution_status="rejected", reason=attempt["reason"])
         _append_attempt(automation, attempt)

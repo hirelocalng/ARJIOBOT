@@ -28,7 +28,7 @@ def make_entry_ready_setup(
     completed_at defaults to now, not the fixed created_at/updated_at test
     timestamps - it represents when the setup actually became tradable (see
     _setup_from_trade), and live_automation.py's staleness gate
-    (_expire_if_stale) rejects/expires anything older than 24 minutes. Pass
+    (_expire_if_stale) rejects/expires anything older than 60 minutes. Pass
     an explicit completed_at to exercise that gate from a test.
     """
     timestamp = created_at or datetime(2026, 1, 1, tzinfo=timezone.utc)
