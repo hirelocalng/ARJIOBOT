@@ -811,6 +811,19 @@ def _build_strategy_funnel(
     main_label = f"{timeframe_profile.main_fvg_timeframe}m"
     retrace_label = f"{timeframe_profile.retrace_fvg_timeframe}m"
     internal_label = f"{timeframe_profile.internal_fvg_timeframe}m"
+    attempt_traces = _attempt_traces_for_direction(
+        direction="BEARISH",
+        candidate_swings=candidate_16m_swing_highs,
+        swing_by_id=swing_by_id,
+        valid_expansions=valid_expansions,
+        all_expansions=expansions_16m,
+        fvg_by_expansion=fvg_by_expansion,
+        fvg_12m=fvg_12m,
+        fvg_8m=fvg_8m,
+        candles_8m=candles_8m,
+        candles_1m=candles_1m,
+        profile=profile,
+    )
     funnel = {
         "candidate_16m_swing_highs": len(candidate_16m_swing_highs),
         "rejected_no_expansion": len(candidate_16m_swing_highs) - len(valid_expansions),
@@ -858,19 +871,8 @@ def _build_strategy_funnel(
         "performance_summary": performance_summary,
         "trade_accounting_check": performance_summary["trade_accounting_check"],
         "unaccounted_after_retrace": unaccounted_after_retrace,
-        "attempt_traces": _attempt_traces_for_direction(
-            direction="BEARISH",
-            candidate_swings=candidate_16m_swing_highs,
-            swing_by_id=swing_by_id,
-            valid_expansions=valid_expansions,
-            all_expansions=expansions_16m,
-            fvg_by_expansion=fvg_by_expansion,
-            fvg_12m=fvg_12m,
-            fvg_8m=fvg_8m,
-            candles_8m=candles_8m,
-            candles_1m=candles_1m,
-            profile=profile,
-        ),
+        "attempt_traces": attempt_traces,
+        "attempt_trace_summary": _attempt_trace_summary(attempt_traces),
     }
     result = {
         **funnel,
@@ -1164,6 +1166,19 @@ def _build_bullish_strategy_funnel(
     main_label = f"{timeframe_profile.main_fvg_timeframe}m"
     retrace_label = f"{timeframe_profile.retrace_fvg_timeframe}m"
     internal_label = f"{timeframe_profile.internal_fvg_timeframe}m"
+    attempt_traces = _attempt_traces_for_direction(
+        direction="BULLISH",
+        candidate_swings=candidate_16m_swing_lows,
+        swing_by_id=swing_by_id,
+        valid_expansions=valid_expansions,
+        all_expansions=expansions_16m,
+        fvg_by_expansion=fvg_by_expansion,
+        fvg_12m=fvg_12m,
+        fvg_8m=fvg_8m,
+        candles_8m=candles_8m,
+        candles_1m=candles_1m,
+        profile=profile,
+    )
     funnel = {
         "candidate_16m_swing_highs": len(candidate_16m_swing_lows),
         "rejected_no_expansion": len(candidate_16m_swing_lows) - len(valid_expansions),
@@ -1211,19 +1226,8 @@ def _build_bullish_strategy_funnel(
         "performance_summary": performance_summary,
         "trade_accounting_check": performance_summary["trade_accounting_check"],
         "unaccounted_after_retrace": unaccounted_after_retrace,
-        "attempt_traces": _attempt_traces_for_direction(
-            direction="BULLISH",
-            candidate_swings=candidate_16m_swing_lows,
-            swing_by_id=swing_by_id,
-            valid_expansions=valid_expansions,
-            all_expansions=expansions_16m,
-            fvg_by_expansion=fvg_by_expansion,
-            fvg_12m=fvg_12m,
-            fvg_8m=fvg_8m,
-            candles_8m=candles_8m,
-            candles_1m=candles_1m,
-            profile=profile,
-        ),
+        "attempt_traces": attempt_traces,
+        "attempt_trace_summary": _attempt_trace_summary(attempt_traces),
     }
     result = {
         **funnel,
@@ -1410,6 +1414,10 @@ def _attempt_traces_for_direction(
 
         related_8m = _fvgs_inside_leg(fvg_8m, direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs)
         if not related_8m:
+            if _internal_fvg_lookup_still_open(fvg16, profile, candles_1m, fvg_8m):
+                trace["failure_detail"] = f"FVG_8M_PENDING_CONFIRMATION_WINDOW_OPEN direction={fvg16.direction.value}"
+                traces.append(trace)
+                continue
             trace["invalidation_reason"] = "FVG_8M_NOT_FOUND"
             trace["is_terminal"] = True
             traces.append(trace)
@@ -1467,7 +1475,93 @@ def _attempt_traces_for_direction(
             trace["take_profit"] = str(min(fvg16.fvg_completion_candle_low, min(candle.low for candle in retrace_window)))
         traces.append(trace)
 
-    return tuple(traces)
+    result = tuple(traces)
+    _log_attempt_trace_decisions(direction, result)
+    return result
+
+
+def _attempt_trace_summary(traces: tuple[dict[str, object], ...]) -> dict[str, object]:
+    stage_counts: dict[str, int] = {}
+    invalidation_counts: dict[str, int] = {}
+    failure_counts: dict[str, int] = {}
+    latest: list[dict[str, object]] = []
+    for trace in traces:
+        stage = str(trace.get("stage") or "UNKNOWN")
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        invalidation = trace.get("invalidation_reason")
+        if invalidation:
+            key = str(invalidation)
+            invalidation_counts[key] = invalidation_counts.get(key, 0) + 1
+        failure_detail = trace.get("failure_detail")
+        if failure_detail:
+            key = str(failure_detail).split(" ", 1)[0]
+            failure_counts[key] = failure_counts.get(key, 0) + 1
+        latest.append(
+            {
+                "swing_16m_id": trace.get("swing_16m_id"),
+                "symbol": trace.get("symbol"),
+                "direction": trace.get("direction"),
+                "stage": stage,
+                "progress_percent": trace.get("progress_percent"),
+                "invalidation_reason": invalidation,
+                "failure_detail": failure_detail,
+                "expansion_ratio": trace.get("expansion_ratio"),
+                "expansion_ratio_min": trace.get("expansion_ratio_min"),
+                "expansion_ratio_max": trace.get("expansion_ratio_max"),
+                "swing_timestamp": trace.get("swing_timestamp"),
+            }
+        )
+    latest.sort(key=lambda item: str(item.get("swing_timestamp") or ""), reverse=True)
+    return {
+        "total": len(traces),
+        "stage_counts": stage_counts,
+        "invalidation_counts": invalidation_counts,
+        "failure_counts": failure_counts,
+        "latest": tuple(latest[:10]),
+    }
+
+
+def _log_attempt_trace_decisions(direction: str, traces: tuple[dict[str, object], ...]) -> None:
+    for trace in traces:
+        stage = str(trace.get("stage") or "UNKNOWN")
+        if trace.get("is_terminal"):
+            next_stage = "TERMINAL"
+        elif stage == "SWING_16M_CONFIRMED":
+            next_stage = "EXPANSION_16M_CONFIRMED"
+        elif stage == "EXPANSION_16M_CONFIRMED":
+            next_stage = "FVG_16M_CONFIRMED"
+        elif stage == "FVG_16M_CONFIRMED":
+            next_stage = "FVG_12M_CONFIRMED"
+        elif stage == "FVG_12M_CONFIRMED":
+            next_stage = "FVG_8M_CONFIRMED"
+        elif stage == "FVG_8M_CONFIRMED":
+            next_stage = "ENTRY_READY"
+        else:
+            next_stage = "TRADE_EXECUTION"
+        _logger.debug(
+            "[PIPELINE-TRACE] %s %s swing=%s current_stage=%s expected_next=%s progress=%s "
+            "expansion=%s ratio=%s required_ratio=%s..%s fvg16=%s fvg12=%s fvg8=%s "
+            "terminal=%s invalidation=%s detail=%s entry=%s stop=%s target=%s",
+            trace.get("symbol"),
+            direction,
+            trace.get("swing_16m_id"),
+            stage,
+            next_stage,
+            trace.get("progress_percent"),
+            trace.get("expansion_16m_id"),
+            trace.get("expansion_ratio"),
+            trace.get("expansion_ratio_min"),
+            trace.get("expansion_ratio_max"),
+            trace.get("fvg_16m_id"),
+            trace.get("fvg_12m_id"),
+            trace.get("fvg_8m_id"),
+            trace.get("is_terminal"),
+            trace.get("invalidation_reason"),
+            trace.get("failure_detail"),
+            trace.get("entry_price"),
+            trace.get("stop_loss"),
+            trace.get("take_profit"),
+        )
 
 
 def _research_expansions(swings):
@@ -2871,6 +2965,17 @@ def _retrace_fvg_lookup_still_open(fvg16: FairValueGap, profile: StrategyProfile
     retrace_fvg_duration = fvg_12m[0].timeframe.duration if fvg_12m else timedelta(minutes=12)
     last_relevant_c2 = fvg16.confirmed_at + retrace_duration
     required_c3_close = last_relevant_c2 + retrace_fvg_duration * 2
+    latest_source_close = max(candle.end_timestamp for candle in candles_1m)
+    return latest_source_close < required_c3_close
+
+
+def _internal_fvg_lookup_still_open(fvg16: FairValueGap, profile: StrategyProfile, candles_1m, fvg_8m: tuple[FairValueGap, ...]) -> bool:
+    if not candles_1m:
+        return False
+    retrace_duration = timedelta(minutes=8 * profile.retrace_window_8m_candles)
+    internal_fvg_duration = fvg_8m[0].timeframe.duration if fvg_8m else timedelta(minutes=8)
+    last_relevant_c2 = fvg16.confirmed_at + retrace_duration
+    required_c3_close = last_relevant_c2 + internal_fvg_duration * 2
     latest_source_close = max(candle.end_timestamp for candle in candles_1m)
     return latest_source_close < required_c3_close
 

@@ -60,6 +60,12 @@ STALENESS_WINDOW_MINUTES = 60
 # cap should never fire in practice - it is a backstop, not a design knob.
 MAX_IN_PROGRESS_SETUPS = 20
 
+RETRYABLE_TIMING_INVALIDATIONS = {
+    InvalidationReason.FVG_16M_NOT_FOUND,
+    InvalidationReason.FVG_12M_NOT_FOUND,
+    InvalidationReason.FVG_8M_NOT_FOUND,
+}
+
 # A stale skip whose detection happens within this many seconds of the
 # current monitoring session's started_at is classified as catching up on a
 # backlog from before this session started (a restart/outage), rather than a
@@ -132,6 +138,22 @@ def _filter_resolved_swings(state: Any, swings: list[Any], *, direction: str) ->
     for swing in swings:
         key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=swing.right_candle.timestamp)
         if key in state.resolved_swing_keys:
+            retryable = _retryable_timing_invalidation_for_swing(
+                state,
+                symbol=swing.symbol,
+                direction=direction,
+                swing_timestamp=swing.right_candle.timestamp,
+                swing_id=swing.swing_id,
+            )
+            if retryable is not None:
+                logger.info(
+                    "Retrying fresh swing %s (%s) after timing-sensitive invalidation %s",
+                    swing.swing_id,
+                    direction,
+                    retryable.invalidation_reason.value if retryable.invalidation_reason else "UNKNOWN",
+                )
+                fresh.append(swing)
+                continue
             logger.debug("Swing %s (%s) already resolved; skipping re-evaluation this poll (key=%s)", swing.swing_id, direction, key)
             continue
         fresh.append(swing)
@@ -159,6 +181,31 @@ def _active_setup_exists_for_swing(state: Any, *, symbol: str, direction: str | 
         ):
             return True
     return False
+
+
+def _resolved_setup_for_swing(state: Any, *, symbol: str, direction: str | SetupDirection, swing_timestamp: datetime, swing_id: str | None = None):
+    setup_direction = direction if isinstance(direction, SetupDirection) else SetupDirection[str(direction).upper()]
+    expected_id = build_setup_id(symbol=symbol, direction=setup_direction, created_at=swing_timestamp, htf_fvg_id=swing_id or "")
+    for setup in (*getattr(state, "invalidated_setups", ()), *getattr(state, "completed_setups", ())):
+        if setup.setup_id == expected_id:
+            return setup
+        if (
+            setup.symbol == symbol
+            and setup.direction is setup_direction
+            and _as_utc(setup.created_at) == _as_utc(swing_timestamp)
+            and (swing_id is None or setup.swing_16m_id == swing_id)
+        ):
+            return setup
+    return None
+
+
+def _retryable_timing_invalidation_for_swing(state: Any, *, symbol: str, direction: str | SetupDirection, swing_timestamp: datetime, swing_id: str | None = None):
+    if not is_fresh_swing(swing_timestamp):
+        return None
+    setup = _resolved_setup_for_swing(state, symbol=symbol, direction=direction, swing_timestamp=swing_timestamp, swing_id=swing_id)
+    if setup is None or setup.invalidation_reason not in RETRYABLE_TIMING_INVALIDATIONS:
+        return None
+    return setup
 
 
 def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: datetime) -> list[Any]:
@@ -203,6 +250,22 @@ def _candidate_swing_filter_diagnostics(
             newest_age = age_min
         key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
         if key in state.resolved_swing_keys:
+            retryable = _retryable_timing_invalidation_for_swing(
+                state,
+                symbol=swing.symbol,
+                direction=direction,
+                swing_timestamp=ts,
+                swing_id=swing.swing_id,
+            )
+            if retryable is not None:
+                fresh.append(swing)
+                logger.info(
+                    "Fresh swing %s (%s) is being re-evaluated after timing-sensitive invalidation %s",
+                    swing.swing_id,
+                    direction,
+                    retryable.invalidation_reason.value if retryable.invalidation_reason else "UNKNOWN",
+                )
+                continue
             resolved_filtered += 1
             logger.debug("Swing %s (%s) already resolved; skipping re-evaluation this poll (key=%s)", swing.swing_id, direction, key)
             continue
@@ -744,7 +807,32 @@ def _apply_one_attempt_trace(
     # which means removing and re-adding list entries instead of writing
     # each one exactly once, ever.
     if setup_id in state.resolved_setup_ids:
-        return
+        retryable = _retryable_timing_invalidation_for_swing(
+            state,
+            symbol=str(trace["symbol"]),
+            direction=direction,
+            swing_timestamp=swing_timestamp,
+            swing_id=swing_id,
+        )
+        same_terminal_retry = (
+            retryable is not None
+            and bool(trace.get("is_terminal"))
+            and trace.get("invalidation_reason") == retryable.invalidation_reason.value
+        )
+        if retryable is None or same_terminal_retry:
+            return
+        state.resolved_setup_ids.discard(setup_id)
+        state.resolved_swing_keys.discard(
+            build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp)
+        )
+        state.invalidated_setups[:] = [setup for setup in state.invalidated_setups if setup.setup_id != setup_id]
+        state.completed_setups[:] = [setup for setup in state.completed_setups if setup.setup_id != setup_id]
+        logger.info(
+            "Reopened setup %s after timing-sensitive invalidation %s advanced to %s",
+            setup_id,
+            retryable.invalidation_reason.value if retryable.invalidation_reason else "UNKNOWN",
+            trace.get("stage"),
+        )
 
     stage = str(trace.get("stage") or "SWING_16M_CONFIRMED")
     mapped_state_for_stage = _ATTEMPT_STAGE_TO_STATE.get(stage, SetupState.SWING_16M_CONFIRMED)
@@ -1379,10 +1467,37 @@ def _compact_funnel(
     direction: str = "BEARISH",
     filter_diagnostics: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    keys = ("candidate_16m_swing_highs", "passed_expansion", "passed_retrace", "entry_ready", "trades", "risk_rejected_count")
+    keys = (
+        "candidate_16m_swing_highs",
+        "candidate_swing_timeframe_swing_highs",
+        "rejected_no_expansion",
+        "passed_expansion",
+        "rejected_no_immediate_16m_fvg",
+        "passed_16m_fvg",
+        "passed_main_fvg_timeframe_fvg",
+        "rejected_no_12m_fvg_inside_leg",
+        "passed_12m_fvg",
+        "passed_retrace_fvg_timeframe_fvg",
+        "rejected_no_8m_fvg_inside_leg",
+        "passed_8m_fvg",
+        "passed_internal_fvg_timeframe_fvg",
+        "rejected_retrace_window_expired",
+        "passed_retrace",
+        "rejected_close_above_12m_fvg",
+        "rejected_close_above_12m_fvg_before_entry",
+        "direct_12m_entries",
+        "signals_generated",
+        "entry_ready",
+        "trades",
+        "risk_rejected_count",
+        "unaccounted_after_retrace",
+        "attempt_trace_summary",
+    )
     compact = {key: funnel.get(key) for key in keys if key in funnel}
     if direction == "BULLISH" and "candidate_16m_swing_highs" in compact:
         compact["candidate_16m_swing_lows"] = compact.pop("candidate_16m_swing_highs")
+    if direction == "BULLISH" and "candidate_swing_timeframe_swing_highs" in compact:
+        compact["candidate_swing_timeframe_swing_lows"] = compact.pop("candidate_swing_timeframe_swing_highs")
     if filter_diagnostics:
         compact["candidate_filter"] = dict(filter_diagnostics)
     return compact

@@ -36,7 +36,7 @@ from arjiobot.live_setup_detection import (
     move_setup_to_completed,
 )
 from arjiobot.market_data.candle_models import Candle, Timeframe
-from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus
+from arjiobot.setup_tracker.setup_models import InvalidationReason, SetupState, SetupStatus, build_swing_dedup_key
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 
@@ -104,6 +104,64 @@ def test_failed_expansion_attempt_is_retained_with_invalidation_reason(monkeypat
     # Highest progress reached (the swing stage) must be preserved, not reset to 0.
     assert failed.progress_percent == 20.0
     assert failed.invalidated_at is not None
+
+
+def test_fresh_timing_fvg_invalidation_can_reopen_when_later_poll_advances() -> None:
+    state = _fake_state("ADAUSDT", ())
+    failed = _swing_trace(
+        "swing_retry_fvg_12",
+        stage="FVG_16M_CONFIRMED",
+        progress_percent=50.0,
+        invalidation_reason="FVG_12M_NOT_FOUND",
+        is_terminal=True,
+    )
+    _apply_attempt_traces(state, "ADAUSDT", (failed,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    assert len(state.invalidated_setups) == 1
+    assert state.invalidated_setups[0].invalidation_reason is InvalidationReason.FVG_12M_NOT_FOUND
+
+    advanced = {
+        **failed,
+        "stage": "FVG_12M_CONFIRMED",
+        "progress_percent": 65.0,
+        "invalidation_reason": None,
+        "is_terminal": False,
+        "fvg_12m_id": "fvg12_recovered",
+    }
+    _apply_attempt_traces(state, "ADAUSDT", (advanced,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert state.invalidated_setups == []
+    [setup] = list(state.setups.values())
+    assert setup.current_state is SetupState.FVG_12M_CONFIRMED
+    assert setup.progress_percent == 65.0
+    assert setup.fvg_12m_id == "fvg12_recovered"
+    key = build_swing_dedup_key(symbol="ADAUSDT", direction="BEARISH", swing_timestamp=datetime.fromisoformat(str(failed["swing_timestamp"])))
+    assert key not in state.resolved_swing_keys
+
+
+def test_non_timing_invalidation_stays_permanently_resolved() -> None:
+    state = _fake_state("ADAUSDT", ())
+    failed = _swing_trace(
+        "swing_retry_expansion_1",
+        stage="SWING_16M_CONFIRMED",
+        progress_percent=20.0,
+        invalidation_reason="EXPANSION_NOT_CONFIRMED",
+        is_terminal=True,
+    )
+    _apply_attempt_traces(state, "ADAUSDT", (failed,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    advanced = {
+        **failed,
+        "stage": "FVG_16M_CONFIRMED",
+        "progress_percent": 50.0,
+        "invalidation_reason": None,
+        "is_terminal": False,
+        "fvg_16m_id": "fvg16_should_not_reopen",
+    }
+    _apply_attempt_traces(state, "ADAUSDT", (advanced,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+
+    assert state.setups == {}
+    assert len(state.invalidated_setups) == 1
+    assert state.invalidated_setups[0].invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
 
 
 def test_entry_ready_setup_from_trade_still_reaches_100_percent() -> None:
