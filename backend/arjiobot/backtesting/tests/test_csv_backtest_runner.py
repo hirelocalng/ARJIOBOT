@@ -871,16 +871,33 @@ def test_direct_12m_entry_accepts_first_valid_bearish_tap_and_blocks_duplicate_t
 
 def test_direct_12m_entry_rejects_bearish_close_above_and_bullish_close_below_before_entry() -> None:
     runner = _load_runner()
+    bearish_close_through = _candle(0, 99, 101, 96, 101)
+    bullish_close_through = _candle(0, 96, 99, 94, 94)
+    retrace_window = tuple(_timeframe_candle(8, datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=8 * index), 80, 90, 70, 75) for index in range(3))
+    assert runner._first_1m_retrace_into_12m_fvg_within_8m_window(
+        fvg12=_fvg(),
+        candles_1m=(bearish_close_through,),
+        fvg16_confirmed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        retrace_window_8m=retrace_window,
+        direction="BEARISH",
+    ) == bearish_close_through
     bearish = runner._classify_direct_12m_retrace_entry_for_direction(
         fvg12=_fvg(),
         retrace_candle=_candle(0, 90, 96, 90, 95),
-        candles_1m=(_candle(0, 99, 101, 96, 101),),
+        candles_1m=(bearish_close_through,),
         direction="BEARISH",
     )
+    assert runner._first_1m_retrace_into_12m_fvg_within_8m_window(
+        fvg12=_fvg(),
+        candles_1m=(bullish_close_through,),
+        fvg16_confirmed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        retrace_window_8m=retrace_window,
+        direction="BULLISH",
+    ) == bullish_close_through
     bullish = runner._classify_direct_12m_retrace_entry_for_direction(
         fvg12=_fvg(),
         retrace_candle=_candle(0, 90, 96, 90, 95),
-        candles_1m=(_candle(0, 96, 99, 94, 94),),
+        candles_1m=(bullish_close_through,),
         direction="BULLISH",
     )
 

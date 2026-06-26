@@ -811,17 +811,12 @@ def _first_1m_retrace_into_12m_fvg_within_8m_window(
         return None
     window_start = fvg16_confirmed_at
     window_end = retrace_window_8m[-1].end_timestamp
-    normalized_direction = str(direction).upper()
     for candle in candles_1m:
         if candle.timestamp < window_start or candle.end_timestamp > window_end:
             continue
         entered_zone = candle.high >= fvg12.lower_boundary and candle.low <= fvg12.upper_boundary
         if not entered_zone:
             continue
-        if normalized_direction == "BEARISH" and candle.close > fvg12.upper_boundary:
-            return None
-        if normalized_direction == "BULLISH" and candle.close < fvg12.lower_boundary:
-            return None
         return candle
     return None
 

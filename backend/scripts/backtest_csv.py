@@ -1427,8 +1427,20 @@ def _attempt_traces_for_direction(
         trace["progress_percent"] = 80.0
 
         retrace_window = tuple(candle for candle in candles_8m if candle.timestamp >= fvg16.confirmed_at)[: profile.retrace_window_8m_candles]
+        _add_retrace_entry_diagnostics(
+            trace,
+            fvg12=fvg12,
+            fvg8=related_8m[0],
+            candles_1m=candles_1m,
+            retrace_window=retrace_window,
+            required_retrace_window_candles=profile.retrace_window_8m_candles,
+            direction=direction,
+        )
         if len(retrace_window) < profile.retrace_window_8m_candles:
             # Window has not fully elapsed yet - still open, not a failure.
+            trace["failure_detail"] = (
+                f"WAITING_RETRACE_WINDOW_OPEN candles={len(retrace_window)}/{profile.retrace_window_8m_candles}"
+            )
             traces.append(trace)
             continue
         retrace_candle = _first_1m_retrace_into_12m_fvg_within_8m_window(
@@ -1439,6 +1451,7 @@ def _attempt_traces_for_direction(
             direction=direction,
         )
         if retrace_candle is None:
+            trace["failure_detail"] = "NO_1M_CANDLE_ENTERED_12M_FVG_WITHIN_8M_WINDOW"
             trace["invalidation_reason"] = "RETRACE_WINDOW_EXPIRED"
             trace["is_terminal"] = True
             traces.append(trace)
@@ -1648,12 +1661,78 @@ def _first_1m_retrace_into_12m_fvg_within_8m_window(
         entered_zone = candle.high >= fvg12.lower_boundary and candle.low <= fvg12.upper_boundary
         if not entered_zone:
             continue
-        if normalized_direction == "BEARISH" and candle.close > fvg12.upper_boundary:
-            return None
-        if normalized_direction == "BULLISH" and candle.close < fvg12.lower_boundary:
-            return None
         return candle
     return None
+
+
+def _add_retrace_entry_diagnostics(
+    trace: dict[str, object],
+    *,
+    fvg12: FairValueGap,
+    fvg8: FairValueGap,
+    candles_1m,
+    retrace_window,
+    required_retrace_window_candles: int,
+    direction: str,
+) -> None:
+    latest = candles_1m[-1] if candles_1m else None
+    latest_price = latest.close if latest is not None else None
+    lower = fvg12.lower_boundary
+    upper = fvg12.upper_boundary
+    distance = None
+    side = "UNKNOWN"
+    if latest_price is not None:
+        if lower <= latest_price <= upper:
+            distance = Decimal("0")
+            side = "INSIDE_ENTRY_ZONE"
+        elif latest_price < lower:
+            distance = lower - latest_price
+            side = "BELOW_ENTRY_ZONE"
+        else:
+            distance = latest_price - upper
+            side = "ABOVE_ENTRY_ZONE"
+    window_complete = len(retrace_window) >= required_retrace_window_candles
+    window_start = retrace_window[0].timestamp if retrace_window else None
+    window_end = retrace_window[-1].end_timestamp if retrace_window else None
+    first_touch = None
+    close_through = None
+    if window_start is not None and window_end is not None:
+        normalized_direction = str(direction).upper()
+        for candle in candles_1m:
+            if candle.timestamp < window_start or candle.end_timestamp > window_end:
+                continue
+            if candle.high < lower or candle.low > upper:
+                continue
+            first_touch = candle
+            close_through = (
+                candle.close > upper if normalized_direction == "BEARISH" else candle.close < lower
+            )
+            break
+    trace["entry_zone_lower"] = str(lower)
+    trace["entry_zone_upper"] = str(upper)
+    trace["fvg_8m_lower"] = str(fvg8.lower_boundary)
+    trace["fvg_8m_upper"] = str(fvg8.upper_boundary)
+    trace["current_market_price"] = str(latest_price) if latest_price is not None else None
+    trace["distance_to_entry_zone"] = str(distance) if distance is not None else None
+    trace["current_price_zone_position"] = side
+    trace["retrace_window_candles"] = len(retrace_window)
+    trace["retrace_window_required_candles"] = required_retrace_window_candles
+    trace["retrace_window_complete"] = window_complete
+    trace["retrace_window_start"] = window_start.isoformat() if window_start is not None else None
+    trace["retrace_window_end"] = window_end.isoformat() if window_end is not None else None
+    trace["entry_zone_touched"] = first_touch is not None
+    trace["entry_zone_first_touch_timestamp"] = first_touch.timestamp.isoformat() if first_touch is not None else None
+    trace["entry_zone_first_touch_close"] = str(first_touch.close) if first_touch is not None else None
+    trace["entry_zone_first_touch_closed_through"] = close_through
+    trace["retrace_waiting_reason"] = (
+        "WAITING_RETRACE_WINDOW_OPEN"
+        if not window_complete
+        else "ENTRY_ZONE_TOUCHED"
+        if first_touch is not None and not close_through
+        else "ENTRY_ZONE_TOUCHED_BUT_CLOSED_THROUGH"
+        if first_touch is not None
+        else "WAITING_FOR_PRICE_TO_ENTER_ENTRY_ZONE"
+    )
 
 
 def _classify_direct_12m_retrace_entry(*, fvg12: FairValueGap, candles_1m, retrace_candle) -> dict[str, int]:
