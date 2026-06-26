@@ -11,7 +11,7 @@ from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.api.routes.monitoring import resume_monitoring_if_enabled
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
-from arjiobot.setup_tracker.setup_history_store import load_setup_history_for_display
+from arjiobot.setup_tracker.setup_history_store import wipe_setup_history
 
 
 logger = logging.getLogger(__name__)
@@ -19,18 +19,12 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """Create Backend API Routes app."""
-    # The very first thing that runs, full stop - before the profile-freeze
-    # check, before the FastAPI app object even exists, before any router is
-    # registered, before bootstrap_live_trading_from_env/
-    # resume_monitoring_if_enabled (the latter can synchronously resume a
-    # polling session right here if monitoring_enabled was persisted from a
-    # previous deploy - the history must be loaded before that starts so the
-    # UI already shows prior context on the very first request after restart).
-    # Loads completed/invalidated history from disk for UI display only;
-    # leaves resolved_setup_ids and resolved_swing_keys EMPTY so the
-    # pre-funnel staleness filter classifies each swing on the first poll.
+    # Wipe setup radar history on every startup so resolved_swing_keys,
+    # resolved_setup_ids, completed_setups, and invalidated_setups all start
+    # from a clean slate — stale keys from a previous long-running session
+    # cannot accumulate in resolved_swing_keys and block detection.
     # IN PROGRESS (state.setups) is never touched by this.
-    load_setup_history_for_display(get_state())
+    wipe_setup_history(get_state())
     assert_profile_freeze()
     logger.warning(PROFILE_FREEZE_RUNTIME_WARNING)
     app = FastAPI(title="ArjioBot Backend API", version="1.0.0")

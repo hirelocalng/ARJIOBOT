@@ -70,6 +70,8 @@ RETRYABLE_TIMING_INVALIDATIONS = {
     InvalidationReason.FVG_16M_NOT_FOUND,
     InvalidationReason.FVG_12M_NOT_FOUND,
     InvalidationReason.FVG_8M_NOT_FOUND,
+    InvalidationReason.EXPANSION_NOT_CONFIRMED,
+    InvalidationReason.NO_EXECUTION_ATTEMPTED,
 }
 
 # A stale skip whose detection happens within this many seconds of the
@@ -81,6 +83,12 @@ RETRYABLE_TIMING_INVALIDATIONS = {
 # opportunities, so a skip that far in is far more likely to be routine
 # strategy-level rejection noise than a genuine restart catch-up.
 RESTART_CATCHUP_WINDOW_SECONDS = 300
+
+# A resolved swing key expires after this many minutes so a swing is not
+# permanently blocked by an earlier invalidation within the same long-running
+# session. Complements the startup wipe in main.py (Fix 1) and the retryable
+# invalidation set above (Fix 2).
+RESOLVED_KEY_EXPIRY_MINUTES = 90
 
 # Setup Radar attempt stage -> SetupState, for every NON-terminal stage. A
 # trace reaching "ENTRY_READY" is never looked up here - it is always routed
@@ -141,9 +149,10 @@ def _filter_resolved_swings(state: Any, swings: list[Any], *, direction: str) ->
     poll.
     """
     fresh: list[Any] = []
+    now = datetime.now(timezone.utc)
     for swing in swings:
         key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=swing.right_candle.timestamp)
-        if key in state.resolved_swing_keys:
+        if _is_resolved_swing_key(state, key, now):
             retryable = _retryable_timing_invalidation_for_swing(
                 state,
                 symbol=swing.symbol,
@@ -231,7 +240,7 @@ def _filter_stale_swings(state: Any, swings: list[Any], *, direction: str, now: 
         else:
             age_min = _swing_age_minutes(ts, now)
             key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
-            state.resolved_swing_keys.add(key)
+            _add_resolved_swing_key(state, key, now)
             logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", swing.symbol, _as_utc(ts).isoformat(), age_min)
     return result
 
@@ -255,7 +264,7 @@ def _candidate_swing_filter_diagnostics(
             newest_ts = ts
             newest_age = age_min
         key = build_swing_dedup_key(symbol=swing.symbol, direction=direction, swing_timestamp=ts)
-        if key in state.resolved_swing_keys:
+        if _is_resolved_swing_key(state, key, now):
             retryable = _retryable_timing_invalidation_for_swing(
                 state,
                 symbol=swing.symbol,
@@ -280,7 +289,7 @@ def _candidate_swing_filter_diagnostics(
                 fresh.append(swing)
                 continue
             stale_filtered += 1
-            state.resolved_swing_keys.add(key)
+            _add_resolved_swing_key(state, key, now)
             logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", swing.symbol, ts.isoformat(), age_min)
             continue
         fresh.append(swing)
@@ -331,14 +340,12 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
         # PROFILE_2's built-in timeframe_profile_id must not override an operator's
         # explicit choice to run live trading on DEFAULT_16_12_8.
         timeframe_profile = get_timeframe_profile(str(state.settings.get("default_timeframe_profile") or profile.timeframe_profile_id or "DEFAULT_16_12_8"))
-        logger.info(
-            "Live evaluation for %s: strategy_profile=%s timeframe_profile=%s (%s) tp_model=%s%s",
+        logger.debug(
+            "Live evaluation for %s: strategy_profile=%s timeframe_profile=%s tp_model=%s",
             symbol,
             profile.profile_id,
             timeframe_profile.profile_id,
-            timeframe_profile.label,
             selected_tp_model,
-            " (structural leg target, not a fixed RR multiple)" if selected_tp_model == "LEG_TARGET_RESEARCH" else "",
         )
         required_minutes = runner._required_timeframes(timeframe_profile)
         profiles = {minutes: build_timeframe_profile(candles, minutes) for minutes in required_minutes}
@@ -395,22 +402,6 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 scan_candles,
                 swings=swing_results.all_swings if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
                 expansions=expansions_main if profile.use_linked_fvg_detection and minutes == timeframe_profile.main_fvg_timeframe else (),
-            )
-            _last5 = [
-                {"o": str(c.open), "h": str(c.high), "l": str(c.low), "c": str(c.close)}
-                for c in scan_candles[-5:]
-            ]
-            logger.info(
-                "FVG_DEBUG [%s] [%sM] 1m_count=%d htf_count=%d last5=%s gap_found=%s",
-                symbol, minutes, len(candles), len(available_candles), _last5, len(result.fvgs) > 0,
-            )
-            logger.info(
-                "[FVG_SCAN] pair=%s timeframe=%s candles_available=%d scanned=%d found=%d",
-                symbol,
-                f"{minutes}M",
-                len(available_candles),
-                len(scan_candles),
-                len(result.fvgs),
             )
             fvg_results[minutes] = result
         shared_funnel_kwargs = dict(
@@ -738,7 +729,7 @@ def _apply_attempt_traces(
 
 def _log_setup_pipeline_audit(record: dict[str, object]) -> None:
     """Emit one structured decision record per swing/setup trace."""
-    logger.info("[SETUP_PIPELINE_AUDIT] %s", json.dumps(record, sort_keys=True, default=str))
+    logger.debug("[SETUP_PIPELINE_AUDIT] %s", json.dumps(record, sort_keys=True, default=str))
 
 
 def _record_in_progress_before_terminal_move(
@@ -842,7 +833,7 @@ def _apply_one_attempt_trace(
     setup_id = build_setup_id(symbol=str(trace["symbol"]), direction=direction, created_at=swing_timestamp, htf_fvg_id=swing_id)
     if not is_fresh_swing(swing_timestamp) and setup_id not in state.setups:
         age_min = _swing_age_minutes(swing_timestamp, datetime.now(timezone.utc))
-        state.resolved_swing_keys.add(build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp))
+        _add_resolved_swing_key(state, build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp))
         logger.debug("[STALE SKIP] %s swing %s age=%.1fmin", str(trace["symbol"]), _as_utc(swing_timestamp).isoformat(), age_min)
         return
 
@@ -866,14 +857,19 @@ def _apply_one_attempt_trace(
         )
         same_terminal_retry = (
             retryable is not None
-            and bool(trace.get("is_terminal"))
-            and trace.get("invalidation_reason") == retryable.invalidation_reason.value
+            and (
+                retryable.invalidation_reason is InvalidationReason.NO_EXECUTION_ATTEMPTED
+                or (
+                    bool(trace.get("is_terminal"))
+                    and trace.get("invalidation_reason") == retryable.invalidation_reason.value
+                )
+            )
         )
         if retryable is None or same_terminal_retry:
             return
         state.resolved_setup_ids.discard(setup_id)
-        state.resolved_swing_keys.discard(
-            build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp)
+        _discard_resolved_swing_key(
+            state, build_swing_dedup_key(symbol=str(trace["symbol"]), direction=direction, swing_timestamp=swing_timestamp)
         )
         state.invalidated_setups[:] = [setup for setup in state.invalidated_setups if setup.setup_id != setup_id]
         state.completed_setups[:] = [setup for setup in state.completed_setups if setup.setup_id != setup_id]
@@ -1132,6 +1128,11 @@ def _apply_one_attempt_trace(
         return
 
     if existing.current_state != target_state:
+        logger.info(
+            "[SETUP] %s %s %s → %s",
+            str(trace["symbol"]), direction.value,
+            existing.current_state.value, target_state.value,
+        )
         state.setup_history.setdefault(setup_id, []).append(
             {
                 "from_state": existing.current_state.value,
@@ -1179,7 +1180,7 @@ def _append_resolved_setup(state: Any, store: list[Any], setup: Any) -> None:
     store.insert(0, setup)
     del store[MAX_TRACKED_SETUP_ATTEMPTS:]
     state.resolved_setup_ids.add(setup.setup_id)
-    state.resolved_swing_keys.add(build_swing_dedup_key(symbol=setup.symbol, direction=setup.direction, swing_timestamp=setup.created_at))
+    _add_resolved_swing_key(state, build_swing_dedup_key(symbol=setup.symbol, direction=setup.direction, swing_timestamp=setup.created_at))
 
 
 def _store_setup(state: Any, setup: Any, *, is_invalidated: bool, target_status: SetupStatus) -> None:
@@ -1484,6 +1485,39 @@ def _as_utc(value: datetime) -> datetime:
 
 def _swing_age_minutes(swing_timestamp: datetime, now: datetime) -> float:
     return (_as_utc(now) - _as_utc(swing_timestamp)).total_seconds() / 60
+
+
+def _is_resolved_swing_key(state: Any, key: str, now: datetime) -> bool:
+    """True if key is in resolved_swing_keys and has not yet expired.
+
+    Test states (SimpleNamespace without resolved_swing_key_timestamps) are
+    treated as permanently resolved — the expiry only applies in the live bot
+    where ApiState carries the companion timestamps dict.
+    """
+    if key not in state.resolved_swing_keys:
+        return False
+    timestamps = getattr(state, "resolved_swing_key_timestamps", None)
+    if timestamps is None:
+        return True
+    added_at = timestamps.get(key)
+    if added_at is None:
+        return True
+    age_minutes = (_as_utc(now) - _as_utc(added_at)).total_seconds() / 60
+    return age_minutes < RESOLVED_KEY_EXPIRY_MINUTES
+
+
+def _add_resolved_swing_key(state: Any, key: str, now: datetime | None = None) -> None:
+    state.resolved_swing_keys.add(key)
+    timestamps = getattr(state, "resolved_swing_key_timestamps", None)
+    if timestamps is not None:
+        timestamps[key] = now or datetime.now(timezone.utc)
+
+
+def _discard_resolved_swing_key(state: Any, key: str) -> None:
+    state.resolved_swing_keys.discard(key)
+    timestamps = getattr(state, "resolved_swing_key_timestamps", None)
+    if timestamps is not None:
+        timestamps.pop(key, None)
 
 
 def _candidate_now(candles: tuple[Candle, ...]) -> datetime:

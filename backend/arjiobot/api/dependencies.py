@@ -340,6 +340,11 @@ class ApiState:
     # (setup_history_store.wipe_setup_history), so fresh signal is never
     # silently blocked by a prior session's resolved keys.
     resolved_swing_keys: set[str] = field(default_factory=set)
+    # UTC timestamp when each resolved_swing_keys entry was added, keyed by
+    # the same dedup string. Used by live_setup_detection._is_resolved_swing_key
+    # to expire entries after RESOLVED_KEY_EXPIRY_MINUTES so a swing is not
+    # permanently blocked within a long-running session.
+    resolved_swing_key_timestamps: dict[str, datetime] = field(default_factory=dict)
     # Restored from setup_history_store.json on process boot when present, and
     # set by the manual Clear History endpoint.
     history_cleared_at: datetime | None = None

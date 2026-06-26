@@ -232,6 +232,7 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     state.invalidated_setups.clear()
     state.resolved_setup_ids.clear()
     state.resolved_swing_keys.clear()
+    getattr(state, "resolved_swing_key_timestamps", {}).clear()
     state.history_cleared_at = datetime.now(timezone.utc)
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)

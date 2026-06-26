@@ -139,12 +139,14 @@ def test_fresh_timing_fvg_invalidation_can_reopen_when_later_poll_advances() -> 
 
 
 def test_non_timing_invalidation_stays_permanently_resolved() -> None:
+    # RETRACE_WINDOW_EXPIRED is a price-structure invalidation — permanently
+    # terminal, never in RETRYABLE_TIMING_INVALIDATIONS.
     state = _fake_state("ADAUSDT", ())
     failed = _swing_trace(
         "swing_retry_expansion_1",
         stage="SWING_16M_CONFIRMED",
         progress_percent=20.0,
-        invalidation_reason="EXPANSION_NOT_CONFIRMED",
+        invalidation_reason="RETRACE_WINDOW_EXPIRED",
         is_terminal=True,
     )
     _apply_attempt_traces(state, "ADAUSDT", (failed,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
@@ -161,7 +163,7 @@ def test_non_timing_invalidation_stays_permanently_resolved() -> None:
 
     assert state.setups == {}
     assert len(state.invalidated_setups) == 1
-    assert state.invalidated_setups[0].invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
+    assert state.invalidated_setups[0].invalidation_reason is InvalidationReason.RETRACE_WINDOW_EXPIRED
 
 
 def test_entry_ready_setup_from_trade_still_reaches_100_percent() -> None:
@@ -397,12 +399,13 @@ def test_invalidated_setup_is_permanently_done_and_never_resurrected_by_a_later_
         "stop_loss": None,
         "take_profit": None,
     }
-    failed_trace = {**base_trace, "stage": "SWING_16M_CONFIRMED", "progress_percent": 20.0, "invalidation_reason": "EXPANSION_NOT_CONFIRMED", "is_terminal": True}
+    # RETRACE_WINDOW_EXPIRED is permanently terminal — not in RETRYABLE_TIMING_INVALIDATIONS.
+    failed_trace = {**base_trace, "stage": "SWING_16M_CONFIRMED", "progress_percent": 20.0, "invalidation_reason": "RETRACE_WINDOW_EXPIRED", "is_terminal": True}
 
     _apply_attempt_traces(state, "ADAUSDT", (failed_trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="LIVE_MARKET_DATA")
     [setup] = state.invalidated_setups
     assert setup.status is SetupStatus.INVALIDATED
-    assert setup.invalidation_reason is InvalidationReason.EXPANSION_NOT_CONFIRMED
+    assert setup.invalidation_reason is InvalidationReason.RETRACE_WINDOW_EXPIRED
     assert setup.invalidated_at is not None
     assert state.setups == {}
     assert setup.setup_id in state.resolved_setup_ids
