@@ -700,6 +700,44 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
     assert expired_trace["failure_detail"] == "FVG_16M_WINDOW_CLOSED_WITHOUT_MATCH"
 
 
+def test_16m_fvg_missing_stays_pending_when_source_1m_is_ahead_of_synthesized_16m_scan() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_pending_missing_synth_c3",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
+    )
+
+    trace = runner._attempt_traces_for_direction(
+        direction="BEARISH",
+        candidate_swings=(swing,),
+        swing_by_id={swing.swing_id: swing},
+        valid_expansions=(expansion,),
+        all_expansions=(expansion,),
+        fvg_by_expansion={expansion.expansion_id: None},
+        candles_main_fvg=(
+            _timeframe_candle(16, start, 100, 105, 95, 100),
+            _timeframe_candle(16, start + timedelta(minutes=16), 100, 120, 100, 110),
+            _timeframe_candle(16, start + timedelta(minutes=32), 110, 112, 82, 86),
+        ),
+        fvg_12m=(),
+        fvg_8m=(),
+        candles_8m=(),
+        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(81)),
+        profile=runner.PROFILE_2,
+    )[0]
+
+    assert trace["stage"] == "EXPANSION_16M_CONFIRMED"
+    assert trace["invalidation_reason"] is None
+    assert trace["is_terminal"] is False
+    assert trace["failure_detail"] == "FVG_16M_PENDING_CONFIRMATION_WINDOW_OPEN"
+
+
 def test_12m_fvg_missing_stays_pending_until_retrace_fvg_window_can_close() -> None:
     runner = _load_backend_runner()
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)

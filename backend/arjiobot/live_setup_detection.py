@@ -9,6 +9,7 @@ a real trade candidate from live candles.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -417,6 +418,7 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
             timeframe_profile=timeframe_profile,
             expansions_16m=expansions_main,
             fvg_16m=fvg_results[timeframe_profile.main_fvg_timeframe].fvgs,
+            candles_main_fvg=profiles[timeframe_profile.main_fvg_timeframe],
             fvg_12m=fvg_results[timeframe_profile.retrace_fvg_timeframe].fvgs,
             fvg_8m=fvg_results[timeframe_profile.internal_fvg_timeframe].fvgs,
             candles_8m=profiles[timeframe_profile.retrace_window_timeframe],
@@ -734,6 +736,11 @@ def _apply_attempt_traces(
             logger.exception("Failed to apply one Setup Radar attempt trace for %s; continuing with remaining traces", symbol)
 
 
+def _log_setup_pipeline_audit(record: dict[str, object]) -> None:
+    """Emit one structured decision record per swing/setup trace."""
+    logger.info("[SETUP_PIPELINE_AUDIT] %s", json.dumps(record, sort_keys=True, default=str))
+
+
 def _record_in_progress_before_terminal_move(
     state: Any,
     *,
@@ -950,6 +957,20 @@ def _apply_one_attempt_trace(
         "entry_zone_first_touch_close",
         "entry_zone_first_touch_closed_through",
         "retrace_waiting_reason",
+        "audit_source",
+        "audit_main_fvg_dataset",
+        "audit_retrace_fvg_count",
+        "audit_internal_fvg_count",
+        "swing_right_candle_index",
+        "rejection_candle_index",
+        "fvg_16m_lower",
+        "fvg_16m_upper",
+        "fvg_16m_c2_timestamp",
+        "fvg_16m_c3_timestamp",
+        "fvg_16m_c2_index",
+        "fvg_16m_c3_index",
+        "fvg_12m_lower",
+        "fvg_12m_upper",
     ):
         if trace.get(key) is not None:
             metadata[key] = str(trace[key])
@@ -994,6 +1015,34 @@ def _apply_one_attempt_trace(
     # invalidated never reaches this point a second time (the
     # resolved_setup_ids check above already returned) - once invalidated,
     # permanently done, per the Setup Radar journey rule (Fix 4).
+
+    _log_setup_pipeline_audit(
+        {
+            "setup_id": setup_id,
+            "symbol": str(trace["symbol"]),
+            "direction": direction.value,
+            "swing_id": swing_id,
+            "swing_timestamp": swing_timestamp.isoformat(),
+            "stage": stage,
+            "target_state": target_state.value,
+            "progress_percent": new_progress,
+            "expansion_16m_id": field_updates.get("expansion_16m_id"),
+            "fvg_16m_id": field_updates.get("fvg_16m_id"),
+            "fvg_12m_id": field_updates.get("fvg_12m_id"),
+            "fvg_8m_id": field_updates.get("fvg_8m_id"),
+            "fvg_16m_bounds": [metadata.get("fvg_16m_lower"), metadata.get("fvg_16m_upper")],
+            "fvg_12m_bounds": [metadata.get("fvg_12m_lower"), metadata.get("fvg_12m_upper")],
+            "fvg_8m_bounds": [metadata.get("fvg_8m_lower"), metadata.get("fvg_8m_upper")],
+            "swing_right_candle_index": metadata.get("swing_right_candle_index"),
+            "fvg_16m_c2_index": metadata.get("fvg_16m_c2_index"),
+            "fvg_16m_c3_index": metadata.get("fvg_16m_c3_index"),
+            "rejection_candle_index": metadata.get("rejection_candle_index"),
+            "invalidation_reason": str(trace.get("invalidation_reason") or ""),
+            "failure_detail": str(trace.get("failure_detail") or ""),
+            "data_source": source,
+            "audit_main_fvg_dataset": metadata.get("audit_main_fvg_dataset"),
+        }
+    )
 
     if existing is None:
         # A setup that resolves immediately on the very first poll it is

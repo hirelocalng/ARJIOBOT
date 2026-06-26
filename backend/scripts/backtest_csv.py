@@ -560,6 +560,7 @@ def _build_strategy_funnel(
     fvg_8m: tuple[FairValueGap, ...],
     candles_8m,
     candles_1m,
+    candles_main_fvg=(),
     starting_balance=None,
     risk_amount_per_trade=None,
     max_leverage=None,
@@ -818,6 +819,7 @@ def _build_strategy_funnel(
         valid_expansions=valid_expansions,
         all_expansions=expansions_16m,
         fvg_by_expansion=fvg_by_expansion,
+        candles_main_fvg=candles_main_fvg,
         fvg_12m=fvg_12m,
         fvg_8m=fvg_8m,
         candles_8m=candles_8m,
@@ -910,6 +912,7 @@ def _build_bullish_strategy_funnel(
     fvg_8m: tuple[FairValueGap, ...],
     candles_8m,
     candles_1m,
+    candles_main_fvg=(),
     starting_balance=None,
     risk_amount_per_trade=None,
     max_leverage=None,
@@ -1173,6 +1176,7 @@ def _build_bullish_strategy_funnel(
         valid_expansions=valid_expansions,
         all_expansions=expansions_16m,
         fvg_by_expansion=fvg_by_expansion,
+        candles_main_fvg=candles_main_fvg,
         fvg_12m=fvg_12m,
         fvg_8m=fvg_8m,
         candles_8m=candles_8m,
@@ -1267,6 +1271,7 @@ def _attempt_traces_for_direction(
     candles_8m,
     candles_1m,
     profile: StrategyProfile,
+    candles_main_fvg=(),
 ) -> tuple[dict[str, object], ...]:
     """Read-only per-swing attempt trace for Setup Radar, parallel to the funnel above.
 
@@ -1309,6 +1314,11 @@ def _attempt_traces_for_direction(
             "expansion_ratio": str(getattr(raw_expansion, "expansion_ratio", "")) if raw_expansion is not None else None,
             "expansion_ratio_min": str(profile.expansion_ratio_min),
             "expansion_ratio_max": str(profile.expansion_ratio_max),
+            "audit_source": "attempt_traces",
+            "audit_main_fvg_dataset": json.dumps(_candle_dataset_audit(candles_main_fvg), sort_keys=True),
+            "audit_retrace_fvg_count": len(fvg_12m),
+            "audit_internal_fvg_count": len(fvg_8m),
+            "swing_right_candle_index": _candle_index(candles_main_fvg, swing.right_candle.timestamp),
         }
 
         expansion = valid_expansion_by_swing_id.get(swing.swing_id)
@@ -1335,8 +1345,9 @@ def _attempt_traces_for_direction(
         fvg16 = fvg_by_expansion.get(expansion.expansion_id)
         completion_candle = None if fvg16 is None else (fvg16.fvg_completion_candle_high if is_bullish else fvg16.fvg_completion_candle_low)
         if fvg16 is None or completion_candle is None:
-            if _main_fvg_lookup_still_open(expansion, profile, candles_1m):
+            if _main_fvg_lookup_still_open(expansion, profile, candles_1m, candles_main_fvg):
                 trace["failure_detail"] = "FVG_16M_PENDING_CONFIRMATION_WINDOW_OPEN"
+                trace["rejection_candle_index"] = _expected_main_fvg_completion_index(expansion, profile, candles_main_fvg)
                 _logger.debug(
                     "[FVG16M-TRACE] %s %s swing=%s exp=%s@%s: FVG_16M_PENDING "
                     "(fvg16=%s completion_candle=%s)",
@@ -1355,10 +1366,17 @@ def _attempt_traces_for_direction(
             )
             trace["failure_detail"] = "FVG_16M_WINDOW_CLOSED_WITHOUT_MATCH"
             trace["invalidation_reason"] = "FVG_16M_NOT_FOUND"
+            trace["rejection_candle_index"] = _expected_main_fvg_completion_index(expansion, profile, candles_main_fvg)
             trace["is_terminal"] = True
             traces.append(trace)
             continue
         trace["fvg_16m_id"] = fvg16.fvg_id
+        trace["fvg_16m_lower"] = str(fvg16.lower_boundary)
+        trace["fvg_16m_upper"] = str(fvg16.upper_boundary)
+        trace["fvg_16m_c2_timestamp"] = fvg16.c2_timestamp.isoformat()
+        trace["fvg_16m_c3_timestamp"] = fvg16.c3_timestamp.isoformat()
+        trace["fvg_16m_c2_index"] = _candle_index(candles_main_fvg, fvg16.c2_timestamp)
+        trace["fvg_16m_c3_index"] = _candle_index(candles_main_fvg, fvg16.c3_timestamp)
         trace["stage"] = "FVG_16M_CONFIRMED"
         trace["progress_percent"] = 50.0
 
@@ -1409,6 +1427,8 @@ def _attempt_traces_for_direction(
             continue
         fvg12 = related_12m[0]
         trace["fvg_12m_id"] = fvg12.fvg_id
+        trace["fvg_12m_lower"] = str(fvg12.lower_boundary)
+        trace["fvg_12m_upper"] = str(fvg12.upper_boundary)
         trace["stage"] = "FVG_12M_CONFIRMED"
         trace["progress_percent"] = 65.0
 
@@ -1423,6 +1443,8 @@ def _attempt_traces_for_direction(
             traces.append(trace)
             continue
         trace["fvg_8m_id"] = related_8m[0].fvg_id
+        trace["fvg_8m_lower"] = str(related_8m[0].lower_boundary)
+        trace["fvg_8m_upper"] = str(related_8m[0].upper_boundary)
         trace["stage"] = "FVG_8M_CONFIRMED"
         trace["progress_percent"] = 80.0
 
@@ -3018,7 +3040,39 @@ def _one_fvg_matches_expansion(fvg: FairValueGap, expansion, profile: StrategyPr
     return fvg.c3_timestamp == expected_confirmation_candle
 
 
-def _main_fvg_lookup_still_open(expansion, profile: StrategyProfile, candles_1m) -> bool:
+def _candle_dataset_audit(candles) -> dict[str, object]:
+    values = tuple(candles or ())
+    if not values:
+        return {"count": 0}
+    return {
+        "count": len(values),
+        "timeframe": values[0].timeframe.label,
+        "first_timestamp": values[0].timestamp.isoformat(),
+        "last_timestamp": values[-1].timestamp.isoformat(),
+        "latest_close": values[-1].end_timestamp.isoformat(),
+    }
+
+
+def _candle_index(candles, timestamp: datetime | None) -> int | None:
+    if timestamp is None:
+        return None
+    normalized = timestamp.astimezone(timezone.utc) if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    for index, candle in enumerate(tuple(candles or ())):
+        if candle.timestamp == normalized:
+            return index
+    return None
+
+
+def _expected_main_fvg_completion_index(expansion, profile: StrategyProfile, candles_main_fvg) -> int | None:
+    if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
+        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
+    else:
+        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.fvg_delay_16m_candles
+    expected_c3 = last_possible_c2 + expansion.timeframe.duration
+    return _candle_index(candles_main_fvg, expected_c3)
+
+
+def _main_fvg_lookup_still_open(expansion, profile: StrategyProfile, candles_1m, candles_main_fvg=()) -> bool:
     """Return True while a missing main-timeframe FVG is not knowable yet.
 
     The 16M FVG matcher keys on an FVG's C2 timestamp, but the FVG itself is
@@ -3032,7 +3086,15 @@ def _main_fvg_lookup_still_open(expansion, profile: StrategyProfile, candles_1m)
         last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
     else:
         last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.fvg_delay_16m_candles
-    required_c3_close = last_possible_c2 + expansion.timeframe.duration * 2
+    required_c3_timestamp = last_possible_c2 + expansion.timeframe.duration
+    required_c3_close = required_c3_timestamp + expansion.timeframe.duration
+    main_candles = tuple(candles_main_fvg or ())
+    if main_candles:
+        latest_main_close = max(candle.end_timestamp for candle in main_candles)
+        if latest_main_close < required_c3_close:
+            return True
+        if not any(candle.timestamp == required_c3_timestamp for candle in main_candles):
+            return True
     latest_source_close = max(candle.end_timestamp for candle in candles_1m)
     return latest_source_close < required_c3_close
 
