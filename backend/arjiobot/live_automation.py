@@ -334,11 +334,12 @@ def _process_setup(state: Any, automation: dict[str, Any], setup: Any, *, source
     }
     detection_to_execution_seconds = _seconds_since_detected(setup)
     logger.info(
-        "Live automation: processing ENTRY_READY setup %s %s/%s (source=%s) - %s after detection",
+        "[ENTRY_READY-PICKUP] setup=%s symbol=%s direction=%s source=%s detected_at_wallclock=%s elapsed=%s",
         setup.setup_id,
         setup.symbol,
         setup.direction.value,
         source,
+        (setup.metadata or {}).get("detected_at_wallclock"),
         f"{detection_to_execution_seconds:.3f}s" if detection_to_execution_seconds is not None else "unknown",
     )
     signal = state.strategy_engine.generate_signal_from_setup(setup)

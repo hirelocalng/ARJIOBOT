@@ -524,6 +524,16 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
                 state.resolved_setup_ids.discard(setup.setup_id)
                 _suppress_redundant_attempt_trace(state, setup.swing_16m_id)  # defensive backstop; normally a no-op now
                 state.setups[setup.setup_id] = setup
+                logger.info(
+                    "[ENTRY_READY-SET] setup=%s symbol=%s direction=%s swing=%s source=%s detected_at_wallclock=%s live_trade_key=%s",
+                    setup.setup_id,
+                    setup.symbol,
+                    setup.direction.value,
+                    setup.swing_16m_id,
+                    source,
+                    setup.metadata.get("detected_at_wallclock"),
+                    setup.metadata.get("live_trade_key"),
+                )
                 _cap_in_progress(state)
                 state.setup_history.setdefault(setup.setup_id, []).append(
                     {
@@ -934,6 +944,10 @@ def _apply_one_attempt_trace(
         "expansion_ratio_max",
         "fvg_12m_candidates_after_16m",
         "fvg_12m_candidates_inside_leg",
+        "fvg_8m_candidates_in_window",
+        "fvg_8m_window_start",
+        "fvg_8m_window_end",
+        "fvg_8m_effective_window_candles",
         "fvg_leg_high",
         "fvg_leg_low",
         "entry_zone_lower",
@@ -1007,6 +1021,13 @@ def _apply_one_attempt_trace(
         field_updates["invalidation_reason"] = InvalidationReason.NO_EXECUTION_ATTEMPTED
         field_updates["last_valid_stage"] = "ENTRY_READY"
         field_updates["execution_status"] = "invalidated"
+        logger.warning(
+            "[ENTRY_READY-TRACE-ONLY] setup=%s symbol=%s direction=%s swing=%s reached structural ENTRY_READY but no real trade candidate was handed to live automation; marking NO_EXECUTION_ATTEMPTED",
+            setup_id,
+            trace.get("symbol"),
+            direction.value,
+            swing_id,
+        )
     # No "favorable resolution" branch anymore: a setup_id that was ever
     # invalidated never reaches this point a second time (the
     # resolved_setup_ids check above already returned) - once invalidated,

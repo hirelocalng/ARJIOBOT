@@ -662,12 +662,14 @@ def _build_strategy_funnel(
             no_12m += 1
             continue
         fvg12 = related_12m[0]
-        related_8m = _fvgs_inside_leg(
+        related_8m = _internal_fvgs_inside_match_window(
             fvg_8m,
             direction=fvg16.direction,
+            expansion=expansion,
+            fvg16=fvg16,
+            profile=profile,
             swing_high_price=swing.price,
             completion_candle_low=fvg16.fvg_completion_candle_low,
-            start_at=fvg16.confirmed_at,
         )
         if not related_8m:
             no_8m += 1
@@ -1022,12 +1024,14 @@ def _build_bullish_strategy_funnel(
             no_12m += 1
             continue
         fvg12 = related_12m[0]
-        related_8m = _fvgs_inside_leg(
+        related_8m = _internal_fvgs_inside_match_window(
             fvg_8m,
             direction=fvg16.direction,
+            expansion=expansion,
+            fvg16=fvg16,
+            profile=profile,
             swing_low_price=swing.price,
             completion_candle_high=fvg16.fvg_completion_candle_high,
-            start_at=fvg16.confirmed_at,
         )
         if not related_8m:
             no_8m += 1
@@ -1439,12 +1443,37 @@ def _attempt_traces_for_direction(
         trace["stage"] = "FVG_12M_CONFIRMED"
         trace["progress_percent"] = 65.0
 
-        related_8m = _fvgs_inside_leg(fvg_8m, direction=fvg16.direction, start_at=fvg16.confirmed_at, **leg_kwargs)
+        related_8m = _internal_fvgs_inside_match_window(
+            fvg_8m,
+            direction=fvg16.direction,
+            expansion=expansion,
+            fvg16=fvg16,
+            profile=profile,
+            **leg_kwargs,
+        )
         if not related_8m:
+            window_start = _internal_fvg_match_window_start(expansion, fvg16)
+            window_end = _internal_fvg_match_window_end(fvg16, profile)
+            same_direction_in_window = tuple(
+                fvg
+                for fvg in fvg_8m
+                if fvg.direction is fvg16.direction and window_start <= fvg.timestamp <= window_end
+            )
+            trace["fvg_8m_candidates_in_window"] = len(same_direction_in_window)
+            trace["fvg_8m_window_start"] = window_start.isoformat()
+            trace["fvg_8m_window_end"] = window_end.isoformat()
+            trace["fvg_8m_effective_window_candles"] = _effective_internal_fvg_match_window_candles(profile)
             if _internal_fvg_lookup_still_open(fvg16, profile, candles_1m, fvg_8m):
-                trace["failure_detail"] = f"FVG_8M_PENDING_CONFIRMATION_WINDOW_OPEN direction={fvg16.direction.value}"
+                trace["failure_detail"] = (
+                    f"FVG_8M_PENDING_CONFIRMATION_WINDOW_OPEN direction={fvg16.direction.value} "
+                    f"candidates_in_window={len(same_direction_in_window)}"
+                )
                 traces.append(trace)
                 continue
+            trace["failure_detail"] = (
+                f"NO_8M_FVG_INSIDE_16M_LEG direction={fvg16.direction.value} "
+                f"candidates_in_window={len(same_direction_in_window)}"
+            )
             trace["invalidation_reason"] = "FVG_8M_NOT_FOUND"
             trace["is_terminal"] = True
             traces.append(trace)
@@ -3060,6 +3089,18 @@ def _main_fvg_match_window_start(expansion) -> datetime:
     return getattr(expansion, "leg_start_timestamp", None) or expansion.timestamp
 
 
+def _effective_internal_fvg_match_window_candles(profile: StrategyProfile) -> int:
+    return max(int(profile.retrace_window_8m_candles), 3)
+
+
+def _internal_fvg_match_window_start(expansion, fvg16: FairValueGap) -> datetime:
+    return getattr(expansion, "leg_start_timestamp", None) or fvg16.confirmed_at
+
+
+def _internal_fvg_match_window_end(fvg16: FairValueGap, profile: StrategyProfile) -> datetime:
+    return fvg16.confirmed_at + timedelta(minutes=8 * _effective_internal_fvg_match_window_candles(profile))
+
+
 def _candle_dataset_audit(candles) -> dict[str, object]:
     values = tuple(candles or ())
     if not values:
@@ -3552,6 +3593,36 @@ def _fvgs_inside_leg(
             swing_high_price=swing_high_price,
             completion_candle_low=completion_candle_low,
         )
+    )
+
+
+def _internal_fvgs_inside_match_window(
+    fvgs: tuple[FairValueGap, ...],
+    *,
+    direction: FVGDirection,
+    expansion,
+    fvg16: FairValueGap,
+    profile: StrategyProfile,
+    swing_high_price=None,
+    completion_candle_low=None,
+    swing_low_price=None,
+    completion_candle_high=None,
+) -> tuple[FairValueGap, ...]:
+    window_start = _internal_fvg_match_window_start(expansion, fvg16)
+    window_end = _internal_fvg_match_window_end(fvg16, profile)
+    candidates = tuple(
+        fvg
+        for fvg in fvgs
+        if fvg.direction is direction and window_start <= fvg.timestamp <= window_end
+    )
+    return _fvgs_inside_leg(
+        candidates,
+        direction=direction,
+        swing_high_price=swing_high_price,
+        completion_candle_low=completion_candle_low,
+        swing_low_price=swing_low_price,
+        completion_candle_high=completion_candle_high,
+        start_at=window_start,
     )
 
 

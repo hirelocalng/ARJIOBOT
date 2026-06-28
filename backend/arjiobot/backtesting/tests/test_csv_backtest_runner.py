@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -862,6 +863,70 @@ def test_related_12m_and_8m_fvgs_must_be_same_direction_same_leg() -> None:
     )
 
     assert related == (bearish,)
+
+
+def test_internal_8m_fvg_match_window_is_effectively_at_least_three_candles() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_internal_wide",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        leg_start_timestamp=swing.left_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
+    )
+    fvg16 = _fvg_with_id("fvg16_internal", Timeframe(16), swing.right_candle.timestamp)
+    third_8m_after_16m = _fvg_with_id(
+        "fvg8_third_after_16m",
+        Timeframe(8),
+        fvg16.confirmed_at + timedelta(minutes=24),
+    )
+    profile = replace(runner.PROFILE_2, retrace_window_8m_candles=1)
+
+    related = runner._internal_fvgs_inside_match_window(
+        (third_8m_after_16m,),
+        direction=FVGDirection.BEARISH,
+        expansion=expansion,
+        fvg16=fvg16,
+        profile=profile,
+        swing_high_price=Decimal("120"),
+        completion_candle_low=Decimal("80"),
+    )
+
+    assert runner._effective_internal_fvg_match_window_candles(profile) == 3
+    assert related == (third_8m_after_16m,)
+
+
+def test_internal_8m_fvg_search_includes_expansion_leg_candles() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_internal_leg",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        leg_start_timestamp=swing.left_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
+    )
+    fvg16 = _fvg_with_id("fvg16_internal_leg", Timeframe(16), swing.right_candle.timestamp)
+    leg_8m = _fvg_with_id("fvg8_inside_expansion_leg", Timeframe(8), swing.middle_candle.timestamp)
+
+    related = runner._internal_fvgs_inside_match_window(
+        (leg_8m,),
+        direction=FVGDirection.BEARISH,
+        expansion=expansion,
+        fvg16=fvg16,
+        profile=runner.PROFILE_2,
+        swing_high_price=Decimal("120"),
+        completion_candle_low=Decimal("80"),
+    )
+
+    assert related == (leg_8m,)
 
 
 def test_profile_f_retrace_window_starts_at_16m_fvg_and_is_three_8m_candles() -> None:

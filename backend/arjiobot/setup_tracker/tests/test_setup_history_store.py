@@ -7,6 +7,7 @@ backend/data/ files.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 from arjiobot.live_setup_detection import _filter_resolved_swings, _setup_from_trade, move_setup_to_completed
@@ -319,10 +320,18 @@ def test_load_setup_history_for_display_with_corrupt_file_starts_empty(monkeypat
 def test_clear_startup_funnel_state_clears_only_volatile_attempt_state() -> None:
     state = _fake_state()
     active = _make_completed_trade(state, suffix="active_startup", entry_timestamp="2026-06-24T00:00:00+00:00")
+    attempt = replace(
+        _make_completed_trade(state, suffix="attempt_startup", entry_timestamp="2026-06-24T00:30:00+00:00"),
+        current_state=SetupState.EXPANSION_16M_CONFIRMED,
+        status=SetupStatus.ACTIVE,
+        metadata={"source": "MONITORING_POLL"},
+    )
     completed = _make_completed_trade(state, suffix="completed_startup", entry_timestamp="2026-06-24T01:00:00+00:00")
     state.setups[active.setup_id] = active
+    state.setups[attempt.setup_id] = attempt
     state.completed_setups.append(completed)
     state.setup_history[active.setup_id] = [{"to_state": "EXPANSION_16M_CONFIRMED"}]
+    state.setup_history[attempt.setup_id] = [{"to_state": "EXPANSION_16M_CONFIRMED"}]
     state.stale_trade_skips["swing_old"] = {"symbol": "BTCUSDT"}
     state.resolved_setup_ids.add(active.setup_id)
     state.resolved_swing_keys.add("BTCUSDT|BEARISH|2026-06-24T00:00:00+00:00")
@@ -335,10 +344,11 @@ def test_clear_startup_funnel_state_clears_only_volatile_attempt_state() -> None
 
     cleared = setup_history_store.clear_startup_funnel_state(state)
 
-    assert cleared["active_setups"] == 1
+    assert cleared["active_setups"] == 2
     assert cleared["latest_funnel_symbols"] == 1
-    assert state.setups == {}
-    assert state.setup_history == {}
+    assert cleared["preserved_entry_ready_setups"] == 1
+    assert state.setups == {active.setup_id: active}
+    assert state.setup_history == {active.setup_id: [{"to_state": "EXPANSION_16M_CONFIRMED"}]}
     assert state.stale_trade_skips == {}
     assert state.resolved_setup_ids == set()
     assert state.resolved_swing_keys == set()

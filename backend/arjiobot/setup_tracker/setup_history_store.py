@@ -243,10 +243,31 @@ def clear_startup_funnel_state(state: Any) -> dict[str, int]:
     resolved_setup_count = len(resolved_setup_ids) if hasattr(resolved_setup_ids, "__len__") else 0
     resolved_swing_count = len(resolved_swing_keys) if hasattr(resolved_swing_keys, "__len__") else 0
 
-    if hasattr(active_setups, "clear"):
+    preserved_entry_ready_ids: set[str] = set()
+    if isinstance(active_setups, dict):
+        preserved = {
+            setup_id: setup
+            for setup_id, setup in active_setups.items()
+            if getattr(setup, "current_state", None) is SetupState.ENTRY_READY
+            and getattr(setup, "status", None) is SetupStatus.ENTRY_READY
+            and getattr(setup, "metadata", {}).get("source") == "LIVE_PROFILE_EVALUATOR"
+        }
+        preserved_entry_ready_ids = set(preserved)
+        active_setups.clear()
+        active_setups.update(preserved)
+    elif hasattr(active_setups, "clear"):
         active_setups.clear()
     if hasattr(setup_history, "clear"):
-        setup_history.clear()
+        if preserved_entry_ready_ids and isinstance(setup_history, dict):
+            preserved_history = {
+                setup_id: history
+                for setup_id, history in setup_history.items()
+                if setup_id in preserved_entry_ready_ids
+            }
+            setup_history.clear()
+            setup_history.update(preserved_history)
+        else:
+            setup_history.clear()
     if hasattr(stale_skips, "clear"):
         stale_skips.clear()
     if hasattr(resolved_setup_ids, "clear"):
@@ -269,7 +290,7 @@ def clear_startup_funnel_state(state: Any) -> dict[str, int]:
     logger.warning(
         "Setup Radar startup funnel state cleared: active_setups=%d setup_history=%d latest_funnel_symbols=%d "
         "latest_trade_candidate_fields=%d stale_trade_skips=%d resolved_setup_ids=%d resolved_swing_keys=%d "
-        "processed_trade_keys=%d. First poll will rebuild funnel state for all monitored pairs.",
+        "processed_trade_keys=%d preserved_entry_ready_setups=%d. First poll will rebuild funnel state for all monitored pairs.",
         active_count,
         history_count,
         funnel_count,
@@ -278,6 +299,7 @@ def clear_startup_funnel_state(state: Any) -> dict[str, int]:
         resolved_setup_count,
         resolved_swing_count,
         processed_trade_count,
+        len(preserved_entry_ready_ids),
     )
     return {
         "active_setups": active_count,
@@ -288,6 +310,7 @@ def clear_startup_funnel_state(state: Any) -> dict[str, int]:
         "resolved_setup_ids": resolved_setup_count,
         "resolved_swing_keys": resolved_swing_count,
         "processed_trade_keys": processed_trade_count,
+        "preserved_entry_ready_setups": len(preserved_entry_ready_ids),
     }
 
 
