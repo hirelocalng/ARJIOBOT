@@ -32,13 +32,13 @@ Current mode:
 From the repository root:
 
 ```bat
-..\.venv\Scripts\python.exe -m pip install pytest
+python -m pip install -r requirements.txt
 ```
 
-If using the shared workspace venv from this project:
+If using a shared workspace venv one level above this project:
 
 ```bat
-..\.venv\Scripts\python.exe -m pytest --version
+..\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ## Run Backend
@@ -60,6 +60,9 @@ Install Node.js LTS first. Then:
 ```bat
 scripts\run_frontend.bat
 ```
+
+In PowerShell, use `npm.cmd` instead of `npm` if script execution policy blocks
+`npm.ps1`.
 
 The frontend expects:
 
@@ -110,13 +113,15 @@ Default demo pairs:
 Use the Risk Settings page. Risk amount per trade means maximum loss if the stop
 loss is hit. It is not margin, leverage, or position size.
 
-## Not Enabled Yet
+## Production Safety Gates
 
-- Live trading
-- Real Bitget order placement
-- Production database
-- Authentication/login
-- Multi-user SaaS features
+- Dashboard authentication is supported when `ARJIOBOT_DASHBOARD_PASSWORD` is set.
+- Live trading routes exist, but live mode is off by default and blocked until
+  account, market-data, risk, environment, and confirmation checks pass.
+- Real Bitget order placement must remain guarded behind the live toggle and
+  account verification flow.
+- Use `DATABASE_URL` and `ARJIOBOT_CREDENTIAL_ENCRYPTION_KEY` for durable
+  production settings and encrypted saved account credentials.
 
 ## Next Steps
 

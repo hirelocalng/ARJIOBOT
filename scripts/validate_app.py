@@ -52,8 +52,8 @@ def validate() -> dict[str, object]:
     checks["backtester_demo_runs"] = bool(backtest_report["run"].run_id)
     checks["reports_directories_exist"] = all(path.exists() for path in report_dirs)
     checks["frontend_required_files_exist"] = (ROOT / "frontend" / "src" / "App.tsx").exists()
-    checks["no_login_page_exists"] = "Login" not in frontend_source and "Register" not in frontend_source
-    checks["no_live_order_route_exists"] = not any("live" in path for path in openapi["paths"])
+    checks["dashboard_auth_route_exists"] = "/api/auth/status" in openapi["paths"] and "/api/auth/login" in openapi["paths"]
+    checks["guarded_live_trading_route_exists"] = "/api/live-trading/toggle" in openapi["paths"] and "understand_real_funds" in (ROOT / "backend" / "arjiobot" / "api" / "routes" / "live_trading.py").read_text(encoding="utf-8")
     checks["safe_account_has_no_raw_secret"] = "api_secret" not in safe_account and "passphrase" not in safe_account and safe_account["api_key"] == "abc****xyz"
 
     node_available = _command_exists("node")
@@ -72,7 +72,7 @@ def validate() -> dict[str, object]:
         "Node build validation": "SKIPPED - Node/npm unavailable" if not node_available else "READY",
         "Application Integration Ready": "YES" if all(checks.values()) else "NO",
         "Backtesting Ready": "YES" if checks["sample_csv_loads"] and checks["backtester_demo_runs"] else "NO",
-        "Live Trading Enabled": "NO",
+        "Live Trading Enabled": "GUARDED / OFF BY DEFAULT",
         "Next recommended action": "Run CSV historical backtests",
     }
     return {"summary": summary, "checks": checks}
@@ -96,7 +96,7 @@ def write_html(result: dict[str, object]) -> Path:
 <style>body {{ font-family: Arial, sans-serif; margin: 32px; color: #17202a; }} table {{ border-collapse: collapse; width: 100%; }} th, td {{ border: 1px solid #d5d8dc; padding: 8px; text-align: left; }} th {{ background: #eaf2f8; }} .pass {{ color: #117a65; font-weight: 700; }}</style></head>
 <body><h1>Application Integration Validation Report</h1><p class="pass">PASS / FAIL Summary: {summary['Application Integration Ready']}</p>
 <h2>Summary</h2><ul>{summary_items}</ul><h2>Smoke Checks</h2><table><thead><tr><th>Check</th><th>Status</th></tr></thead><tbody>{check_rows}</tbody></table>
-<h2>Known Limitations</h2><ul><li>Node/npm are not available in this shell, so frontend Vite build is skipped.</li><li>JSON storage is metadata-only and production must use encrypted database storage before persistent secrets.</li><li>Live trading remains disabled.</li></ul></body></html>"""
+<h2>Known Limitations</h2><ul><li>Node/npm may be unavailable on some shells; run npm.cmd on Windows PowerShell if npm.ps1 is blocked.</li><li>JSON storage is metadata-only and production should use encrypted database storage for durable settings and saved accounts.</li><li>Live trading is present but guarded and off by default.</li></ul></body></html>"""
     path.write_text(html, encoding="utf-8")
     return path
 

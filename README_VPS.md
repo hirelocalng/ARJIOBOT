@@ -60,10 +60,10 @@ GET /api/system-status
 ## Validation
 
 ```powershell
-..\.venv\Scripts\python.exe -m pytest backend/arjiobot/api/tests backend/arjiobot/risk/tests backend/arjiobot/execution/tests backend/arjiobot/backtesting/tests -q
+python -m pytest backend/arjiobot/api/tests backend/arjiobot/risk/tests backend/arjiobot/execution/tests backend/arjiobot/backtesting/tests -q -p no:cacheprovider --basetemp .pytest-tmp/vps
 ```
 
 ```powershell
 cd frontend
-npm run build
+npm.cmd run build
 ```
