@@ -646,6 +646,54 @@ def test_profile_f_16m_fvg_must_be_formed_by_same_expansion_c3() -> None:
     assert runner._one_fvg_matches_expansion(unrelated, expansion, runner.PROFILE_F_VOLUME) is False
 
 
+def test_legacy_16m_fvg_match_window_is_effectively_at_least_three_candles() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_legacy_wide",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        leg_start_timestamp=swing.left_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
+    )
+    third_candle_after_expansion = _fvg_with_id(
+        "fvg_legacy_third",
+        Timeframe(16),
+        swing.right_candle.timestamp + Timeframe(16).duration * 3,
+        related_swing_id=swing.swing_id,
+    )
+
+    assert runner.PROFILE_2.main_fvg_match_window_candles == 1
+    assert runner._effective_main_fvg_match_window_candles(runner.PROFILE_2) == 3
+    assert runner._one_fvg_matches_expansion(third_candle_after_expansion, expansion, runner.PROFILE_2) is True
+
+
+def test_legacy_16m_fvg_search_includes_expansion_leg_candles() -> None:
+    runner = _load_backend_runner()
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    swing = _swing(start)
+    expansion = SimpleNamespace(
+        expansion_id="exp_legacy_leg",
+        swing_id=swing.swing_id,
+        timeframe=swing.timeframe,
+        timestamp=swing.right_candle.timestamp,
+        leg_start_timestamp=swing.left_candle.timestamp,
+        direction=SimpleNamespace(value="BEARISH"),
+        expansion_ratio=1.5,
+    )
+    leg_middle_fvg = _fvg_with_id(
+        "fvg_legacy_leg_middle",
+        Timeframe(16),
+        swing.middle_candle.timestamp,
+        related_swing_id=swing.swing_id,
+    )
+
+    assert runner._one_fvg_matches_expansion(leg_middle_fvg, expansion, runner.PROFILE_2) is True
+
+
 def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
     runner = _load_backend_runner()
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -689,7 +737,7 @@ def test_16m_fvg_missing_stays_pending_until_fvg_window_can_close() -> None:
         fvg_12m=(),
         fvg_8m=(),
         candles_8m=(),
-        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(81)),
+        candles_1m=tuple(_candle(index, 100, 101, 99, 100) for index in range(113)),
         profile=runner.PROFILE_2,
     )[0]
 

@@ -21,8 +21,18 @@ def _fake_state() -> SimpleNamespace:
         completed_setups=[],
         resolved_setup_ids=set(),
         resolved_swing_keys=set(),
+        resolved_swing_key_timestamps={},
         setup_history={},
         history_cleared_at=None,
+        stale_trade_skips={},
+        live_setup_detection={
+            "latest_funnel": {},
+            "latest_trade_candidate": {},
+            "processed_trade_keys": [],
+            "stale_trade_candidates_skipped_total": 0,
+            "last_stale_skip": {},
+            "last_blocked_reason": "None",
+        },
     )
 
 
@@ -304,3 +314,38 @@ def test_load_setup_history_for_display_with_corrupt_file_starts_empty(monkeypat
 
     assert (completed_count, invalidated_count) == (0, 0)
     assert state.completed_setups == []
+
+
+def test_clear_startup_funnel_state_clears_only_volatile_attempt_state() -> None:
+    state = _fake_state()
+    active = _make_completed_trade(state, suffix="active_startup", entry_timestamp="2026-06-24T00:00:00+00:00")
+    completed = _make_completed_trade(state, suffix="completed_startup", entry_timestamp="2026-06-24T01:00:00+00:00")
+    state.setups[active.setup_id] = active
+    state.completed_setups.append(completed)
+    state.setup_history[active.setup_id] = [{"to_state": "EXPANSION_16M_CONFIRMED"}]
+    state.stale_trade_skips["swing_old"] = {"symbol": "BTCUSDT"}
+    state.resolved_setup_ids.add(active.setup_id)
+    state.resolved_swing_keys.add("BTCUSDT|BEARISH|2026-06-24T00:00:00+00:00")
+    state.resolved_swing_key_timestamps["BTCUSDT|BEARISH|2026-06-24T00:00:00+00:00"] = "now"
+    state.live_setup_detection["latest_funnel"] = {"BTCUSDT": {"bearish": {"passed_expansion": 1}}}
+    state.live_setup_detection["latest_trade_candidate"] = {"symbol": "BTCUSDT"}
+    state.live_setup_detection["processed_trade_keys"] = ["old_trade"]
+    state.live_setup_detection["stale_trade_candidates_skipped_total"] = 7
+    state.live_setup_detection["last_stale_skip"] = {"symbol": "BCHUSDT"}
+
+    cleared = setup_history_store.clear_startup_funnel_state(state)
+
+    assert cleared["active_setups"] == 1
+    assert cleared["latest_funnel_symbols"] == 1
+    assert state.setups == {}
+    assert state.setup_history == {}
+    assert state.stale_trade_skips == {}
+    assert state.resolved_setup_ids == set()
+    assert state.resolved_swing_keys == set()
+    assert state.resolved_swing_key_timestamps == {}
+    assert state.live_setup_detection["latest_funnel"] == {}
+    assert state.live_setup_detection["latest_trade_candidate"] == {}
+    assert state.live_setup_detection["processed_trade_keys"] == []
+    assert state.live_setup_detection["stale_trade_candidates_skipped_total"] == 0
+    assert state.live_setup_detection["last_stale_skip"] == {}
+    assert state.completed_setups == [completed]

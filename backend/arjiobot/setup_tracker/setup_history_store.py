@@ -219,6 +219,78 @@ def clear_latest_funnel_history(state: Any) -> tuple[int, int]:
     return funnel_count, trade_candidate_count
 
 
+def clear_startup_funnel_state(state: Any) -> dict[str, int]:
+    """Clear deploy/restart-only Setup Radar funnel residue.
+
+    This is intentionally narrower than the manual admin history wipe: it
+    clears active attempt-trace rows, dedup caches, stale-skip bookkeeping, and
+    live funnel diagnostics so the first poll after a deploy recomputes every
+    monitored pair from fresh candles. It does not modify settings, trading
+    mode, risk configuration, margin checks, completed real-trade history, or
+    exchange arming state.
+    """
+    detector_state = getattr(state, "live_setup_detection", None)
+    active_setups = getattr(state, "setups", {})
+    setup_history = getattr(state, "setup_history", {})
+    stale_skips = getattr(state, "stale_trade_skips", {})
+    resolved_setup_ids = getattr(state, "resolved_setup_ids", set())
+    resolved_swing_keys = getattr(state, "resolved_swing_keys", set())
+    resolved_swing_timestamps = getattr(state, "resolved_swing_key_timestamps", {})
+
+    active_count = len(active_setups) if hasattr(active_setups, "__len__") else 0
+    history_count = len(setup_history) if hasattr(setup_history, "__len__") else 0
+    stale_skip_count = len(stale_skips) if hasattr(stale_skips, "__len__") else 0
+    resolved_setup_count = len(resolved_setup_ids) if hasattr(resolved_setup_ids, "__len__") else 0
+    resolved_swing_count = len(resolved_swing_keys) if hasattr(resolved_swing_keys, "__len__") else 0
+
+    if hasattr(active_setups, "clear"):
+        active_setups.clear()
+    if hasattr(setup_history, "clear"):
+        setup_history.clear()
+    if hasattr(stale_skips, "clear"):
+        stale_skips.clear()
+    if hasattr(resolved_setup_ids, "clear"):
+        resolved_setup_ids.clear()
+    if hasattr(resolved_swing_keys, "clear"):
+        resolved_swing_keys.clear()
+    if hasattr(resolved_swing_timestamps, "clear"):
+        resolved_swing_timestamps.clear()
+
+    funnel_count, trade_candidate_count = clear_latest_funnel_history(state)
+    processed_trade_count = 0
+    if isinstance(detector_state, dict):
+        processed_trade_keys = detector_state.get("processed_trade_keys")
+        processed_trade_count = len(processed_trade_keys) if isinstance(processed_trade_keys, list) else 0
+        detector_state["processed_trade_keys"] = []
+        detector_state["stale_trade_candidates_skipped_total"] = 0
+        detector_state["last_stale_skip"] = {}
+        detector_state["last_blocked_reason"] = "Startup funnel state cleared; waiting for first fresh poll."
+
+    logger.warning(
+        "Setup Radar startup funnel state cleared: active_setups=%d setup_history=%d latest_funnel_symbols=%d "
+        "latest_trade_candidate_fields=%d stale_trade_skips=%d resolved_setup_ids=%d resolved_swing_keys=%d "
+        "processed_trade_keys=%d. First poll will rebuild funnel state for all monitored pairs.",
+        active_count,
+        history_count,
+        funnel_count,
+        trade_candidate_count,
+        stale_skip_count,
+        resolved_setup_count,
+        resolved_swing_count,
+        processed_trade_count,
+    )
+    return {
+        "active_setups": active_count,
+        "setup_history": history_count,
+        "latest_funnel_symbols": funnel_count,
+        "latest_trade_candidate_fields": trade_candidate_count,
+        "stale_trade_skips": stale_skip_count,
+        "resolved_setup_ids": resolved_setup_count,
+        "resolved_swing_keys": resolved_swing_count,
+        "processed_trade_keys": processed_trade_count,
+    }
+
+
 def wipe_setup_history(state: Any) -> tuple[int, int]:
     """Fresh start: clear completed_setups/invalidated_setups in memory,
     clear both dedup caches (resolved_setup_ids and resolved_swing_keys),

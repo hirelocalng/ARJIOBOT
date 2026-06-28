@@ -496,9 +496,11 @@ def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_1
     fvg_dir = FVGDirection.BEARISH if direction == "BEARISH" else FVGDirection.BULLISH
     symbol = valid_expansions[0].symbol if valid_expansions else "?"
     same_dir = [f for f in fvg_16m if f.direction is fvg_dir]
+    effective_window = _effective_main_fvg_match_window_candles(profile)
     _logger.debug(
         "[FVG16M-DIAG] %s %s: source_1m_candles=%s fvg_timeframe=16M fvg_16m_total=%d "
-        "direction_matched_candidates=%d strategy_fvgs=%d valid_expansions=%d mode=%s win_candles=%s",
+        "direction_matched_candidates=%d strategy_fvgs=%d valid_expansions=%d mode=%s "
+        "configured_win_candles=%s effective_win_candles=%s min_fvg_size_filter=%s",
         symbol,
         direction,
         source_candle_count if source_candle_count is not None else "UNKNOWN",
@@ -508,28 +510,31 @@ def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_1
         len(valid_expansions),
         profile.main_fvg_match_mode,
         profile.main_fvg_match_window_candles,
+        effective_window,
+        "NONE",
     )
     for exp in valid_expansions:
         found = fvg_by_expansion.get(exp.expansion_id)
         exp_ts = exp.timestamp.isoformat()[:19]
         if found is None:
-            window_end = exp.timestamp + exp.timeframe.duration * profile.main_fvg_match_window_candles
-            in_window = [f for f in same_dir if exp.timestamp <= f.timestamp <= window_end]
+            window_start = _main_fvg_match_window_start(exp)
+            window_end = exp.timestamp + exp.timeframe.duration * effective_window
+            in_window = [f for f in same_dir if window_start <= f.timestamp <= window_end]
             # Sample up to 5 nearest same-direction FVG timestamps for comparison
             nearby_ts = [f.timestamp.isoformat()[:19] for f in same_dir[-5:]]
             _logger.debug(
-                "[FVG16M-DIAG] %s %s exp@%s mode=%s win_candles=%s: NOT_FOUND - "
+                "[FVG16M-DIAG] %s %s exp@%s mode=%s configured_win_candles=%s effective_win_candles=%s: NOT_FOUND - "
                 "%d %s_fvgs total, %d in_window=[%s..%s]. Nearest %s_fvg ts: %s",
                 symbol, direction, exp_ts,
-                profile.main_fvg_match_mode, profile.main_fvg_match_window_candles,
+                profile.main_fvg_match_mode, profile.main_fvg_match_window_candles, effective_window,
                 len(same_dir), direction.lower(), len(in_window),
-                exp_ts, window_end.isoformat()[:19],
+                window_start.isoformat()[:19], window_end.isoformat()[:19],
                 direction.lower(), nearby_ts,
             )
             for fvg in same_dir:
                 _logger.debug(
                     "[FVG16M-DIAG] %s %s exp=%s exp_ts=%s candidate=%s fvg_ts=%s c2=%s c3=%s "
-                    "related_exp=%s related_swing=%s verdict=%s",
+                    "gap_size=%s gap_size_pct=%.6f min_fvg_size_filter=NONE related_exp=%s related_swing=%s verdict=%s",
                     symbol,
                     direction,
                     exp.expansion_id,
@@ -538,6 +543,8 @@ def _log_fvg16m_diagnostics(direction, valid_expansions, fvg_by_expansion, fvg_1
                     fvg.timestamp.isoformat()[:19],
                     fvg.c2_timestamp.isoformat()[:19],
                     fvg.c3_timestamp.isoformat()[:19],
+                    fvg.gap_size,
+                    fvg.gap_size_percent,
                     fvg.related_expansion_id,
                     fvg.related_swing_id,
                     _fvg_expansion_rejection_reason(fvg, exp, profile, direction=fvg_dir),
@@ -1623,6 +1630,8 @@ def _research_expansions(swings):
             "symbol": swing.symbol,
             "timeframe": swing.timeframe,
             "timestamp": c3.timestamp,
+            "leg_start_timestamp": c1.timestamp,
+            "leg_middle_timestamp": c2.timestamp,
             "expansion_ratio": ratio,
             "displacement_distance": displacement,
             "displacement_percent": float(displacement / c3.close * 100) if c3.close else 0.0,
@@ -3032,12 +3041,23 @@ def _one_fvg_matches_expansion(fvg: FairValueGap, expansion, profile: StrategyPr
     if fvg.related_swing_id and fvg.related_swing_id != expansion.swing_id:
         return False
     if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
-        window_end = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
-        return expansion.timestamp <= fvg.timestamp <= window_end
+        window_start = _main_fvg_match_window_start(expansion)
+        window_end = expansion.timestamp + expansion.timeframe.duration * _effective_main_fvg_match_window_candles(profile)
+        return window_start <= fvg.timestamp <= window_end
     if fvg.c2_timestamp != expansion.timestamp:
         return False
     expected_confirmation_candle = expansion.timestamp + expansion.timeframe.duration * (profile.fvg_delay_16m_candles + 1)
     return fvg.c3_timestamp == expected_confirmation_candle
+
+
+def _effective_main_fvg_match_window_candles(profile: StrategyProfile) -> int:
+    if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
+        return max(int(profile.main_fvg_match_window_candles), 3)
+    return int(profile.main_fvg_match_window_candles)
+
+
+def _main_fvg_match_window_start(expansion) -> datetime:
+    return getattr(expansion, "leg_start_timestamp", None) or expansion.timestamp
 
 
 def _candle_dataset_audit(candles) -> dict[str, object]:
@@ -3065,7 +3085,7 @@ def _candle_index(candles, timestamp: datetime | None) -> int | None:
 
 def _expected_main_fvg_completion_index(expansion, profile: StrategyProfile, candles_main_fvg) -> int | None:
     if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
-        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
+        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * _effective_main_fvg_match_window_candles(profile)
     else:
         last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.fvg_delay_16m_candles
     expected_c3 = last_possible_c2 + expansion.timeframe.duration
@@ -3083,7 +3103,7 @@ def _main_fvg_lookup_still_open(expansion, profile: StrategyProfile, candles_1m,
     if not candles_1m:
         return False
     if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
-        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
+        last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * _effective_main_fvg_match_window_candles(profile)
     else:
         last_possible_c2 = expansion.timestamp + expansion.timeframe.duration * profile.fvg_delay_16m_candles
     required_c3_timestamp = last_possible_c2 + expansion.timeframe.duration
@@ -3213,9 +3233,10 @@ def _fvg_expansion_rejection_reason(fvg: FairValueGap, expansion, profile: Strat
     if fvg.related_swing_id and fvg.related_swing_id != expansion.swing_id:
         return f"REJECT_RELATED_SWING expected={expansion.swing_id} actual={fvg.related_swing_id}"
     if profile.main_fvg_match_mode == "LEGACY_EXPANSION_OR_NEXT_CANDLE":
-        window_end = expansion.timestamp + expansion.timeframe.duration * profile.main_fvg_match_window_candles
-        if not (expansion.timestamp <= fvg.timestamp <= window_end):
-            return f"REJECT_TIME_WINDOW fvg_ts={fvg.timestamp.isoformat()} window={expansion.timestamp.isoformat()}..{window_end.isoformat()}"
+        window_start = _main_fvg_match_window_start(expansion)
+        window_end = expansion.timestamp + expansion.timeframe.duration * _effective_main_fvg_match_window_candles(profile)
+        if not (window_start <= fvg.timestamp <= window_end):
+            return f"REJECT_TIME_WINDOW fvg_ts={fvg.timestamp.isoformat()} window={window_start.isoformat()}..{window_end.isoformat()}"
         return "MATCH"
     if fvg.c2_timestamp != expansion.timestamp:
         return f"REJECT_C2_TIMESTAMP expected={expansion.timestamp.isoformat()} actual={fvg.c2_timestamp.isoformat()}"
