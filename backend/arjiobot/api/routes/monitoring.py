@@ -18,6 +18,7 @@ from arjiobot.exchange.bitget_environment import BITGET_CANDLE_REQUEST_LIMIT
 from arjiobot.live_automation import run_live_automation_once
 from arjiobot.live_setup_detection import candles_from_bitget_rows, detect_live_setups_for_symbol
 from arjiobot.market_data.candle_models import Candle
+from arjiobot.setup_tracker.setup_history_store import clear_latest_funnel_history
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ def _activate_monitoring_session(state: ApiState) -> dict[str, object]:
         }
     )
     state.market_polls.clear()
+    clear_latest_funnel_history(state)
     for pair in enabled_pairs:
         symbol = str(pair.get("symbol", "")).upper()
         state.market_polls[symbol] = _pending_poll(symbol)

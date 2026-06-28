@@ -10,7 +10,7 @@ from fastapi import APIRouter
 
 from arjiobot.api.dependencies import get_state
 from arjiobot.api.schemas.common import ok
-from arjiobot.setup_tracker.setup_history_store import wipe_setup_history
+from arjiobot.setup_tracker.setup_history_store import clear_latest_funnel_history, wipe_setup_history
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -33,5 +33,18 @@ def clear_setup_history_endpoint():
             "cleared_completed_count": completed_count,
             "cleared_invalidated_count": invalidated_count,
             "message": "completed_setups and invalidated_setups cleared in memory and on disk.",
+        }
+    )
+
+
+@router.post("/clear-latest-funnel")
+def clear_latest_funnel_endpoint():
+    """Manually clear latest_funnel/latest_trade_candidate diagnostics only."""
+    funnel_count, trade_candidate_count = clear_latest_funnel_history(get_state())
+    return ok(
+        {
+            "cleared_latest_funnel_symbol_count": funnel_count,
+            "cleared_latest_trade_candidate_field_count": trade_candidate_count,
+            "message": "latest_funnel and latest_trade_candidate cleared.",
         }
     )

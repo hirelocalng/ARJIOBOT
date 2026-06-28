@@ -46,3 +46,22 @@ def test_clear_setup_history_endpoint_clears_completed_and_invalidated() -> None
     assert trade.setup_id not in state.resolved_setup_ids, "a manual clear must also reset the seen-setups dedup cache"
     assert state.live_setup_detection["latest_funnel"] == {}
     assert state.live_setup_detection["latest_trade_candidate"] == {}
+
+
+def test_clear_latest_funnel_endpoint_only_clears_funnel_diagnostics() -> None:
+    api = client()
+    state = get_state()
+    state.live_setup_detection["latest_funnel"] = {
+        "ADAUSDT": {"bearish": {"passed_8m_fvg": 1}},
+        "BTCUSDT": {"bullish": {"passed_retrace": 1}},
+    }
+    state.live_setup_detection["latest_trade_candidate"] = {"trade_id": "old_trade", "symbol": "ADAUSDT"}
+    state.completed_setups.append(object())
+
+    result = api.post("/api/admin/clear-latest-funnel").json()["data"]
+
+    assert result["cleared_latest_funnel_symbol_count"] == 2
+    assert result["cleared_latest_trade_candidate_field_count"] == 2
+    assert state.live_setup_detection["latest_funnel"] == {}
+    assert state.live_setup_detection["latest_trade_candidate"] == {}
+    assert len(state.completed_setups) == 1

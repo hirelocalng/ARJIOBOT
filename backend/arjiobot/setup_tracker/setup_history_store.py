@@ -202,6 +202,23 @@ def load_setup_history_for_display(state: Any) -> tuple[int, int]:
     return completed_count, invalidated_count
 
 
+def clear_latest_funnel_history(state: Any) -> tuple[int, int]:
+    """Clear live setup detection's latest funnel diagnostics.
+
+    Returns (latest_funnel_symbol_count, latest_trade_candidate_count).
+    """
+    detector_state = getattr(state, "live_setup_detection", None)
+    if not isinstance(detector_state, dict):
+        return 0, 0
+    latest_funnel = detector_state.get("latest_funnel")
+    latest_trade_candidate = detector_state.get("latest_trade_candidate")
+    funnel_count = len(latest_funnel) if isinstance(latest_funnel, dict) else 0
+    trade_candidate_count = len(latest_trade_candidate) if isinstance(latest_trade_candidate, dict) else 0
+    detector_state["latest_funnel"] = {}
+    detector_state["latest_trade_candidate"] = {}
+    return funnel_count, trade_candidate_count
+
+
 def wipe_setup_history(state: Any) -> tuple[int, int]:
     """Fresh start: clear completed_setups/invalidated_setups in memory,
     clear both dedup caches (resolved_setup_ids and resolved_swing_keys),
@@ -233,9 +250,7 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     state.resolved_setup_ids.clear()
     state.resolved_swing_keys.clear()
     getattr(state, "resolved_swing_key_timestamps", {}).clear()
-    if isinstance(getattr(state, "live_setup_detection", None), dict):
-        state.live_setup_detection["latest_funnel"] = {}
-        state.live_setup_detection["latest_trade_candidate"] = {}
+    clear_latest_funnel_history(state)
     state.history_cleared_at = datetime.now(timezone.utc)
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
