@@ -740,6 +740,58 @@ def test_fresh_trade_candidate_never_returns_an_already_processed_trade() -> Non
     assert second is None
 
 
+def test_trade_key_keeps_opposite_directions_distinct_for_same_entry_and_fvg() -> None:
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    base = {
+        "symbol": "ADAUSDT",
+        "profile_id": "PROFILE_2",
+        "entry_timestamp": (start + timedelta(minutes=9)).isoformat(),
+        "source_12m_fvg_id": "shared_fvg12",
+        "source_16m_swing_timestamp": (start + timedelta(minutes=9)).isoformat(),
+    }
+    bearish = {**base, "direction": "BEARISH", "source_16m_swing_id": "bearish_swing"}
+    bullish = {**base, "direction": "BULLISH", "source_16m_swing_id": "bullish_swing"}
+
+    assert _trade_key(bearish) != _trade_key(bullish)
+
+
+def test_processed_bearish_trade_does_not_block_matching_bullish_candidate() -> None:
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    candles = _minute_candles(start, 10)
+    base = {
+        "symbol": "ADAUSDT",
+        "profile_id": "PROFILE_2",
+        "entry_timestamp": (start + timedelta(minutes=9)).isoformat(),
+        "source_12m_fvg_id": "shared_fvg12",
+        "source_16m_swing_timestamp": (start + timedelta(minutes=9)).isoformat(),
+    }
+    bearish = {**base, "direction": "BEARISH", "source_16m_swing_id": "bearish_swing"}
+    bullish = {**base, "direction": "BULLISH", "source_16m_swing_id": "bullish_swing"}
+    detector_state = {"processed_trade_keys": [_trade_key(bearish)]}
+
+    fresh = _fresh_trade_candidate((bearish, bullish), candles, detector_state)
+
+    assert fresh is not None
+    assert fresh["direction"] == "BULLISH"
+    assert fresh["source_16m_swing_id"] == "bullish_swing"
+
+
+def test_trade_key_keeps_same_direction_distinct_by_16m_swing() -> None:
+    start = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    base = {
+        "symbol": "ADAUSDT",
+        "profile_id": "PROFILE_2",
+        "direction": "BULLISH",
+        "entry_timestamp": (start + timedelta(minutes=9)).isoformat(),
+        "source_12m_fvg_id": "shared_fvg12",
+        "source_16m_swing_timestamp": (start + timedelta(minutes=9)).isoformat(),
+    }
+    first = {**base, "source_16m_swing_id": "bullish_swing_a"}
+    second = {**base, "source_16m_swing_id": "bullish_swing_b"}
+
+    assert _trade_key(first) != _trade_key(second)
+
+
 def test_fresh_trade_candidate_picks_fresh_swing_and_reports_stale_swing_backlog() -> None:
     """Only candidates with fresh swings are executable; older never-seen
     backlog candidates are reported stale instead of queued for later."""

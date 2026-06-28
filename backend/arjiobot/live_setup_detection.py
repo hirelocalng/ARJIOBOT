@@ -475,6 +475,16 @@ def detect_live_setups_for_symbol(state: Any, symbol: str, *, source: str = "MON
 
             fresh_trades = _fresh_trade_candidates(funnel.get("trade_list", ()), candles, detector_state, now=now, swing_timestamps=trace_swing_timestamps)
             if not fresh_trades:
+                _log_trade_candidate_handoff_diagnostics(
+                    symbol,
+                    direction=direction,
+                    trades=funnel.get("trade_list", ()),
+                    candles=candles,
+                    detector_state=detector_state,
+                    now=now,
+                    swing_timestamps=trace_swing_timestamps,
+                    stale=stale,
+                )
                 waiting_reasons.append(f"{direction}: no fresh live trade candidate found")
                 continue
 
@@ -1414,6 +1424,68 @@ def _stale_trade_candidates(
     return tuple(stale)
 
 
+def _log_trade_candidate_handoff_diagnostics(
+    symbol: str,
+    *,
+    direction: str,
+    trades: object,
+    candles: tuple[Candle, ...],
+    detector_state: dict[str, Any],
+    now: datetime | None,
+    swing_timestamps: dict[str, datetime] | None,
+    stale: tuple[dict[str, object], ...],
+) -> None:
+    if not isinstance(trades, (tuple, list)):
+        logger.info("Live detection handoff %s/%s: funnel produced no trade_list candidates", symbol, direction)
+        return
+    reference_now = now or _candidate_now(candles)
+    seen = set(str(key) for key in detector_state.get("processed_trade_keys", []))
+    total = 0
+    risk_rejected = 0
+    already_processed = 0
+    missing_swing_timestamp = 0
+    fresh_available = 0
+    stale_count = 0
+    sample_keys: list[str] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        total += 1
+        key = _trade_key(trade)
+        if len(sample_keys) < 3:
+            sample_keys.append(key)
+        if str(trade.get("outcome")) == "RISK_REJECTED":
+            risk_rejected += 1
+            continue
+        if key in seen:
+            already_processed += 1
+            continue
+        swing_time = _trade_swing_time(trade, swing_timestamps=swing_timestamps)
+        if swing_time is None:
+            missing_swing_timestamp += 1
+            continue
+        if is_fresh_swing(swing_time, reference_now):
+            fresh_available += 1
+        else:
+            stale_count += 1
+    logger.info(
+        "Live detection handoff %s/%s: no fresh executable trade candidate. total=%d risk_rejected=%d "
+        "already_processed=%d missing_swing_timestamp=%d stale=%d stale_recorded=%d fresh_available=%d "
+        "processed_key_count=%d sample_keys=%s",
+        symbol,
+        direction,
+        total,
+        risk_rejected,
+        already_processed,
+        missing_swing_timestamp,
+        stale_count,
+        len(stale),
+        fresh_available,
+        len(seen),
+        sample_keys,
+    )
+
+
 def _record_stale_skip(symbol: str, stale: tuple[dict[str, object], ...], detector_state: dict[str, Any]) -> None:
     timestamps = sorted(str(trade.get("swing_timestamp") or trade.get("entry_timestamp") or "") for trade in stale)
     detector_state["stale_trade_candidates_skipped_total"] = int(detector_state.get("stale_trade_candidates_skipped_total") or 0) + len(stale)
@@ -1619,6 +1691,8 @@ def _trade_key(trade: dict[str, object]) -> str:
         (
             str(trade.get("symbol", "")).upper(),
             str(trade.get("selected_strategy_profile") or trade.get("profile_id") or ""),
+            str(trade.get("direction") or "").upper(),
+            str(trade.get("source_16m_swing_id") or ""),
             str(trade.get("entry_timestamp") or ""),
             str(trade.get("source_12m_fvg_id") or trade.get("12m_fvg_id") or ""),
         )
