@@ -11,7 +11,7 @@ from arjiobot.api.dependencies import bootstrap_live_trading_from_env, get_state
 from arjiobot.api.routes import ROUTERS
 from arjiobot.api.routes.monitoring import resume_monitoring_if_enabled
 from arjiobot.profile_freeze import PROFILE_FREEZE_RUNTIME_WARNING, assert_profile_freeze
-from arjiobot.setup_tracker.setup_history_store import wipe_setup_history
+from arjiobot.setup_tracker.setup_history_store import clear_latest_funnel_history, load_setup_history_for_display
 
 
 logger = logging.getLogger(__name__)
@@ -19,12 +19,15 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """Create Backend API Routes app."""
-    # Wipe setup radar history on every startup so resolved_swing_keys,
-    # resolved_setup_ids, completed_setups, and invalidated_setups all start
-    # from a clean slate — stale keys from a previous long-running session
-    # cannot accumulate in resolved_swing_keys and block detection.
-    # IN PROGRESS (state.setups) is never touched by this.
-    wipe_setup_history(get_state())
+    # On every deploy: reload completed/invalidated history from disk so the
+    # UI shows prior context immediately, but clear latest_funnel so the first
+    # poll populates it fresh. Dedup caches (resolved_swing_keys /
+    # resolved_setup_ids) start empty by design — load_setup_history_for_display
+    # intentionally leaves them unset so the pre-funnel staleness gate handles
+    # old swings on the first poll.
+    state = get_state()
+    load_setup_history_for_display(state)
+    clear_latest_funnel_history(state)
     assert_profile_freeze()
     logger.warning(PROFILE_FREEZE_RUNTIME_WARNING)
     app = FastAPI(title="ArjioBot Backend API", version="1.0.0")
@@ -47,6 +50,6 @@ def create_app() -> FastAPI:
 
     for router in ROUTERS:
         app.include_router(router)
-    bootstrap_live_trading_from_env(get_state())
-    resume_monitoring_if_enabled(get_state())
+    bootstrap_live_trading_from_env(state)
+    resume_monitoring_if_enabled(state)
     return app
