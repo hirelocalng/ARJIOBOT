@@ -33,6 +33,7 @@ _cleanup_quarantine/
 
 # Local temp/log artifacts
 .pytest_tmp/
+.pytest-tmp/
 backend/.pytest_tmp/
 backend/data/
 *.log

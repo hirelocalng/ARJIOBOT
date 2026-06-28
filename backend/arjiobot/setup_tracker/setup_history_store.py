@@ -205,7 +205,7 @@ def load_setup_history_for_display(state: Any) -> tuple[int, int]:
 def wipe_setup_history(state: Any) -> tuple[int, int]:
     """Fresh start: clear completed_setups/invalidated_setups in memory,
     clear both dedup caches (resolved_setup_ids and resolved_swing_keys),
-    record history_cleared_at, and overwrite the persisted file with the
+    clear latest_funnel diagnostics, record history_cleared_at, and overwrite the persisted file with the
     empty shape - all in this one synchronous call, so no request in between
     can ever observe a partially-cleared state. Called by the manual Clear
     History endpoint; process boot loads JSON history for display only and
@@ -233,6 +233,9 @@ def wipe_setup_history(state: Any) -> tuple[int, int]:
     state.resolved_setup_ids.clear()
     state.resolved_swing_keys.clear()
     getattr(state, "resolved_swing_key_timestamps", {}).clear()
+    if isinstance(getattr(state, "live_setup_detection", None), dict):
+        state.live_setup_detection["latest_funnel"] = {}
+        state.live_setup_detection["latest_trade_candidate"] = {}
     state.history_cleared_at = datetime.now(timezone.utc)
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)

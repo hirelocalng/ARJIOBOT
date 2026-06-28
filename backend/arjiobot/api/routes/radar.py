@@ -52,9 +52,15 @@ _DISPLAY_STAGE_BY_INTERNAL_STATE: dict[str, tuple[str, float]] = {
 def _is_waiting_retrace(stage_value: str, setup) -> bool:
     """FVG_8M_CONFIRMED covers both "8M FVG just confirmed" and "retrace candle
     found, now waiting for the entry tap" today - distinguished only by the
-    retrace_candle_found flag _attempt_traces_for_direction sets on the trace
-    (carried into setup.metadata by _apply_one_attempt_trace)."""
-    return stage_value == "FVG_8M_CONFIRMED" and (setup.metadata or {}).get("retrace_candle_found") == "YES"
+    retrace_candle_found flag and the entry-zone touch diagnostics
+    _attempt_traces_for_direction sets on the trace (carried into
+    setup.metadata by _apply_one_attempt_trace)."""
+    metadata = setup.metadata or {}
+    return stage_value == "FVG_8M_CONFIRMED" and (
+        metadata.get("retrace_candle_found") == "YES"
+        or metadata.get("entry_zone_touched") == "True"
+        or metadata.get("retrace_waiting_reason") == "ENTRY_ZONE_TOUCHED"
+    )
 
 
 def _display_current_stage(setup) -> str:

@@ -983,6 +983,18 @@ def test_progress_pct_advances_through_every_stage_including_waiting_retrace() -
         assert record["current_stage"] == expected_stage, f"stage {stage} (retrace_found={retrace_found})"
         assert record["progress_pct"] == expected_pct, f"stage {stage} (retrace_found={retrace_found})"
 
+    state = _fake_state("ADAUSDT", ())
+    trace = {
+        **_swing_trace("swing_entry_zone_touch", stage="FVG_8M_CONFIRMED", progress_percent=80.0),
+        "entry_zone_touched": True,
+        "retrace_waiting_reason": "ENTRY_ZONE_TOUCHED",
+    }
+    _apply_attempt_traces(state, "ADAUSDT", (trace,), profile_id="PROFILE_2", timeframe_profile_id="DEFAULT_16_12_8", selected_tp_model="", source="MONITORING_POLL")
+    [setup] = _all_tracked(state)
+    record = radar_record(setup)
+    assert record["current_stage"] == "WAITING_RETRACE"
+    assert record["progress_pct"] == 85.0
+
     # ENTRY_READY/100% display mapping is exercised through the real trade
     # path (_setup_from_trade), not an attempt trace - the attempt-tracer
     # reaching ENTRY_READY structurally is a different, INVALIDATED/

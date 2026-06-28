@@ -35,6 +35,8 @@ def test_clear_setup_history_endpoint_clears_completed_and_invalidated() -> None
     state.completed_setups.insert(0, trade)
     state.resolved_setup_ids.add(trade.setup_id)
     state.setup_history[trade.setup_id] = [{"from_state": None, "to_state": "ENTRY_READY"}]
+    state.live_setup_detection["latest_funnel"] = {"ADAUSDT": {"bearish": {"passed_8m_fvg": 1}}}
+    state.live_setup_detection["latest_trade_candidate"] = {"trade_id": "old_trade"}
 
     result = api.post("/api/admin/clear-setup-history").json()["data"]
 
@@ -42,3 +44,5 @@ def test_clear_setup_history_endpoint_clears_completed_and_invalidated() -> None
     assert state.completed_setups == []
     assert trade.setup_id not in state.setup_history
     assert trade.setup_id not in state.resolved_setup_ids, "a manual clear must also reset the seen-setups dedup cache"
+    assert state.live_setup_detection["latest_funnel"] == {}
+    assert state.live_setup_detection["latest_trade_candidate"] == {}
